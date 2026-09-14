@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Analysis {
+  id                   Int     @id @default(autoincrement())
+  symbol               String  @unique
+  trend_lower          String?
+  tf_lower             String?
+  trend_upper          String?
+  tf_upper             String?
+  ext_bsl_sweep        Boolean?
+  ext_supply_touch     Boolean?
+  int_bsl_sweep        Boolean?
+  sellers_induced      Boolean?
+  int_ssl_sweep        Boolean?
+  ssl_price            Float?
+  bsl_price            Float?
+  bsl_touched          Boolean?
+  ssl_touched          Boolean?
+  passed_bsl_after_ssl Boolean?
+  choch_up             String?
+  notes                String? @default("")
+  notify_enabled       Boolean? @default(true)
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+}
+
+model CoinFlag {
+  symbol     String   @id
+  halal      Boolean  @default(true)
+  barcode    Boolean  @default(false)
+  updated_at DateTime @updatedAt
+}
+
+model Settings {
+  id                 Int      @id @default(1)
+  quote              String   @default("USDT")
+  notify_timeout_min Int      @default(30)
+  sound_enabled      Boolean  @default(true)
+  sort_config        String   @default("{}")
+}
+
+model EventLog {
+  id      Int      @id @default(autoincrement())
+  ts      DateTime @default(now())
+  symbol  String
+  type    String
+  message String
+  meta    String?
+
+  @@index([ts])
+  @@index([symbol])
+}

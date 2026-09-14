@@ -1,0 +1,394 @@
+import express from 'express';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { WebSocketServer } from 'ws';
+import db from './db.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 8787;
+
+const ANALYSIS_FIELDS = [
+  'trend_lower', 'tf_lower', 'trend_upper', 'tf_upper',
+  'ext_bsl_sweep', 'ext_supply_touch', 'int_bsl_sweep', 'sellers_induced',
+  'int_ssl_sweep', 'ssl_price', 'bsl_price', 'bsl_touched', 'ssl_touched',
+  'passed_bsl_after_ssl', 'choch_up', 'notes', 'notify_enabled'
+];
+
+const BOOL_FIELDS = ['ext_bsl_sweep', 'ext_supply_touch', 'int_bsl_sweep', 'sellers_induced', 'int_ssl_sweep',
+  'bsl_touched', 'ssl_touched', 'passed_bsl_after_ssl', 'notify_enabled'];
+
+const toBool = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  return !!v;
+};
+
+const normalizeAnalysis = (body, { forCreate = false } = {}) => {
+  const out = {};
+  for (const f of ANALYSIS_FIELDS) {
+    const v = body[f];
+    if (BOOL_FIELDS.includes(f)) {
+      out[f] = toBool(v);
+    } else if (['ssl_price', 'bsl_price'].includes(f)) {
+      out[f] = v === null || v === undefined || v === '' ? null : Number(v);
+      if (Number.isNaN(out[f])) out[f] = null;
+    } else {
+      out[f] = v === undefined ? null : v;
+    }
+  }
+  if (forCreate) {
+    // أعمدة NOT NULL: قيم افتراضية عند الإنشاء
+    if (out.bsl_touched === null) out.bsl_touched = false;
+    if (out.ssl_touched === null) out.ssl_touched = false;
+    if (out.passed_bsl_after_ssl === null) out.passed_bsl_after_ssl = false;
+    if (out.notify_enabled === null) out.notify_enabled = true;
+    if (out.notes === null || out.notes === undefined) out.notes = '';
+  }
+  return out;
+};
+
+const serializeAnalysis = (a) => ({
+  ...a,
+  ssl_price: a.ssl_price === null || a.ssl_price === undefined ? null : Number(a.ssl_price),
+  bsl_price: a.bsl_price === null || a.bsl_price === undefined ? null : Number(a.bsl_price),
+  ext_bsl_sweep: a.ext_bsl_sweep === null ? null : (a.ext_bsl_sweep ? 1 : 0),
+  ext_supply_touch: a.ext_supply_touch === null ? null : (a.ext_supply_touch ? 1 : 0),
+  int_bsl_sweep: a.int_bsl_sweep === null ? null : (a.int_bsl_sweep ? 1 : 0),
+  sellers_induced: a.sellers_induced === null ? null : (a.sellers_induced ? 1 : 0),
+  int_ssl_sweep: a.int_ssl_sweep === null ? null : (a.int_ssl_sweep ? 1 : 0),
+  bsl_touched: a.bsl_touched ? 1 : 0,
+  ssl_touched: a.ssl_touched ? 1 : 0,
+  passed_bsl_after_ssl: a.passed_bsl_after_ssl ? 1 : 0,
+  notify_enabled: a.notify_enabled ? 1 : 0
+});
+
+const serializeFlag = (f) => ({
+  ...f,
+  halal: f.halal ? 1 : 0,
+  barcode: f.barcode ? 1 : 0
+});
+
+const serializeSettings = (s) => ({
+  ...s,
+  sound_enabled: s.sound_enabled ? 1 : 0
+});
+
+const handle = (fn) => (req, res) => {
+  fn(req, res).catch(e => {
+    console.error('[api]', e.message);
+    if (String(e.message).includes('duplicate key') || String(e.message).includes('analyses_symbol_key')) {
+      return res.status(409).json({ error: 'symbol already exists' });
+    }
+    res.status(500).json({ error: e.message });
+  });
+};
+
+// ---- analyses CRUD ----
+app.get('/api/analyses', handle(async (_req, res) => {
+  const rows = await db.analyses.list();
+  res.json(rows.map(serializeAnalysis));
+}));
+
+app.post('/api/analyses', handle(async (req, res) => {
+  const { symbol } = req.body;
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+  const a = normalizeAnalysis(req.body, { forCreate: true });
+  const now = Date.now();
+  const rows = await db.analyses.create({ symbol: symbol.toUpperCase(), ...a, created_at: now, updated_at: now });
+  res.json(serializeAnalysis(rows[0]));
+}));
+
+app.put('/api/analyses/:id', handle(async (req, res) => {
+  const id = Number(req.params.id);
+  const existing = (await db.analyses.list()).find(r => r.id === id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  const a = normalizeAnalysis({ ...serializeAnalysis(existing), ...req.body });
+  const rows = await db.analyses.update(id, a);
+  if (!rows.length) return res.status(404).json({ error: 'not found' });
+  res.json(serializeAnalysis(rows[0]));
+}));
+
+app.delete('/api/analyses/:id', handle(async (req, res) => {
+  await db.analyses.remove(Number(req.params.id));
+  res.json({ ok: true });
+}));
+
+// ---- coin flags ----
+app.get('/api/coin-flags', handle(async (_req, res) => {
+  const rows = await db.coinFlags.list();
+  res.json(rows.map(serializeFlag));
+}));
+
+app.put('/api/coin-flags/:symbol', handle(async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const all = await db.coinFlags.list();
+  const existing = all.find(f => f.symbol === symbol);
+  const halal = req.body.halal === undefined ? (existing ? existing.halal : true) : !!req.body.halal;
+  const barcode = req.body.barcode === undefined ? (existing ? existing.barcode : false) : !!req.body.barcode;
+  const rows = await db.coinFlags.upsert({ symbol, halal, barcode, updated_at: Date.now() });
+  res.json(serializeFlag(rows[0]));
+}));
+
+// ---- coin shariah (التصنيف الشرعي) ----
+app.get('/api/shariah', handle(async (_req, res) => {
+  const rows = await db.coinShariah.list();
+  res.json(rows.map(r => ({
+    ...r,
+    facts: typeof r.facts === 'string' ? JSON.parse(r.facts || '{}') : (r.facts || {}),
+    reasons: typeof r.reasons === 'string' ? JSON.parse(r.reasons || '[]') : (r.reasons || []),
+    evidence: typeof r.evidence === 'string' ? JSON.parse(r.evidence || '[]') : (r.evidence || [])
+  })));
+}));
+
+app.put('/api/shariah/:symbol', handle(async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const body = {
+    verdict: req.body.verdict || 'uncertain',
+    facts: req.body.facts !== undefined ? (typeof req.body.facts === 'string' ? req.body.facts : JSON.stringify(req.body.facts)) : '{}',
+    reasons: req.body.reasons !== undefined ? (typeof req.body.reasons === 'string' ? req.body.reasons : JSON.stringify(req.body.reasons)) : '[]',
+    evidence: req.body.evidence !== undefined ? (typeof req.body.evidence === 'string' ? req.body.evidence : JSON.stringify(req.body.evidence)) : '[]',
+    source: req.body.source || null,
+    notes: req.body.notes || null,
+    updated_at: Date.now()
+  };
+  const rows = await db.coinShariah.upsert({ symbol, ...body });
+  res.json(rows[0]);
+}));
+
+app.delete('/api/shariah/:symbol', handle(async (req, res) => {
+  await db.coinShariah.remove(req.params.symbol.toUpperCase());
+  res.json({ ok: true });
+}));
+
+// ---- settings ----
+const ensureSettings = async () => {
+  let rows = await db.settings.get();
+  if (!rows.length) {
+    rows = await db.settings.create({ id: 1, quote: 'USDT', notify_timeout_min: 30, sound_enabled: true, sort_config: '{}' });
+  }
+  return rows[0];
+};
+
+app.get('/api/settings', handle(async (_req, res) => {
+  res.json(serializeSettings(await ensureSettings()));
+}));
+
+app.put('/api/settings', handle(async (req, res) => {
+  await ensureSettings();
+  const cur = (await db.settings.get())[0];
+  const data = {
+    quote: req.body.quote || cur.quote,
+    notify_timeout_min: req.body.notify_timeout_min !== undefined ? Number(req.body.notify_timeout_min) : cur.notify_timeout_min,
+    sound_enabled: req.body.sound_enabled === undefined ? cur.sound_enabled : !!req.body.sound_enabled,
+    sort_config: req.body.sort_config !== undefined ? (typeof req.body.sort_config === 'string' ? req.body.sort_config : JSON.stringify(req.body.sort_config)) : cur.sort_config
+  };
+  const rows = await db.settings.update(data);
+  res.json(serializeSettings(rows[0]));
+}));
+
+// ---- events ----
+app.get('/api/events', handle(async (req, res) => {
+  const rows = await db.events.list(req.query);
+  res.json(rows);
+}));
+
+app.post('/api/events', handle(async (req, res) => {
+  const { symbol, type, message, meta } = req.body;
+  if (!symbol || !type || !message) return res.status(400).json({ error: 'symbol, type, message required' });
+  const rows = await db.events.create({
+    symbol: symbol.toUpperCase(), type, message,
+    meta: meta ? JSON.stringify(meta) : null,
+    ts: Date.now()
+  });
+  res.json(rows[0]);
+}));
+
+// ---- symbols (قائمة أزواج السبوت المخزنة مسبقاً) ----
+const CHUNK = 500;
+
+const syncSymbols = async () => {
+  const info = await db.binance.exchangeInfo();
+  const now = Date.now();
+  const rows = info.symbols
+    .filter(s => s.status === 'TRADING' && s.isSpotTradingAllowed)
+    .map(s => {
+      const pf = s.filters.find(f => f.filterType === 'PRICE_FILTER');
+      return {
+        symbol: s.symbol,
+        base: s.baseAsset,
+        quote: s.quoteAsset,
+        tick_size: pf?.tickSize ? parseFloat(pf.tickSize) : 0.01,
+        status: s.status,
+        updated_at: now
+      };
+    });
+  let saved = 0;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await db.symbols.upsertChunk(rows.slice(i, i + CHUNK));
+    saved += Math.min(CHUNK, rows.length - i);
+  }
+  return { total: rows.length, saved };
+};
+
+const isStale = async () => {
+  const last = await db.symbols.lastUpdated();
+  return Date.now() - last > 24 * 60 * 60 * 1000;
+};
+
+app.get('/api/symbols', handle(async (req, res) => {
+  const quote = req.query.quote || 'USDT';
+  const rows = await db.symbols.list(quote);
+  res.json(rows);
+}));
+
+app.get('/api/symbols/meta', handle(async (_req, res) => {
+  const lastUpdated = await db.symbols.lastUpdated();
+  res.json({ last_updated: lastUpdated, stale: await isStale() });
+}));
+
+app.post('/api/symbols/sync', handle(async (_req, res) => {
+  const r = await syncSymbolsDiff();
+  if (r.changed > 0) {
+    broadcast({ type: 'symbols_updated', total: r.total, changed: r.changed, new_bases: r.newBases });
+  }
+  res.json({ total: r.total, changed: r.changed, new_bases: r.newBases.length });
+}));
+
+// ---- وكيل شموع بينانس (REST) ----
+app.get('/api/klines', handle(async (req, res) => {
+  const { symbol, interval, limit } = req.query;
+  if (!symbol || !interval) return res.status(400).json({ error: 'symbol and interval required' });
+  const raw = await db.binance.klines(symbol, interval, Math.min(Number(limit) || 200, 1000));
+  const candles = raw.map(k => ({
+    time: Math.floor(Number(k[0]) / 1000),
+    open: parseFloat(String(k[1])),
+    high: parseFloat(String(k[2])),
+    low: parseFloat(String(k[3])),
+    close: parseFloat(String(k[4]))
+  }));
+  res.json(candles);
+}));
+
+// في الإنتاج: خدمة الواجهة المبنية (client/dist) من نفس العملية
+const distDir = path.join(__dirname, '..', 'client', 'dist');
+app.use(express.static(distDir));
+app.use((req, res, next) => {
+  if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    res.sendFile('index.html', { root: distDir });
+  } else {
+    next();
+  }
+});
+
+// ---- خادم WebSocket لبث تحديثات قائمة الأزواج لحظياً ----
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws' });
+
+const wsClients = new Set();
+const broadcast = (obj) => {
+  const payload = JSON.stringify(obj);
+  for (const ws of wsClients) {
+    if (ws.readyState === 1 /* OPEN */) {
+      try { ws.send(payload); } catch { /* تجاهل العميل المفقود */ }
+    }
+  }
+};
+
+wss.on('connection', (ws) => {
+  wsClients.add(ws);
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  // ترحيب بالميتا الحالية
+  void (async () => {
+    try {
+      const lastUpdated = await db.symbols.lastUpdated();
+      ws.send(JSON.stringify({ type: 'hello', last_updated: lastUpdated }));
+    } catch { /* ignore */ }
+  })();
+  ws.on('close', () => wsClients.delete(ws));
+  ws.on('error', () => wsClients.delete(ws));
+});
+
+// heartbeat: تنظيف الاتصالات الميتة كل 30 ثانية
+setInterval(() => {
+  for (const ws of wsClients) {
+    if (ws.isAlive === false) { try { ws.terminate(); } catch { /* ignore */ } wsClients.delete(ws); continue; }
+    ws.isAlive = false;
+    try { ws.ping(); } catch { /* ignore */ }
+  }
+}, 30000);
+
+server.listen(PORT, () => console.log(`[server] listening on http://localhost:${PORT} (+ ws:/ws)`));
+
+// ---- مزامنة دورية بالفرق + بث التغييرات لحظياً ----
+const SYNC_MS = (Number(process.env.SYMBOLS_SYNC_MIN) || 30) * 60 * 1000;
+
+const buildRowsFromInfo = (info) => {
+  const now = Date.now();
+  return info.symbols
+    .filter(s => s.status === 'TRADING' && s.isSpotTradingAllowed)
+    .map(s => {
+      const pf = s.filters.find(f => f.filterType === 'PRICE_FILTER');
+      return {
+        symbol: s.symbol,
+        base: s.baseAsset,
+        quote: s.quoteAsset,
+        tick_size: pf?.tickSize ? parseFloat(pf.tickSize) : 0.01,
+        status: s.status,
+        updated_at: now
+      };
+    });
+};
+
+/** مزامنة بالفرق: تحفظ الجديد/المتغير فقط وتُرجع تفاصيل الأزواج الجديدة */
+const syncSymbolsDiff = async () => {
+  const info = await db.binance.exchangeInfo();
+  const fresh = buildRowsFromInfo(info);
+  const existing = await db.symbols.list(); // كل الاقتباسات (حد 5000 يغطي القائمة كاملة)
+  const existingMap = new Map(existing.map(r => [r.symbol, r]));
+  const toSave = fresh.filter(r => {
+    const old = existingMap.get(r.symbol);
+    return !old || old.tick_size !== r.tick_size || old.status !== r.status;
+  });
+  const knownBases = new Set(existing.map(r => r.base));
+  const newBases = [...new Set(fresh.filter(r => !knownBases.has(r.base)).map(r => r.base))];
+
+  for (let i = 0; i < toSave.length; i += CHUNK) {
+    await db.symbols.upsertChunk(toSave.slice(i, i + CHUNK));
+  }
+  return { total: fresh.length, changed: toSave.length, newBases };
+};
+
+const periodicSync = async () => {
+  try {
+    const r = await syncSymbolsDiff();
+    if (r.changed > 0) {
+      console.log(`[symbols] periodic sync: ${r.changed} changed of ${r.total}, new bases: ${r.newBases.join(', ') || 'none'}`);
+      broadcast({ type: 'symbols_updated', total: r.total, changed: r.changed, new_bases: r.newBases });
+    }
+  } catch (e) {
+    console.error('[symbols] periodic sync failed:', e.message);
+  }
+};
+
+setInterval(periodicSync, SYNC_MS);
+
+// مزامنة تلقائية عند البدء إذا كانت فارغة أو متقادمة + بث فوري لأي جديد
+void (async () => {
+  try {
+    if (await isStale()) {
+      console.log('[symbols] syncing (empty or stale >24h)…');
+      const r = await syncSymbolsDiff();
+      console.log(`[symbols] startup sync: ${r.changed} changed of ${r.total}, new bases: ${r.newBases.join(', ') || 'none'}`);
+      if (r.changed > 0) {
+        broadcast({ type: 'symbols_updated', total: r.total, changed: r.changed, new_bases: r.newBases });
+      }
+    }
+  } catch (e) {
+    console.error('[symbols] startup sync failed:', e.message);
+  }
+})();
