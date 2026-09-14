@@ -4,6 +4,7 @@ import type { Analysis, CoinFlag, CoinShariahRow, Candle, Settings } from '../li
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, detectBarcode, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
+import { notifyBrowser, playAlarm } from '../lib/notifications';
 
 const API = '/api';
 
@@ -26,7 +27,7 @@ interface StoreState {
   settings: Settings | null;
   screen: Screen;
   chartModal: { symbol: string; tfLower: string | null; tfUpper: string | null } | null;
-  toasts: { id: number; text: string; kind: 'info' | 'alert' }[];
+  toasts: { id: number; text: string; kind: 'info' | 'alert'; action?: { label: string; onClick: () => void } }[];
   streams: BinanceStreams | null;
   soundEnabled: boolean;
   syncing: boolean;
@@ -38,7 +39,7 @@ interface StoreState {
   setScreen: (s: Screen) => void;
   openChart: (symbol: string, tfLower: string | null, tfUpper: string | null) => void;
   closeChart: () => void;
-  addAnalysis: (symbol: string) => Promise<void>;
+  addAnalysis: (symbol: string, extras?: Partial<Analysis>) => Promise<void>;
   updateAnalysis: (id: number, patch: Partial<Analysis>) => Promise<void>;
   deleteAnalysis: (id: number) => Promise<void>;
   setFlag: (symbol: string, patch: { halal?: boolean; barcode?: boolean }) => Promise<void>;
@@ -47,7 +48,7 @@ interface StoreState {
   deleteShariah: (symbol: string) => Promise<void>;
   saveSettings: (patch: Partial<Settings>) => Promise<void>;
   toggleTheme: () => void;
-  pushToast: (text: string, kind?: 'info' | 'alert') => void;
+  pushToast: (text: string, kind?: 'info' | 'alert', action?: { label: string; onClick: () => void }) => void;
   dismissToast: (id: number) => void;
   subscribePrice: (symbol: string) => void;
   unsubscribePrice: (symbol: string) => void;
@@ -59,6 +60,23 @@ let streams: BinanceStreams | null = null;
 let toastId = 0;
 let symbolsChannelStarted = false;
 const priceUnsubs = new Map<string, () => void>();
+const haramAlerted = new Set<string>();
+
+/** تنبيه تحوّل حكم عملة متابَعة إلى «حرام» — مع اقتراح إزالة بضغطة واحدة (القرار للمستخدم) */
+function alertIfHaramFollowed(symbol: string, verdict: string) {
+  const st = useStore.getState();
+  const followed = st.analyses.find(a => a.symbol === symbol);
+  if (!followed || verdict !== 'haram' || haramAlerted.has(symbol)) return;
+  haramAlerted.add(symbol);
+  const id = followed.id;
+  notifyBrowser(`تنبيه شرعي: ${symbol}`, 'تغيّر التصنيف إلى «حرام» — يُقترح الإزالة من اللوحة');
+  playAlarm(2);
+  useStore.getState().pushToast(
+    `${symbol}: تغيّر تصنيفها الشرعي إلى «حرام» حسب البيانات — يُقترح إزالتها من لوحة المتابعة`,
+    'alert',
+    { label: 'إزالة من اللوحة', onClick: () => void useStore.getState().deleteAnalysis(id) }
+  );
+}
 
 export const useStore = create<StoreState>((set, get) => ({
   symbols: [],
@@ -98,6 +116,13 @@ export const useStore = create<StoreState>((set, get) => ({
       for (const r of sh) shMap[r.symbol] = r;
       set({ shariah: shMap, shariahLoaded: true });
     } catch { set({ shariahLoaded: true }); }
+    // فحص أولي: إن كانت أي عملة متابَعة حكمها المخزن «حرام» ننبّه مرة واحدة
+    try {
+      for (const a of get().analyses) {
+        const row = get().shariah[a.symbol];
+        alertIfHaramFollowed(a.symbol, row?.verdict ?? '');
+      }
+    } catch { /* ignore */ }
     // جلب قائمة الأزواج المخزنة + تاريخ آخر مزامنة
     const quote = settings?.quote ?? 'USDT';
     try {
@@ -173,15 +198,15 @@ export const useStore = create<StoreState>((set, get) => ({
   openChart: (symbol, tfLower, tfUpper) => set({ chartModal: { symbol, tfLower, tfUpper } }),
   closeChart: () => set({ chartModal: null }),
 
-  addAnalysis: async (symbol) => {
-    const row = await api.createAnalysis({ symbol: symbol.toUpperCase() });
+  addAnalysis: async (symbol, extras) => {
+    const row = await api.createAnalysis({ symbol: symbol.toUpperCase(), ...(extras ?? {}) });
     set((st) => ({ analyses: [row, ...st.analyses] }));
     get().subscribePrice(row.symbol);
     // فحص باركود تلقائي فور الإضافة: الوسم الحتمي إن وُجد النمط (بلا تدخل يدوي)
     void detectBarcode(row.symbol).then(({ barcode }) => {
       if (barcode) {
         void get().setFlag(row.symbol, { barcode: true });
-        get().pushToast(`${row.symbol}: نمط «باركود» على فريم الدقيقة — وُسمت تلقائياً (يمكن مراجعة الوسم من الإعدادات)`);
+        get().pushToast(`${row.symbol}: نمط «باركود» على فريم الدقيقة — وُسمت تلقائياً وسيظهر تحذير عند فتح شارتها`);
       }
     }).catch(() => { /* الفحص لا يمنع الإضافة */ });
   },
@@ -215,6 +240,7 @@ export const useStore = create<StoreState>((set, get) => ({
   saveShariah: async (symbol, row) => {
     const saved = await api.setShariah(symbol, row);
     set((st) => ({ shariah: { ...st.shariah, [symbol]: saved } }));
+    alertIfHaramFollowed(symbol, saved.verdict);
   },
   deleteShariah: async (symbol) => {
     await api.deleteShariah(symbol);
@@ -237,10 +263,10 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ theme });
   },
 
-  pushToast: (text, kind = 'info') => {
+  pushToast: (text, kind = 'info', action) => {
     const id = ++toastId;
-    set((st) => ({ toasts: [...st.toasts, { id, text, kind }] }));
-    setTimeout(() => get().dismissToast(id), 8000);
+    set((st) => ({ toasts: [...st.toasts, { id, text, kind, action }] }));
+    setTimeout(() => get().dismissToast(id), 12000);
   },
   dismissToast: (id) => set((st) => ({ toasts: st.toasts.filter(t => t.id !== id) })),
 

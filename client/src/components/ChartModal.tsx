@@ -108,6 +108,8 @@ export default function ChartModal() {
   const update = useStore(s => s.updateAnalysis);
   const analysis = analyses.find(a => a.symbol === modal.symbol);
   const livePrice = useStore(s => s.prices[modal.symbol]);
+  const isBarcode = useStore(s => s.flags[modal.symbol]?.barcode === 1 || s.flags[modal.symbol.replace(/USDT$|USDC$|FDUSD$|BTC$|ETH$/, '')]?.barcode === 1);
+  const [barcodeAck, setBarcodeAck] = useState(false);
 
   const [tfLower, setTfLower] = useState(analysis?.tf_lower ?? '15m');
   const [tfUpper, setTfUpper] = useState(analysis?.tf_upper ?? '4h');
@@ -161,6 +163,21 @@ export default function ChartModal() {
         </div>
 
         <div className="p-5">
+          {isBarcode && !barcodeAck && (
+            <div
+              className="mb-5 rounded-xl p-3.5 flex items-start justify-between gap-3 flex-wrap"
+              style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.35)' }}
+              role="alert"
+            >
+              <div className="text-[12.5px] leading-relaxed flex-1" style={{ color: '#fbbf24' }}>
+                <b>تحذير «باركود»:</b> شموع الدقيقة لهذه العملة متقطعة وغير مستقرة، فالشارت قد يبدو مضللاً.
+                مراقبة SSL/BSL تعمل على السعر الحي المباشر ولا تتأثر — والوسم تحذيري فقط ولا يستبعد العملة.
+              </div>
+              <button className="btn btn-accent !py-1.5 !px-3 text-[11px]" onClick={() => setBarcodeAck(true)}>
+                فهمت
+              </button>
+            </div>
+          )}
           {analysis && (
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mb-5 text-[13px]" style={{ color: 'var(--text-2)' }}>
               <label className="flex items-center gap-2">

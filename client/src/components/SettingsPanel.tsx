@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
-import { api } from '../lib/api';
 import { requestNotificationPermission } from '../lib/notifications';
 import { evaluateShariah, factsForSymbol, DEFAULT_FACTS } from '../lib/shariah';
-import type { CoinFlag } from '../lib/types';
 import Toggle from './ui/Toggle';
 import ShariahBadge from './ShariahBadge';
 
@@ -20,39 +18,10 @@ export default function SettingsPanel() {
   const settings = useStore(s => s.settings);
   const saveSettings = useStore(s => s.saveSettings);
   const analyses = useStore(s => s.analyses);
-  const flags = useStore(s => s.flags);
-  const symbols = useStore(s => s.symbols);
 
   const [notifPerm, setNotifPerm] = useState<NotificationPermission | 'unsupported'>(
     'Notification' in window ? Notification.permission : 'unsupported'
   );
-  const [coinQuery, setCoinQuery] = useState('');
-  const [localFlags, setLocalFlags] = useState<Record<string, CoinFlag>>({});
-
-  useEffect(() => { setLocalFlags(flags); }, [flags]);
-
-  const manageList = useMemo(() => {
-    const q = coinQuery.trim().toUpperCase();
-    const fromSymbols = symbols.map(s => s.base);
-    const bases = new Set<string>([...Object.keys(localFlags), ...fromSymbols]);
-    const analyzed = new Set(analyses.map(a => a.symbol.replace(/USDT$|USDC$|FDUSD$|BTC$|ETH$/, '')));
-    return [...bases]
-      .filter(b => q === '' || b.includes(q))
-      .sort((x, y) => {
-        const ax = analyzed.has(x) ? 0 : 1;
-        const ay = analyzed.has(y) ? 0 : 1;
-        return ax - ay || x.localeCompare(y);
-      })
-      .slice(0, 300);
-  }, [symbols, localFlags, coinQuery, analyses]);
-
-  const toggle = async (base: string, patch: { halal?: boolean; barcode?: boolean }) => {
-    const targets = [`${base}USDT`, `${base}USDC`, `${base}FDUSD`];
-    for (const t of targets) {
-      await api.setCoinFlag(t, patch).catch(() => { /* قد لا يكون الزوج موجوداً كعلم */ });
-    }
-    setLocalFlags(prev => ({ ...prev, [base]: { symbol: base, halal: patch.halal === undefined ? prev[base]?.halal ?? 1 : (patch.halal ? 1 : 0), barcode: patch.barcode === undefined ? prev[base]?.barcode ?? 0 : (patch.barcode ? 1 : 0), updated_at: Date.now() } }));
-  };
 
   const perm = PERM_BADGE[notifPerm];
 
@@ -128,47 +97,7 @@ export default function SettingsPanel() {
         )}
       </section>
 
-      <section>
-        <h2 className="text-[15px] font-bold mb-1" style={{ color: 'var(--text-1)' }}>فلتر الشريعة والباركود</h2>
-        <p className="text-xs mb-4 leading-relaxed max-w-3xl" style={{ color: 'var(--text-3)' }}>
-          القائمة المرجعية للحلال مزروعة كمؤشر فقط وليست فتوى — عدّلها كما تشاء. وسم «باركود» يستبعد العملة من الإضافة
-          (شموع 1m متفرقة/غير مستقرة).
-        </p>
-        <div className="flex items-center gap-3 mb-4">
-          <input className="w-72" placeholder="ابحث عن أصل…" value={coinQuery} onChange={e => setCoinQuery(e.target.value)} />
-          <span className="badge badge-neutral">{manageList.length} أصل معروض</span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-          {manageList.map(base => {
-            const f = localFlags[base];
-            const halal = f?.halal !== 0;
-            const barcode = f?.barcode === 1;
-            return (
-              <div
-                key={base}
-                className="flex items-center justify-between rounded-lg px-3.5 py-2"
-                style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', transition: 'border-color var(--transition)' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-2)'; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-1)'; }}
-              >
-                <span className="font-semibold text-[13px]" style={{ color: 'var(--text-1)' }}>{base}</span>
-                <div className="flex items-center gap-4 text-[11px]">
-                  <label className="flex items-center gap-1.5 cursor-pointer" style={{ color: halal ? 'var(--up)' : 'var(--text-3)' }}>
-                    <Toggle on={halal} label={`حلال: ${base}`} onChange={v => void toggle(base, { halal: v })} />
-                    حلال
-                  </label>
-                  <label className="flex items-center gap-1.5 cursor-pointer" style={{ color: barcode ? 'var(--warn)' : 'var(--text-3)' }}>
-                    <Toggle on={barcode} label={`باركود: ${base}`} onChange={v => void toggle(base, { barcode: v })} />
-                    باركود
-                  </label>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* ---------- قسم التصنيف الشرعي ---------- */}
+      {/* ---------- قسم التصنيف الشرعي (عرض فقط) ---------- */}
       <section>
         <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
           <h2 className="text-[15px] font-bold" style={{ color: 'var(--text-1)' }}>التصنيف الشرعي (حلال / حرام)</h2>
@@ -177,7 +106,7 @@ export default function SettingsPanel() {
         <p className="text-xs mb-4 leading-relaxed max-w-3xl" style={{ color: 'var(--text-3)' }}>
           يقيّم النظام كل مشروع <b>تلقائياً</b> بمحرك قواعد حتمي يفحص الحقائق الموثقة (المنفعة، الإقراض بفائدة، الميسر،
           الغرر، التغطية…)، ويخرج الحكم مع <b>السبب والدليل من الكتاب والسنة</b> بمرجعه ودرجة صحته. ما لم تُوثَّق حقائقه
-          يُصنَّف «للتحقق» ويُوقف اختياره احتياطاً — لا تخمين. قائمة الإضافة تعرض <b>الحلال الموثق فقط</b>.
+          يُصنَّف «قيد التوثيق» ويُدرج بوسم برتقالي — لا تخمين. إدراج أي عملة يتم عبر <b>تقرير الفحص وتأكيدك</b>.
         </p>
         <div className="flex items-center gap-3 mb-4 flex-wrap">
           <span className="badge badge-up">حلال: {shariahStats.halal}</span>

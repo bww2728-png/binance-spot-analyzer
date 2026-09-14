@@ -29,45 +29,46 @@ export default function App() {
   }, [lastTick]);
 
   const tabs = [
-    { id: 'board', label: 'لوحة التحليل', count: analyses.length },
-    { id: 'dashboard', label: 'لوحة التحكم', count: null },
-    { id: 'settings', label: 'الإعدادات والفلاتر', count: null }
+    { id: 'board', label: 'لوحة التحليل', shortLabel: 'اللوحة', count: analyses.length },
+    { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
+    { id: 'settings', label: 'الإعدادات والفلاتر', shortLabel: 'الإعدادات', count: null }
   ] as const;
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--surface-0)' }}>
       <header
-        className="flex items-center gap-1 px-5 pt-2.5 sticky top-0 z-30"
+        className="flex items-center gap-1 px-3 sm:px-5 pt-2.5 sticky top-0 z-30"
         style={{ background: 'var(--surface-glass)', backdropFilter: 'blur(10px)', borderBottom: '1px solid var(--border-1)' }}
       >
         {/* الشعار */}
-        <div className="flex items-center gap-2.5 ml-6">
+        <div className="flex items-center gap-2 sm:gap-2.5 ml-2 sm:ml-6">
           <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm"
+            className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm flex-shrink-0"
             style={{ background: 'linear-gradient(135deg, var(--accent), #8b5cf6)', color: '#fff', boxShadow: 'var(--shadow-sm)' }}
           >
             B
           </div>
           <div className="leading-tight">
-            <div className="text-sm font-bold" style={{ color: 'var(--text-1)' }}>محلل العملات</div>
-            <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>Binance Spot Strategy Board</div>
+            <div className="text-sm font-bold hidden sm:block" style={{ color: 'var(--text-1)' }}>محلل العملات</div>
+            <div className="text-[10px] hidden md:block" style={{ color: 'var(--text-3)' }}>Binance Spot Strategy Board</div>
           </div>
         </div>
 
         {/* التبويبات */}
-        <nav className="flex items-center gap-1 flex-1">
+        <nav className="flex items-center gap-0.5 sm:gap-1 flex-1 overflow-x-auto">
           {tabs.map(t => {
             const active = screen === t.id;
             return (
               <button
                 key={t.id}
                 onClick={() => setScreen(t.id)}
-                className="relative px-4 py-2.5 text-[13px] font-semibold"
+                className="relative px-2.5 sm:px-4 py-2.5 text-[12px] sm:text-[13px] font-semibold whitespace-nowrap flex-shrink-0"
                 style={{ color: active ? 'var(--accent)' : 'var(--text-2)', transition: 'color var(--transition)' }}
                 onMouseEnter={e => { if (!active) (e.currentTarget as HTMLElement).style.color = 'var(--text-1)'; }}
                 onMouseLeave={e => { if (!active) (e.currentTarget as HTMLElement).style.color = 'var(--text-2)'; }}
               >
-                {t.label}
+                <span className="hidden sm:inline">{t.label}</span>
+                <span className="sm:hidden">{t.shortLabel}</span>
                 {t.count !== null && t.count > 0 && (
                   <span className="num mr-1.5 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
                     {t.count}

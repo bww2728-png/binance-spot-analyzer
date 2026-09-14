@@ -27,7 +27,15 @@ export default function Toasts() {
             >
               {st.icon}
             </span>
-            <span className="text-[13px] leading-relaxed" style={{ color: 'var(--text-1)' }}>{t.text}</span>
+            <span className="text-[13px] leading-relaxed flex-1" style={{ color: 'var(--text-1)' }}>{t.text}</span>
+            {t.action && (
+              <button
+                onClick={(e) => { e.stopPropagation(); t.action!.onClick(); dismiss(t.id); }}
+                className="btn btn-accent !py-1 !px-2.5 text-[11px] flex-shrink-0"
+              >
+                {t.action.label}
+              </button>
+            )}
           </div>
         );
       })}
