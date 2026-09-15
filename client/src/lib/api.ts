@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, Settings } from './types';
+import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, Settings, ShariahResearch, ShariahResearchStatus } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -100,6 +100,18 @@ const sbApi = {
     if (error) throw pgErr(error);
     return { ok: true };
   },
+  async researchShariah(symbol: string): Promise<ShariahResearch> {
+    const res = await fetch(`${BASE}/shariah-research/${encodeURIComponent(symbol)}`, { method: 'POST' });
+    return j<ShariahResearch>(res);
+  },
+  async shariahResearchStatus(): Promise<ShariahResearchStatus> {
+    const res = await fetch(`${BASE}/shariah-research/status`);
+    return j<ShariahResearchStatus>(res);
+  },
+  async logShariahChange(body: { symbol: string; message: string; meta?: Record<string, unknown> }): Promise<{ ok: boolean }> {
+    const res = await fetch(`${BASE}/shariah-research/changes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return j<{ ok: boolean }>(res);
+  },
   async getSettings(): Promise<Settings> {
     const { data, error } = await supabase.from(SB.settings).select('*').eq('id', 1).single();
     if (error) throw pgErr(error);
@@ -157,6 +169,11 @@ const restApi = {
     fetch(`${BASE}/shariah/${symbol}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row) }).then(j<CoinShariahRow>),
   deleteShariah: (symbol: string) =>
     fetch(`${BASE}/shariah/${symbol}`, { method: 'DELETE' }).then(j<{ ok: boolean }>),
+  researchShariah: (symbol: string) =>
+    fetch(`${BASE}/shariah-research/${encodeURIComponent(symbol)}`, { method: 'POST' }).then(j<ShariahResearch>),
+  shariahResearchStatus: () => fetch(`${BASE}/shariah-research/status`).then(j<ShariahResearchStatus>),
+  logShariahChange: (body: { symbol: string; message: string; meta?: Record<string, unknown> }) =>
+    fetch(`${BASE}/shariah-research/changes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean }>),
   getSettings: () => fetch(`${BASE}/settings`).then(j<Settings>),
   updateSettings: (body: Partial<Settings>) =>
     fetch(`${BASE}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<Settings>),

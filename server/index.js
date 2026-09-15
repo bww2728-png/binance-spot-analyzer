@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
+import { researchSymbol } from './research.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -248,6 +249,107 @@ app.delete('/api/shariah/:symbol', handle(async (req, res) => {
   await db.coinShariah.remove(req.params.symbol.toUpperCase());
   res.json({ ok: true });
 }));
+
+// ---- البحث الآلي عن المشاريع (توثيق من مصادر الإنترنت — حتمي بلا تخمين) ----
+const AUTO_SOURCE = 'بحث آلي: CoinGecko';
+
+const persistAutoFacts = async (symbol, research) => {
+  const gated = research.gated ?? {};
+  const hasAny = Object.values(gated).some(v => v !== null);
+  const meta = JSON.stringify({
+    confidence: research.confidence,
+    sources: research.sources,
+    checked_at: Date.now(),
+    gecko_id: research.geckoId,
+    coin_name: research.coinName,
+    message: research.message
+  });
+  const existing = await db.coinShariah.list();
+  const prev = existing.find(r => r.symbol === symbol);
+  const row = {
+    symbol,
+    verdict: hasAny ? 'uncertain' : (prev?.verdict || 'uncertain'),
+    facts: JSON.stringify(hasAny ? gated : (prev ? JSON.parse(prev.facts || '{}') : {})),
+    reasons: JSON.stringify([hasAny
+      ? 'حقائق موثقة آلياً من المصادر — يقيّمها محرك القواعد الحتمي في الواجهة'
+      : 'لا توجد بيانات كافية بثقة مقبولة — تبقى للتحقق وإعادة البحث دورياً']),
+    evidence: '[]',
+    source: hasAny ? `${AUTO_SOURCE} — ${research.geckoId}` : `${AUTO_SOURCE} (بلا نتيجة كافية)`,
+    notes: meta,
+    updated_at: Date.now()
+  };
+  const saved = await db.coinShariah.upsert(row);
+  /* سجل تغيير الحكم: عند إعادة بحث صف آلي سابق تختلف نتيجته المحسوبة عن سابقه */
+  return { saved: saved[0], previous: prev, hasAny };
+};
+
+app.post('/api/shariah-research/changes', handle(async (req, res) => {
+  const symbol = String(req.body?.symbol || '').toUpperCase();
+  if (!symbol) return res.status(400).json({ error: 'symbol مطلوب' });
+  await db.events.create({
+    symbol,
+    type: 'shariah_auto_change',
+    message: String(req.body?.message || ''),
+    meta: req.body?.meta ? JSON.stringify(req.body.meta) : null,
+    ts: Date.now()
+  });
+  res.json({ ok: true });
+}));
+
+app.post('/api/shariah-research/:symbol', handle(async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const base = symbol.replace(/USDT$|USDC$|FDUSD$|BTC$|ETH$/, '');
+  const research = await researchSymbol(base);
+  await persistAutoFacts(symbol, research);
+  broadcast({ type: 'shariah_researched', symbol, status: research.status });
+  res.json(research);
+}));
+
+const lastResearchRunAt = { value: 0 };
+
+app.get('/api/shariah-research/status', handle(async (_req, res) => {
+  const [rows, symbolsRows] = await Promise.all([db.coinShariah.list(), db.symbols.list('USDT')]);
+  const documented = new Set(rows.map(r => r.symbol));
+  const pending = symbolsRows.filter(s => !documented.has(s.symbol));
+  const autoRows = rows.filter(r => (r.source || '').startsWith(AUTO_SOURCE));
+  const insufficient = autoRows.filter(r => (r.source || '').includes('بلا نتيجة كافية'));
+  const events = await db.events.list({ limit: 2000 });
+  const changes = events.filter(e => e.type === 'shariah_auto_change').slice(0, 12);
+  res.json({
+    pending: pending.length,
+    documented: rows.length - insufficient.length,
+    autoDocumented: autoRows.length - insufficient.length,
+    insufficient: insufficient.length,
+    lastRunAt: lastResearchRunAt.value,
+    changes: changes.map(e => ({
+      symbol: e.symbol,
+      message: e.message,
+      meta: e.meta ? JSON.parse(e.meta) : null,
+      ts: e.ts
+    }))
+  });
+}));
+
+// ---- المهمة الدورية: توثيق كل الأزواج غير الموثقة بالتدريج ----
+const periodicResearch = async () => {
+  try {
+    const [rows, symbolsRows] = await Promise.all([db.coinShariah.list(), db.symbols.list('USDT')]);
+    const documented = new Set(rows.map(r => r.symbol));
+    const pending = symbolsRows.filter(s => !documented.has(s.symbol));
+    const batch = Number(process.env.RESEARCH_BATCH) || 50;
+    let done = 0;
+    for (const s of pending.slice(0, batch)) {
+      const research = await researchSymbol(s.base || s.symbol);
+      await persistAutoFacts(s.symbol, research);
+      if (research.status === 'documented') done += 1;
+      broadcast({ type: 'shariah_researched', symbol: s.symbol, status: research.status });
+    }
+    lastResearchRunAt.value = Date.now();
+    console.log(`[research] batch: ${done} documented of ${Math.min(pending.length, batch)} pending (${pending.length} total)`);
+  } catch (e) {
+    console.error('[research] periodic run failed:', e.message);
+  }
+};
 
 // ---- settings ----
 const ensureSettings = async () => {
@@ -496,6 +598,8 @@ const periodicBarcodeScan = async () => {
 
 setInterval(periodicSync, SYNC_MS);
 setInterval(periodicBarcodeScan, (Number(process.env.BARCODE_SCAN_HOURS) || 6) * 60 * 60 * 1000);
+setInterval(periodicResearch, (Number(process.env.RESEARCH_HOURS) || 4) * 60 * 60 * 1000);
+setTimeout(() => void periodicResearch(), 90_000);
 
 // مزامنة تلقائية عند البدء إذا كانت فارغة أو متقادمة + بث فوري لأي جديد
 void (async () => {

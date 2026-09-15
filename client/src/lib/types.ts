@@ -49,6 +49,33 @@ export interface BarcodeScan {
   scanned_at: number;
 }
 
+export interface FactExtract {
+  value: boolean | null;
+  confidence: number;
+  source: string;
+}
+
+export interface ShariahResearch {
+  status: 'documented' | 'insufficient' | 'failed';
+  coinName: string | null;
+  geckoId: string | null;
+  facts: Record<string, FactExtract>;
+  gated: Record<string, boolean | null>;
+  confidence: number;
+  summary: { resolvedRaw: number; resolvedGated: number };
+  sources: string[];
+  message: string;
+}
+
+export interface ShariahResearchStatus {
+  pending: number;
+  documented: number;
+  autoDocumented: number;
+  insufficient: number;
+  lastRunAt: number;
+  changes: { symbol: string; message: string; meta: { from?: string; to?: string; source?: string } | null; ts: number }[];
+}
+
 /** صف التصنيف الشرعي المخزن لكل عملة */
 export interface CoinShariahRow {
   symbol: string;

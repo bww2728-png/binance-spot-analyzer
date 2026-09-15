@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
+import { api } from '../lib/api';
 import { requestNotificationPermission } from '../lib/notifications';
 import { factsForSymbol } from '../lib/shariah';
+import type { ShariahResearchStatus } from '../lib/types';
 import Toggle from './ui/Toggle';
 
 const QUOTES = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH'];
@@ -44,6 +46,17 @@ export default function SettingsPanel() {
     }
     return n;
   }, [symbols, shariah]);
+
+  const [researchStatus, setResearchStatus] = useState<ShariahResearchStatus | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    const load = () => void api.shariahResearchStatus()
+      .then(s => { if (!disposed) setResearchStatus(s); })
+      .catch(() => undefined);
+    load();
+    const timer = setInterval(load, 60000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, []);
 
   const barcodeStats = useMemo(() => {
     const values = Object.values(barcodeScans);
@@ -109,7 +122,43 @@ export default function SettingsPanel() {
         </div>
         <div className="card p-4 text-[12px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
           لا توجد مفاتيح يدوية للعملات. الحكم الناتج من قاعدة المعرفة المحلية هو المرجع الوحيد، ولا تُقبل الإضافة إلا للعملة الحلال الموثقة.
-          أي عملة غير موثقة تُفتح عبر نموذج التوثيق في تقرير الإضافة: تجيب عن حقائق المشروع مع ذكر المصدر، فيقيّمها المحرك فوراً.
+          التوثيق آلي بالبحث في المصادر المنظمة من زر «ابحث آلياً» في تقرير الإضافة، أو يدوياً من نموذج التوثيق بمصدر تذكره أنت.
+        </div>
+      </section>
+
+      {/* ---------- قسم البحث الآلي والتوثيق (عرض فقط) ---------- */}
+      <section>
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
+          <h2 className="text-[15px] font-bold" style={{ color: 'var(--text-1)' }}>البحث الآلي والتوثيق من المصادر</h2>
+          <span className="badge badge-neutral">مهمة خلفية — قراءة فقط</span>
+        </div>
+        <p className="text-xs mb-4 leading-relaxed max-w-3xl" style={{ color: 'var(--text-3)' }}>
+          يبحث النظام ذاتياً عن مشروع كل عملة غير موثقة في المصادر المنظمة (CoinGecko ثم الموقع الرسمي)، ويستخرج الحقائق
+          استخراجاً حتمياً بالقواعد المعلنة — بلا ذكاء اصطناعي ولا تخمين. ما لم تبلغ ثقته عتبة 85% لا يُحفظ كحقيقة،
+          وما لم يجد بيانات كافية يبقى «للتحقق» مع إعادة بحث دورية.
+        </p>
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
+          <span className="badge badge-up">موثق آلياً: {researchStatus?.autoDocumented ?? '…'}</span>
+          <span className="badge badge-warn">بانتظار البحث: {researchStatus?.pending ?? '…'}</span>
+          <span className="badge badge-neutral">بلا بيانات كافية: {researchStatus?.insufficient ?? '…'}</span>
+          <span className="badge badge-neutral">
+            آخر دورة: {researchStatus?.lastRunAt ? new Date(researchStatus.lastRunAt).toLocaleString('ar') : 'لم تبدأ بعد'}
+          </span>
+        </div>
+        <div className="card p-4">
+          <div className="text-[12.5px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>سجل تغيّر الأحكام الآلية (الأحدث أولاً)</div>
+          {researchStatus && researchStatus.changes.length === 0 && (
+            <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا تغييرات مسجلة بعد.</div>
+          )}
+          <div className="space-y-1.5">
+            {researchStatus?.changes.map((c, i) => (
+              <div key={`${c.symbol}-${c.ts}-${i}`} className="flex items-center justify-between gap-2 text-[11.5px] flex-wrap" style={{ color: 'var(--text-2)' }}>
+                <span className="num font-semibold" style={{ color: 'var(--text-1)' }}>{c.symbol}</span>
+                <span className="flex-1 min-w-40">{c.message}</span>
+                <span style={{ color: 'var(--text-3)' }}>{new Date(c.ts).toLocaleString('ar')}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 

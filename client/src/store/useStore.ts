@@ -1,12 +1,15 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import type { Analysis, BarcodeScan, CoinShariahRow, Candle, Settings } from '../lib/types';
+import type { Analysis, BarcodeScan, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
 import { notifyBrowser, playAlarm } from '../lib/notifications';
+import { evaluateShariah } from '../lib/shariah';
 
 const API = '/api';
+
+const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
 export type Screen = 'board' | 'dashboard' | 'settings';
 export type Theme = 'dark' | 'light';
@@ -45,6 +48,7 @@ interface StoreState {
   scanBarcode: (symbol: string) => Promise<BarcodeScan>;
   refreshSymbols: (opts?: { silent?: boolean }) => Promise<void>;
   saveShariah: (symbol: string, row: Partial<CoinShariahRow>) => Promise<void>;
+  researchShariahAuto: (symbol: string) => Promise<ShariahResearch>;
   deleteShariah: (symbol: string) => Promise<void>;
   saveSettings: (patch: Partial<Settings>) => Promise<void>;
   toggleTheme: () => void;
@@ -113,7 +117,32 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       const sh = await api.getShariah();
       const shMap: Record<string, CoinShariahRow> = {};
-      for (const r of sh) shMap[r.symbol] = r;
+      for (const r of sh) {
+        /* تسوية الصفوف الآلية: يحسب المحرك الحتمي الحكم من الحقائق المحفوظة،
+           ويصحح الصف المخزن ويسجل أي تغيير حكم مرة واحدة — لا حكم قديم معلّق */
+        const factVals = r.facts ? Object.values(r.facts) : [];
+        if (factVals.some(v => typeof v === 'boolean')) {
+          try {
+            const res = evaluateShariah(r.facts as never, r.symbol);
+            const evidence = res.evidence.map(({ id, type, text, ref, grade }) => ({ id, type, text, ref, grade }));
+            const computed: CoinShariahRow = { ...r, verdict: res.verdict, reasons: [res.headline, ...res.reasons], evidence };
+            if (res.verdict !== r.verdict) {
+              void api.setShariah(r.symbol, {
+                verdict: res.verdict, facts: r.facts, reasons: computed.reasons,
+                evidence, source: r.source, notes: r.notes
+              }).catch(() => undefined);
+              void api.logShariahChange({
+                symbol: r.symbol,
+                message: `تغيّر الحكم من ${rowVerdictAr(r.verdict)} إلى ${rowVerdictAr(res.verdict)} بمحرك القواعد على الحقائق الموثقة`,
+                meta: { from: r.verdict, to: res.verdict, source: r.source }
+              }).catch(() => undefined);
+            }
+            shMap[r.symbol] = computed;
+            continue;
+          } catch { /* يقع على الصف المخزن */ }
+        }
+        shMap[r.symbol] = r;
+      }
       set({ shariah: shMap, shariahLoaded: true });
     } catch { set({ shariahLoaded: true }); }
     // فحص أولي: إن كانت أي عملة متابَعة حكمها المخزن «حرام» ننبّه مرة واحدة
@@ -237,6 +266,23 @@ export const useStore = create<StoreState>((set, get) => ({
     set((st) => ({ shariah: { ...st.shariah, [symbol]: saved } }));
     alertIfHaramFollowed(symbol, saved.verdict);
   },
+
+  researchShariahAuto: async (symbol) => {
+    const research = await api.researchShariah(symbol);
+    if (research.status === 'documented') {
+      const res = evaluateShariah(research.gated as never, symbol);
+      await get().saveShariah(symbol, {
+        verdict: res.verdict,
+        facts: research.gated,
+        reasons: [res.headline, ...res.reasons],
+        evidence: res.evidence.map(({ id, type, text, ref, grade }) => ({ id, type, text, ref, grade })),
+        source: `بحث آلي: CoinGecko${research.geckoId ? ` — ${research.geckoId}` : ''}`,
+        notes: JSON.stringify({ confidence: research.confidence, sources: research.sources, checked_at: Date.now(), coin_name: research.coinName })
+      });
+    }
+    return research;
+  },
+
   deleteShariah: async (symbol) => {
     await api.deleteShariah(symbol);
     set((st) => {

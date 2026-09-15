@@ -6,7 +6,7 @@ import {
 } from '../lib/shariah';
 import { suggestTrend } from '../lib/trend';
 import { TIMEFRAMES } from '../lib/types';
-import type { Trend, Timeframe } from '../lib/types';
+import type { Trend, Timeframe, ShariahResearch } from '../lib/types';
 
 const VERDICT_STYLE: Record<string, { cls: string; label: string }> = {
   halal: { cls: 'badge-up', label: 'حلال' },
@@ -27,6 +27,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
   const pushToast = useStore(s => s.pushToast);
   const scanBarcode = useStore(s => s.scanBarcode);
   const saveShariah = useStore(s => s.saveShariah);
+  const researchShariahAuto = useStore(s => s.researchShariahAuto);
 
   const [adding, setAdding] = useState(false);
   const [docOpen, setDocOpen] = useState(false);
@@ -34,6 +35,27 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
   const [docSource, setDocSource] = useState('');
   const [docNotes, setDocNotes] = useState('');
   const [savingDoc, setSavingDoc] = useState(false);
+  const [autoResearch, setAutoResearch] = useState<ShariahResearch | null>(null);
+  const [autoResearching, setAutoResearching] = useState(false);
+
+  const runAutoResearch = async () => {
+    setAutoResearching(true);
+    setAutoResearch(null);
+    try {
+      const research = await researchShariahAuto(upSymbol);
+      setAutoResearch(research);
+      pushToast(
+        research.status === 'documented'
+          ? `اكتمل البحث الآلي عن ${upSymbol} — ${research.summary.resolvedGated} حقيقة موثقة بثقة ${Math.round(research.confidence * 100)}%`
+          : `البحث عن ${upSymbol}: ${research.message}`,
+        research.status === 'documented' ? 'info' : 'alert'
+      );
+    } catch (e) {
+      pushToast(`فشل البحث الآلي: ${String(e)}`, 'alert');
+    } finally {
+      setAutoResearching(false);
+    }
+  };
   const [tfLower, setTfLower] = useState<Timeframe>('15m');
   const [tfUpper, setTfUpper] = useState<Timeframe>('4h');
   const [trendLower, setTrendLower] = useState<Trend | null>(null);
@@ -105,7 +127,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
 
   const openDoc = () => {
     const row = shariah[upSymbol];
-    if (row?.facts) {
+    if (row?.facts && Object.values(row.facts).some(v => typeof v === 'boolean')) {
       const pre: FactAnswers = {};
       for (const q of FACT_QUESTIONS) {
         const v = (row.facts as Record<string, unknown>)[q.key];
@@ -114,6 +136,15 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
       setDocAnswers(pre);
       setDocSource(row.source ?? '');
       setDocNotes(row.notes ?? '');
+    } else if (autoResearch?.status === 'documented') {
+      const pre: FactAnswers = {};
+      for (const q of FACT_QUESTIONS) {
+        const gv = autoResearch.gated[q.key];
+        if (gv === true || gv === false) pre[q.key] = gv;
+      }
+      setDocAnswers(pre);
+      setDocSource(autoResearch.sources.join(' + '));
+      setDocNotes('');
     } else {
       setDocAnswers({});
       setDocSource('');
@@ -281,17 +312,85 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
               <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>2) حكم المحرك الشرعي</span>
               <span className={`badge ${vs.cls}`}>{vs.label}</span>
             </div>
-            {docEligible && !docOpen && (
+            {docEligible && !docOpen && !autoResearching && !autoResearch && (
               <div
                 className="rounded-lg p-2.5 flex items-center justify-between gap-2 flex-wrap"
                 style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)' }}
               >
                 <span className="text-[12px] leading-relaxed" style={{ color: '#fbbf24' }}>
                   {undocumented
-                    ? 'لا توجد بيانات موثقة عن هذا المشروع — وثّقه الآن لفتح الإدراج.'
-                    : 'الحكم «للتحقق» حسب التوثيق الحالي — يمكنك استكمال التوثيق أو تعديله.'}
+                    ? 'لا توجد بيانات موثقة عن هذا المشروع — ابحث آلياً في المصادر أو وثّقه يدوياً.'
+                    : 'الحكم «للتحقق» حسب التوثيق الحالي — يمكنك البحث آلياً أو استكمال التوثيق يدوياً.'}
                 </span>
-                <button className="btn !py-1 !px-2.5 text-[11px]" onClick={openDoc}>وثّق الآن</button>
+                <div className="flex gap-1.5">
+                  <button
+                    className="btn btn-accent !py-1 !px-2.5 text-[11px]"
+                    onClick={() => void runAutoResearch()}
+                    disabled={autoResearching}
+                  >
+                    ابحث آلياً في المصادر
+                  </button>
+                  <button className="btn !py-1 !px-2.5 text-[11px]" onClick={openDoc}>وثّق يدوياً</button>
+                </div>
+              </div>
+            )}
+            {autoResearching && (
+              <div className="rounded-lg p-2.5 text-[12px]" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
+                يجري بحثاً موثقاً في المصادر المنظمة (CoinGecko ثم الموقع الرسمي)… استخراج حتمي بالقواعد — بلا تخمين.
+              </div>
+            )}
+            {autoResearch && (
+              <div className="rounded-xl p-3 space-y-2" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-2)' }}>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[12.5px] font-bold" style={{ color: 'var(--text-1)' }}>
+                    نتيجة البحث الآلي{autoResearch.coinName ? `: ${autoResearch.coinName}` : ''}
+                  </span>
+                  <span className={`badge ${autoResearch.status === 'documented' ? 'badge-up' : 'badge-warn'}`}>
+                    {autoResearch.status === 'documented' ? `موثق — ثقة ${Math.round(autoResearch.confidence * 100)}%` : 'لا بيانات كافية'}
+                  </span>
+                </div>
+                {autoResearch.status === 'documented' ? (
+                  <>
+                    <div className="space-y-1">
+                      {FACT_QUESTIONS.map(q => {
+                        const ex = autoResearch.facts[q.key];
+                        const gv = autoResearch.gated[q.key];
+                        if (!ex || ex.value === null) return null;
+                        const kept = gv !== null;
+                        return (
+                          <div key={q.key} className="flex items-center justify-between gap-2 text-[11px] flex-wrap">
+                            <span style={{ color: 'var(--text-2)' }}>
+                              {q.label}: <b style={{ color: ex.value ? 'var(--down)' : 'var(--up)' }}>{ex.value ? 'نعم' : 'لا'}</b>
+                              {!kept && <span style={{ color: 'var(--text-3)' }}> (تحت عتبة الثقة — أُهمل)</span>}
+                            </span>
+                            <span style={{ color: 'var(--text-3)' }}>{ex.source} — ثقة {Math.round(ex.confidence * 100)}%</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                      <span style={{ color: 'var(--text-3)' }}>المصادر:</span>
+                      {autoResearch.sources.map(s => (
+                        <a key={s} href={s} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{s}</a>
+                      ))}
+                    </div>
+                    <div className="flex gap-1.5 flex-wrap">
+                      <button className="btn !py-1 !px-2.5 text-[11px]" onClick={openDoc}>
+                        راجع الحقائق يدوياً (محملة مسبقاً)
+                      </button>
+                      <button className="btn !py-1 !px-2.5 text-[11px]" onClick={() => { setAutoResearch(null); }}>
+                        إغلاق النتيجة
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-[11.5px]" style={{ color: 'var(--text-3)' }}>
+                    {autoResearch.message} — يمكنك التوثيق يدوياً أو انتظار إعادة البحث الدورية.
+                    <div className="mt-1.5">
+                      <button className="btn !py-1 !px-2.5 text-[11px]" onClick={openDoc}>وثّق يدوياً</button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {docOpen && (
