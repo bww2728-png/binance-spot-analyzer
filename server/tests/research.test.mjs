@@ -3,8 +3,57 @@ import assert from 'node:assert/strict';
 
 const { extractFacts, verdictGate, researchConfidence, researchSummary, FACT_KEYS, CONFIDENCE_THRESHOLD } =
   await import('../researchCore.mjs');
-const { pickCoinId, createRateLimiter } =
+const { pickCoinId, pickCoinIdFromMarkets, tickerMatchesBinanceBase, createRateLimiter } =
   await import('../research.mjs');
+
+test('مطابقة الرموز عبر /coins/markets: رمز حرفي واحد يعاد مباشرة', () => {
+  const markets = [{ id: 'magic-eden', symbol: 'ME', market_cap_rank: 120 }];
+  assert.equal(pickCoinIdFromMarkets(markets, 'ME'), 'magic-eden');
+});
+
+test('مطابقة الرموز عبر /coins/markets: الأدنى رتبة سوقية يفوز', () => {
+  const markets = [
+    { id: 'obscure', symbol: 'XYZ', market_cap_rank: 900 },
+    { id: 'prominent', symbol: 'XYZ', market_cap_rank: 30 }
+  ];
+  assert.equal(pickCoinIdFromMarkets(markets, 'XYZ'), 'prominent');
+});
+
+test('مطابقة الرموز عبر /coins/markets: رموز غير متطابقة → null', () => {
+  const markets = [{ id: 'other', symbol: 'VELO', market_cap_rank: 657 }];
+  assert.equal(pickCoinIdFromMarkets(markets, 'VELODROME'), null);
+});
+
+test('مطابقة الرموز عبر /coins/markets: مرشحان بلا رتبة → غموض → null', () => {
+  const markets = [
+    { id: 'a', symbol: 'XX', market_cap_rank: null },
+    { id: 'b', symbol: 'XX', market_cap_rank: null }
+  ];
+  assert.equal(pickCoinIdFromMarkets(markets, 'XX'), null);
+});
+
+test('مطابقة الرموز عبر /coins/markets: نتيجة فارغة أو غير مصفوفة → null', () => {
+  assert.equal(pickCoinIdFromMarkets([], 'ME'), null);
+  assert.equal(pickCoinIdFromMarkets(null, 'ME'), null);
+});
+
+test('تحقق تيكارز بينانس: base مطابق + سوق بينانس + coin_id → true', () => {
+  const res = { tickers: [{ base: 'VELODROME', market: { identifier: 'binance' }, coin_id: 'velodrome-finance', is_anomaly: false }] };
+  assert.equal(tickerMatchesBinanceBase(res, 'VELODROME'), true);
+  assert.equal(tickerMatchesBinanceBase(res, 'velodrome'), true);
+});
+
+test('تحقق تيكارز بينانس: base مختلف أو شاذ أو بلا coin_id → false', () => {
+  const res = { tickers: [{ base: 'VELO', market: { identifier: 'binance' }, coin_id: 'velodrome-finance', is_anomaly: false }] };
+  assert.equal(tickerMatchesBinanceBase(res, 'VELODROME'), false);
+  const anomaly = { tickers: [{ base: 'VELODROME', market: { identifier: 'binance' }, coin_id: 'x', is_anomaly: true }] };
+  assert.equal(tickerMatchesBinanceBase(anomaly, 'VELODROME'), false);
+  const noId = { tickers: [{ base: 'VELODROME', market: { identifier: 'binance' }, coin_id: null, is_anomaly: false }] };
+  assert.equal(tickerMatchesBinanceBase(noId, 'VELODROME'), false);
+  const otherMarket = { tickers: [{ base: 'VELODROME', market: { identifier: 'bybit' }, coin_id: 'velodrome-finance', is_anomaly: false }] };
+  assert.equal(tickerMatchesBinanceBase(otherMarket, 'VELODROME'), false);
+  assert.equal(tickerMatchesBinanceBase(null, 'VELODROME'), false);
+});
 
 test('عملة ميم رسمية: ميم + مضاربة + بلا منفعة بثقة عالية', () => {
   const f = extractFacts({

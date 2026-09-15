@@ -43,6 +43,34 @@ export function pickCoinId(searchResult, base) {
   return exact[0]?.id ?? null;
 }
 
+/** يطابق رمز الأصل مع نتائج /coins/markets (فلتر الرموز الحرفي): الأدنى رتبة سوقية يفوز */
+export function pickCoinIdFromMarkets(marketsResult, base) {
+  const rows = Array.isArray(marketsResult) ? marketsResult : [];
+  const target = base.toLowerCase();
+  const exact = rows.filter(r => String(r?.symbol ?? '').toLowerCase() === target);
+  if (exact.length === 0) return null;
+  exact.sort((a, b) => (a.market_cap_rank ?? 9999) - (b.market_cap_rank ?? 9999));
+  // مرشحان فأكثر بلا رتبة إطلاقاً = غموض — لا إسناد
+  if (exact.length > 1 && exact[0].market_cap_rank == null) return null;
+  return exact[0]?.id ?? null;
+}
+
+/**
+ * يتحقق أن عملة مرشحة من البحث تُتاجر فعلاً على بينانس بـ base مطابق لرمز الأصل.
+ * المرجع: /exchanges/binance/tickers?coin_ids={id} — مطابقة رسمية من CoinGecko نفسه.
+ * يحل اختلاف الرمز بين المنصتين (مثال: بينانس VELODROME ↔ كوينجيكو velodrome-finance برمز VELO).
+ */
+export function tickerMatchesBinanceBase(tickersResult, base) {
+  const tickers = Array.isArray(tickersResult?.tickers) ? tickersResult.tickers : [];
+  const target = String(base).toUpperCase();
+  return tickers.some(t =>
+    String(t?.base ?? '').toUpperCase() === target &&
+    t?.market?.identifier === 'binance' &&
+    !!t?.coin_id &&
+    t?.is_anomaly !== true
+  );
+}
+
 async function fetchHomepageText(url) {
   try {
     const res = await fetch(url, {
@@ -74,11 +102,32 @@ export async function researchSymbol(base) {
     sources: [], message: ''
   };
   try {
+    /* الطبقة 1: /search مع تطابق رمز حرفي (سريع، يكفي أغلب الحالات) */
     const search = await throttledFetch(`${GECKO}/search?query=${encodeURIComponent(base)}`);
-    const id = pickCoinId(search, base);
+    let id = pickCoinId(search, base);
+    /* الطبقة 2: /coins/markets بفلتر الرموز — تطابق حرفي بلا ضبابية + رتبة السوق */
+    if (!id) {
+      const markets = await throttledFetch(
+        `${GECKO}/coins/markets?vs_currency=usd&symbols=${encodeURIComponent(base)}&per_page=25&page=1`
+      );
+      id = pickCoinIdFromMarkets(markets, base);
+    }
+    /* الطبقة 3: مرشحو البحث برمز مختلف على كوينجيكو — تحقق أن أحدهم يُتاجر على بينانس بـ base مطابق */
+    if (!id) {
+      const candidates = (Array.isArray(search?.coins) ? search.coins : [])
+        .filter(c => c?.id)
+        .sort((a, b) => (a.market_cap_rank ?? 9999) - (b.market_cap_rank ?? 9999))
+        .slice(0, 3);
+      for (const cand of candidates) {
+        const tickers = await throttledFetch(
+          `${GECKO}/exchanges/binance/tickers?coin_ids=${encodeURIComponent(cand.id)}&page=1`
+        );
+        if (tickerMatchesBinanceBase(tickers, base)) { id = cand.id; break; }
+      }
+    }
     if (!id) {
       out.status = 'insufficient';
-      out.message = 'لم يُعثر على مشروع مطابق للرمز في CoinGecko';
+      out.message = 'لم يُعثر عبر البحث ولا مطابقة الرموز ولا أسواق بينانس في CoinGecko — يمكنك التوثيق يدوياً أو انتظار إعادة البحث الدورية';
       return out;
     }
     const coin = await throttledFetch(
