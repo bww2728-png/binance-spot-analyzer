@@ -330,22 +330,35 @@ app.get('/api/shariah-research/status', handle(async (_req, res) => {
   });
 }));
 
-// ---- المهمة الدورية: توثيق كل الأزواج غير الموثقة بالتدريج ----
+// ---- المهمة الدورية: توثيق كل الأزواج غير الموثقة بالتدريج + إعادة بحث العملات غير الكافية ----
 const periodicResearch = async () => {
   try {
     const [rows, symbolsRows] = await Promise.all([db.coinShariah.list(), db.symbols.list('USDT')]);
     const documented = new Set(rows.map(r => r.symbol));
     const pending = symbolsRows.filter(s => !documented.has(s.symbol));
+    // العملات «غير الكافية» (صف موجود بلا حقائق محسومة): تُعاد دورياً — الأقدم فحصاً أولاً فيدور retrial على الجميع
+    const insufficient = rows
+      .filter(r => (r.source || '').includes('بلا نتيجة كافية'))
+      .sort((a, b) => (a.updated_at ?? 0) - (b.updated_at ?? 0))
+      .map(r => ({
+        symbol: r.symbol,
+        base: r.symbol.replace(/USDT$|USDC$|FDUSD$|BTC$|ETH$/, '')
+      }));
     const batch = Number(process.env.RESEARCH_BATCH) || 50;
+    // الجديد أولاً (أولوية التوثيق الأول) ثم يكمل الباقي من غير الكافية
+    const targets = [
+      ...pending.map(s => ({ symbol: s.symbol, base: s.base || s.symbol })),
+      ...insufficient
+    ].slice(0, batch);
     let done = 0;
-    for (const s of pending.slice(0, batch)) {
-      const research = await researchSymbol(s.base || s.symbol);
-      await persistAutoFacts(s.symbol, research);
+    for (const t of targets) {
+      const research = await researchSymbol(t.base);
+      await persistAutoFacts(t.symbol, research);
       if (research.status === 'documented') done += 1;
-      broadcast({ type: 'shariah_researched', symbol: s.symbol, status: research.status });
+      broadcast({ type: 'shariah_researched', symbol: t.symbol, status: research.status });
     }
     lastResearchRunAt.value = Date.now();
-    console.log(`[research] batch: ${done} documented of ${Math.min(pending.length, batch)} pending (${pending.length} total)`);
+    console.log(`[research] batch: ${done} documented of ${targets.length} targets (pending: ${pending.length}, insufficient: ${insufficient.length})`);
   } catch (e) {
     console.error('[research] periodic run failed:', e.message);
   }
