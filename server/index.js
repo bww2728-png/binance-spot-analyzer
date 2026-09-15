@@ -308,7 +308,7 @@ app.post('/api/shariah-research/:symbol', handle(async (req, res) => {
   const research = await researchSymbol(base);
   await persistAutoFacts(symbol, research);
   broadcast({ type: 'shariah_researched', symbol, status: research.status });
-  res.json(research);
+  res.json({ ...research, cmcConfigured: Boolean(process.env.CMC_API_KEY) });
 }));
 
 const lastResearchRunAt = { value: 0 };
