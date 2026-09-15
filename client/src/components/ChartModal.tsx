@@ -23,7 +23,6 @@ function BigChart({ symbol, timeframe, zones }: {
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [canLoadMore, setCanLoadMore] = useState(false);
-  const [showLoadMore, setShowLoadMore] = useState(false);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const canLoadMoreRef = useRef(false);
@@ -38,7 +37,6 @@ function BigChart({ symbol, timeframe, zones }: {
         if (older.length === 0) {
           setCanLoadMore(false);
           canLoadMoreRef.current = false;
-          setShowLoadMore(false);
           setLoading(false);
           return;
         }
@@ -50,19 +48,19 @@ function BigChart({ symbol, timeframe, zones }: {
       if (!candles.length) {
         setCanLoadMore(false);
         canLoadMoreRef.current = false;
-        setShowLoadMore(false);
         setLoading(false);
         return;
       }
+      // ضبط العلم قبل setData/fitContent حتى يرى حدث النطاق القيمة الصحيحة
+      const more = candles.length >= 1000;
+      setCanLoadMore(more);
+      canLoadMoreRef.current = more;
       const chart = chartRef.current;
       const series = seriesRef.current;
       if (chart && series) {
         series.setData(candles.map(toBar));
         if (!loadOlder) chart.timeScale().fitContent();
       }
-      setCanLoadMore(candles.length >= 1000);
-      canLoadMoreRef.current = candles.length >= 1000;
-      setShowLoadMore(false);
     } catch (e) {
       console.error('[chart] load failed', e);
     } finally {
@@ -97,17 +95,6 @@ function BigChart({ symbol, timeframe, zones }: {
       if (k.time >= lastTime) { s.update(toBar(k)); lastTime = k.time; }
     });
 
-    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      if (!range || !canLoadMoreRef.current) return;
-      const from = range.from;
-      const dataSize = candlesRef.current.length;
-      if (dataSize > 0 && from <= dataSize * 0.15) {
-        setShowLoadMore(true);
-      } else {
-        setShowLoadMore(false);
-      }
-    });
-
     const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }));
     ro.observe(el);
     return () => {
@@ -118,7 +105,6 @@ function BigChart({ symbol, timeframe, zones }: {
       chartRef.current = null;
       seriesRef.current = null;
       setReady(false);
-      setShowLoadMore(false);
       setCanLoadMore(false);
       canLoadMoreRef.current = false;
     };
@@ -151,7 +137,7 @@ function BigChart({ symbol, timeframe, zones }: {
           <span className="text-[12px] font-semibold" style={{ color: 'var(--text-2)' }}>جاري تحميل الشموع…</span>
         </div>
       )}
-      {showLoadMore && canLoadMore && (
+      {canLoadMore && !loading && (
         <button
           type="button"
           onClick={() => void load(true)}
