@@ -348,6 +348,42 @@ function dedupe(a: string[]): string[] {
   return a.filter(x => { if (seen.has(x)) return false; seen.add(x); return true; });
 }
 
+/* ============ أسئلة التوثيق القياسية ============ */
+/* تُستخدم في نموذج توثيق المشروع داخل تقرير الإضافة: يجيب المستخدم من مصدر
+   موثق، والمحرك يطبق قواعده الحتمية على الإجابات — لا تخمين من النظام أبداً. */
+
+export interface FactQuestion {
+  key: keyof ShariahFacts;
+  label: string;
+  hint: string;
+}
+
+export const FACT_QUESTIONS: FactQuestion[] = [
+  { key: 'has_utility', label: 'منفعة حقيقية', hint: 'للمشروع استخدام فعلي واضح: شبكة، تخزين، أوراكل، دفع، لعبة بمنفعة — لا وعداً تسويقياً بلا منتج.' },
+  { key: 'is_memecoin', label: 'عملة ميم بلا منفعة', hint: 'قيمتها من الانتشار والمضاربة فقط بلا منتج أو استخدام جوهري.' },
+  { key: 'has_lending_interest', label: 'إقراض بفائدة', hint: 'يقدم المشروع إقراضاً أو اقتراضاً بعائد فائدة محدد (Lending/Interest).' },
+  { key: 'has_fixed_yield', label: 'عائد مضمون ثابت', hint: 'يَعِد بعائد ثابت مضمون على الإيداع أو التكديس (Staking المضمون).' },
+  { key: 'linked_haram_activity', label: 'ارتباط بأنشطة محرمة', hint: 'قمار أو مقامرة، أدوات رافعة ومشتقات، أو تمويل محظور — منشوراً من المشروع نفسه.' },
+  { key: 'is_asset_backed', label: 'مغطاة بأصل حقيقي', hint: 'عملة مستقرة أو مغلفة مدعومة بأصل فعلي معلَن مع تقارير تغطية.' },
+  { key: 'pure_speculation', label: 'مضاربة خالصة', hint: 'لا قيمة جوهرية ولا منفعة — التداول عليها غرر ومضاربة خالصة.' },
+  { key: 'privacy_concern', label: 'إخفاء عالٍ', hint: 'تصميم يمنع تتبع المعاملات بالكامل (خصوصية قسرية).' }
+];
+
+export type FactAnswers = Partial<Record<keyof ShariahFacts, boolean | null>>;
+
+/** يبني حقائق كاملة من إجابات نموذج التوثيق: ما لم يُجَب يبقى null */
+export function factsFromAnswers(answers: FactAnswers): ShariahFacts {
+  const facts = {
+    has_utility: null, is_memecoin: null, has_lending_interest: null, has_fixed_yield: null,
+    linked_haram_activity: null, is_asset_backed: null, pure_speculation: null, privacy_concern: null
+  } as ShariahFacts;
+  for (const q of FACT_QUESTIONS) {
+    const v = answers[q.key];
+    if (v === true || v === false) facts[q.key] = v;
+  }
+  return facts;
+}
+
 /* ============ قاعدة معرفة المشاريع (حقائق موثقة، قابلة للتعديل) ============ */
 /* الحقائق معلومات عامة معروفة عن المشاريع بتاريخ الإعداد. أي مشروع غير مدرج
    يبقى «للتحقق» ولا يظهر في القائمة — لا تخمين أبداً. */

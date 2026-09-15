@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { requestNotificationPermission } from '../lib/notifications';
+import { factsForSymbol } from '../lib/shariah';
 import Toggle from './ui/Toggle';
 
 const QUOTES = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH'];
@@ -27,11 +28,22 @@ export default function SettingsPanel() {
 
   /* ---- التصنيف الشرعي ---- */
   const shariah = useStore(s => s.shariah);
+  const symbols = useStore(s => s.symbols);
   const shariahStats = useMemo(() => {
     const counts = { halal: 0, haram: 0, uncertain: 0 };
     for (const a of analyses) counts[shariah[a.symbol]?.verdict ?? 'uncertain'] += 1;
     return counts;
   }, [analyses, shariah]);
+
+  const pendingDoc = useMemo(() => {
+    let n = 0;
+    for (const s of symbols) {
+      const row = shariah[s.symbol];
+      if (row) continue;
+      if (Object.values(factsForSymbol(s.symbol)).every(v => v === null)) n += 1;
+    }
+    return n;
+  }, [symbols, shariah]);
 
   const barcodeStats = useMemo(() => {
     const values = Object.values(barcodeScans);
@@ -85,16 +97,19 @@ export default function SettingsPanel() {
         <p className="text-xs mb-4 leading-relaxed max-w-3xl" style={{ color: 'var(--text-3)' }}>
           يقيّم النظام كل مشروع <b>تلقائياً</b> بمحرك قواعد حتمي يفحص الحقائق الموثقة (المنفعة، الإقراض بفائدة، الميسر،
           الغرر، التغطية…)، ويخرج الحكم مع <b>السبب والدليل من الكتاب والسنة</b> بمرجعه ودرجة صحته. ما لم تُوثَّق حقائقه
-          يُصنَّف «للتحقق» ويُمنع من الإدراج حتى اكتمال التوثيق — لا تخمين. إدراج أي عملة يتم عبر <b>تقرير الفحص وتأكيدك</b>.
+          يُصنَّف «للتحقق» ويُمنع من الإدراج حتى اكتمال التوثيق — لا تخمين. التوثيق يتم من زر <b>«وثّق الآن»</b> داخل
+          <b> تقرير فحص الإضافة</b>، وإدراج أي عملة يتم عبر التقرير وتأكيدك.
         </p>
         <div className="flex items-center gap-3 mb-4 flex-wrap">
           <span className="badge badge-up">حلال: {shariahStats.halal}</span>
           <span className="badge badge-down">حرام: {shariahStats.haram}</span>
           <span className="badge badge-warn">للتحقق: {shariahStats.uncertain}</span>
+          <span className="badge badge-warn" title="أزواج سبوت بلا حقائق موثقة بعد — افتح تقرير الإضافة ووثّقها من هناك">بانتظار التوثيق: {pendingDoc}</span>
           <span className="badge badge-neutral">العملات في اللوحة: {analyses.length}</span>
         </div>
         <div className="card p-4 text-[12px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
           لا توجد مفاتيح يدوية للعملات. الحكم الناتج من قاعدة المعرفة المحلية هو المرجع الوحيد، ولا تُقبل الإضافة إلا للعملة الحلال الموثقة.
+          أي عملة غير موثقة تُفتح عبر نموذج التوثيق في تقرير الإضافة: تجيب عن حقائق المشروع مع ذكر المصدر، فيقيّمها المحرك فوراً.
         </div>
       </section>
 

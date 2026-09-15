@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
-import { evaluateShariah, factsForSymbol, type ShariahAssessment, type EvidenceItem } from '../lib/shariah';
+import {
+  evaluateShariah, factsForSymbol, FACT_QUESTIONS, factsFromAnswers,
+  type ShariahAssessment, type EvidenceItem, type FactAnswers
+} from '../lib/shariah';
 import { suggestTrend } from '../lib/trend';
 import { TIMEFRAMES } from '../lib/types';
 import type { Trend, Timeframe } from '../lib/types';
@@ -23,8 +26,14 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
   const syncSymbols = useStore(s => s.syncSymbols);
   const pushToast = useStore(s => s.pushToast);
   const scanBarcode = useStore(s => s.scanBarcode);
+  const saveShariah = useStore(s => s.saveShariah);
 
   const [adding, setAdding] = useState(false);
+  const [docOpen, setDocOpen] = useState(false);
+  const [docAnswers, setDocAnswers] = useState<FactAnswers>({});
+  const [docSource, setDocSource] = useState('');
+  const [docNotes, setDocNotes] = useState('');
+  const [savingDoc, setSavingDoc] = useState(false);
   const [tfLower, setTfLower] = useState<Timeframe>('15m');
   const [tfUpper, setTfUpper] = useState<Timeframe>('4h');
   const [trendLower, setTrendLower] = useState<Trend | null>(null);
@@ -92,6 +101,53 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
 
   const haramBlocked = verdict === 'haram' && !undocumented;
   const shariahBlocked = verdict !== 'halal' || undocumented || assessment.evidence.length === 0;
+  const docEligible = shariahBlocked && verdict !== 'haram';
+
+  const openDoc = () => {
+    const row = shariah[upSymbol];
+    if (row?.facts) {
+      const pre: FactAnswers = {};
+      for (const q of FACT_QUESTIONS) {
+        const v = (row.facts as Record<string, unknown>)[q.key];
+        if (typeof v === 'boolean') pre[q.key] = v;
+      }
+      setDocAnswers(pre);
+      setDocSource(row.source ?? '');
+      setDocNotes(row.notes ?? '');
+    } else {
+      setDocAnswers({});
+      setDocSource('');
+      setDocNotes('');
+    }
+    setDocOpen(true);
+  };
+
+  const docAnswered = FACT_QUESTIONS.some(q => docAnswers[q.key] === true || docAnswers[q.key] === false);
+  const canSaveDoc = docSource.trim().length >= 3 && docAnswered;
+
+  const saveDoc = async () => {
+    setSavingDoc(true);
+    try {
+      const facts = factsFromAnswers(docAnswers);
+      const res = evaluateShariah(facts, upSymbol);
+      await saveShariah(upSymbol, {
+        verdict: res.verdict,
+        facts: facts as unknown as Record<string, unknown>,
+        reasons: [res.headline, ...res.reasons],
+        evidence: res.evidence.map(({ id, type, text, ref, grade }) => ({ id, type, text, ref, grade })),
+        source: `توثيق المستخدم: ${docSource.trim()}`,
+        notes: docNotes.trim() || null
+      });
+      setDocOpen(false);
+      pushToast(res.verdict === 'halal'
+        ? `اعتبر المحرك ${upSymbol} حلالاً حسب التوثيق — فُتح الإدراج`
+        : `حُفظ التوثيق — حكم المحرك: ${VERDICT_STYLE[res.verdict].label}`);
+    } catch (e) {
+      pushToast(`فشل حفظ التوثيق: ${String(e)}`, 'alert');
+    } finally {
+      setSavingDoc(false);
+    }
+  };
 
   useEffect(() => {
     if (!isSpot) return;
@@ -225,9 +281,96 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
               <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>2) حكم المحرك الشرعي</span>
               <span className={`badge ${vs.cls}`}>{vs.label}</span>
             </div>
-            {undocumented && (
-              <div className="rounded-lg p-2.5 text-[12px] leading-relaxed" style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)', color: '#fbbf24' }}>
-                لا توجد بيانات شرعية موثقة عن هذا المشروع في قاعدة المعرفة — الإدراج مقفول حتى يكتمل التوثيق.
+            {docEligible && !docOpen && (
+              <div
+                className="rounded-lg p-2.5 flex items-center justify-between gap-2 flex-wrap"
+                style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)' }}
+              >
+                <span className="text-[12px] leading-relaxed" style={{ color: '#fbbf24' }}>
+                  {undocumented
+                    ? 'لا توجد بيانات موثقة عن هذا المشروع — وثّقه الآن لفتح الإدراج.'
+                    : 'الحكم «للتحقق» حسب التوثيق الحالي — يمكنك استكمال التوثيق أو تعديله.'}
+                </span>
+                <button className="btn !py-1 !px-2.5 text-[11px]" onClick={openDoc}>وثّق الآن</button>
+              </div>
+            )}
+            {docOpen && (
+              <div className="rounded-xl p-3 space-y-2.5" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-2)' }}>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[12.5px] font-bold" style={{ color: 'var(--text-1)' }}>
+                    نموذج توثيق المشروع — الحقائق الثمانية التي يفحصها المحرك
+                  </span>
+                  <button className="btn !py-1 !px-2.5 text-[11px]" onClick={() => setDocOpen(false)}>إغلاق النموذج</button>
+                </div>
+                <div className="space-y-1.5">
+                  {FACT_QUESTIONS.map(q => {
+                    const val = docAnswers[q.key] ?? null;
+                    const pill = (v: boolean | null, label: string, activeBg: string) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => setDocAnswers(a => ({ ...a, [q.key]: v }))}
+                        className="text-[10.5px] px-2 py-0.5 rounded-full font-semibold"
+                        style={{
+                          background: val === v ? activeBg : 'var(--surface-2)',
+                          color: val === v ? '#fff' : 'var(--text-2)',
+                          border: `1px solid ${val === v ? activeBg : 'var(--border-1)'}`,
+                          transition: 'background var(--transition), color var(--transition)'
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                    return (
+                      <div
+                        key={q.key}
+                        className="rounded-lg p-2.5 space-y-1"
+                        style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-[12px] font-bold" style={{ color: 'var(--text-1)' }}>{q.label}</span>
+                          <div className="flex gap-1">
+                            {pill(true, 'نعم', 'var(--up)')}
+                            {pill(false, 'لا', 'var(--down)')}
+                            {pill(null, 'لا أعرف', 'var(--text-3)')}
+                          </div>
+                        </div>
+                        <div className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-3)' }}>{q.hint}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="space-y-1.5">
+                  <input
+                    value={docSource}
+                    onChange={e => setDocSource(e.target.value)}
+                    placeholder="المصدر إلزامي: اسم الموقع أو الوثيقة + الرابط إن أمكن"
+                    className="w-full rounded-lg px-3 py-2 text-[12px]"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+                  />
+                  <input
+                    value={docNotes}
+                    onChange={e => setDocNotes(e.target.value)}
+                    placeholder="ملاحظات إضافية (اختياري)"
+                    className="w-full rounded-lg px-3 py-2 text-[12px]"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+                  />
+                </div>
+                <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-4)' }}>
+                  التوثيق مسؤوليتك في الدقة والأمانة؛ المحرك يطبق قواعده الحتمية على ما تُدخله فقط — لا يخمّن النظام شيئاً، والحكم الشرعي النهائي لأهل العلم.
+                </p>
+                <button
+                  className="btn btn-accent w-full"
+                  onClick={() => void saveDoc()}
+                  disabled={savingDoc || !canSaveDoc}
+                >
+                  {savingDoc ? '…يُحفظ ويُقيَّم' : 'احفظ التوثيق وقيّم الآن'}
+                </button>
+                {!canSaveDoc && (
+                  <div className="text-[10.5px]" style={{ color: 'var(--text-3)' }}>
+                    يلزم للاكتمال: ذكر المصدر + الإجابة عن سؤال واحد على الأقل (نعم/لا).
+                  </div>
+                )}
               </div>
             )}
             <p className="text-[12.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>{assessment.headline}</p>
@@ -328,7 +471,9 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
             {haramBlocked || shariahBlocked ? (
               <div className="flex items-center gap-2">
                 <span className="text-[12px]" style={{ color: verdict === 'haram' ? '#fb7185' : '#fbbf24' }}>
-                  {verdict === 'haram' ? 'محرّمة حسب البيانات الموثقة' : 'لا يوجد حكم حلال موثق — الإدراج مقفول'}
+                  {verdict === 'haram'
+                    ? 'محرّمة حسب البيانات الموثقة'
+                    : 'لا يوجد حكم حلال موثق — وثّق المشروع من النموذج أعلاه لفتح الإدراج'}
                 </span>
                 <button className="btn btn-accent" disabled>تأكيد الإضافة</button>
               </div>
