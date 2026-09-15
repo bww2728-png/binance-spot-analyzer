@@ -75,8 +75,9 @@ export async function fetchOlderKlines(
   interval: string,
   oldestTime: number
 ): Promise<Candle[]> {
-  const startTime = oldestTime * 1000 - 1; // Binance uses ms
-  const incoming = await fetchKlines(symbol, interval, 1000, startTime);
+  // endTime يجعل Binance يبحث للخلف في الزمن ويعيد آخر 1000 شمعة قبل أقدم شمعة لدينا
+  const endTime = oldestTime * 1000 - 1; // Binance uses ms
+  const incoming = await fetchKlines(symbol, interval, 1000, undefined, endTime);
   return incoming.filter(c => c.time < oldestTime);
 }
 
