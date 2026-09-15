@@ -73,13 +73,64 @@ export default {
     upsert: (row) => rest('/coin_flags?on_conflict=symbol&select=*', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=representation' })
   },
   barcodeScans: {
-    list: () => rest('/barcode_scans?select=*&order=scanned_at.desc'),
-    get: (symbol) => rest(`/barcode_scans?symbol=eq.${encodeURIComponent(symbol)}&select=*`),
-    upsert: (row) => rest('/barcode_scans?on_conflict=symbol&select=*', {
-      method: 'POST',
-      body: row,
-      prefer: 'resolution=merge-duplicates,return=representation'
-    })
+    list: async () => {
+      try {
+        return await rest('/barcode_scans?select=*&order=scanned_at.desc');
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        const flags = await rest('/coin_flags?select=*');
+        return flags.map((f) => ({
+          symbol: f.symbol,
+          is_barcode: !!f.barcode,
+          score: 0,
+          gap_count: 0,
+          big_wick_count: 0,
+          candles_count: 0,
+          threshold: 35,
+          reason: 'نتيجة توافق قديمة — أعد الفحص لتفاصيل أحدث',
+          status: 'success',
+          source: 'coin_flags compatibility',
+          scanned_at: f.updated_at
+        }));
+      }
+    },
+    get: async (symbol) => {
+      try {
+        return await rest(`/barcode_scans?symbol=eq.${encodeURIComponent(symbol)}&select=*`);
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        const flags = await rest(`/coin_flags?symbol=eq.${encodeURIComponent(symbol)}&select=*`);
+        return flags.map((f) => ({
+          symbol: f.symbol,
+          is_barcode: !!f.barcode,
+          score: 0,
+          gap_count: 0,
+          big_wick_count: 0,
+          candles_count: 0,
+          threshold: 35,
+          reason: 'نتيجة توافق قديمة — أعد الفحص لتفاصيل أحدث',
+          status: 'success',
+          source: 'coin_flags compatibility',
+          scanned_at: f.updated_at
+        }));
+      }
+    },
+    upsert: async (row) => {
+      try {
+        return await rest('/barcode_scans?on_conflict=symbol&select=*', {
+          method: 'POST',
+          body: row,
+          prefer: 'resolution=merge-duplicates,return=representation'
+        });
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        return rest('/coin_flags?on_conflict=symbol&select=*', {
+          method: 'POST',
+          body: { symbol: row.symbol, halal: true, barcode: row.is_barcode, updated_at: row.scanned_at },
+          prefer: 'resolution=merge-duplicates,return=representation'
+        }).then(() => [row]);
+      }
+    }
   },
   coinShariah: {
     list: () => rest('/coin_shariah?select=*'),
