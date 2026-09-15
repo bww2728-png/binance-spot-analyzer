@@ -392,7 +392,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
                 ) : autoResearch.status === 'not_found' ? (
                   <div className="text-[11.5px] space-y-1.5" style={{ color: 'var(--text-2)' }}>
                     <span>
-                      هذه العملة <b>غير موجودة في CoinGecko</b> (فحصنا البحث ومطابقة الرموز وأسواق بينانس) —
+                      هذه العملة <b>غير موجودة في CoinGecko ولا CoinMarketCap</b> (فحصنا البحث ومطابقة الرموز وأسواق بينانس) —
                       لا يتوفر بحث آلي لها، ولا تُعاد محاولتها الدورية. التوثيق اليدوي متاح دائماً.
                     </span>
                     <div className="flex gap-1.5 flex-wrap">

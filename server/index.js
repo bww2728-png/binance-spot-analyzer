@@ -273,13 +273,13 @@ const persistAutoFacts = async (symbol, research) => {
     reasons: JSON.stringify([hasAny
       ? 'حقائق موثقة آلياً من المصادر — يقيّمها محرك القواعد الحتمي في الواجهة'
       : (research.status === 'not_found'
-        ? 'العملة غير موجودة في CoinGecko — لا يتوفر بحث آلي لها، والتوثيق اليدوي متاح'
+        ? 'العملة غير موجودة في CoinGecko ولا CoinMarketCap — لا يتوفر بحث آلي لها، والتوثيق اليدوي متاح'
         : 'لا توجد بيانات كافية بثقة مقبولة — تبقى للتحقق وإعادة البحث دورياً')]),
     evidence: '[]',
     source: hasAny
       ? `${AUTO_SOURCE} — ${research.geckoId}`
       : (research.status === 'not_found'
-        ? 'بحث آلي: غير موجودة في CoinGecko'
+        ? 'بحث آلي: غير موجودة في CoinGecko ولا CoinMarketCap'
         : `${AUTO_SOURCE} (بلا نتيجة كافية)`),
     notes: meta,
     updated_at: Date.now()
@@ -318,7 +318,7 @@ app.get('/api/shariah-research/status', handle(async (_req, res) => {
   const documented = new Set(rows.map(r => r.symbol));
   const pending = symbolsRows.filter(s => !documented.has(s.symbol));
   const autoRows = rows.filter(r => (r.source || '').startsWith(AUTO_SOURCE));
-  const notFound = autoRows.filter(r => (r.source || '').includes('غير موجودة في CoinGecko'));
+  const notFound = autoRows.filter(r => (r.source || '').includes('غير موجودة في'));
   const insufficient = autoRows.filter(r => (r.source || '').includes('بلا نتيجة كافية'));
   const events = await db.events.list({ limit: 2000 });
   const changes = events.filter(e => e.type === 'shariah_auto_change').slice(0, 12);

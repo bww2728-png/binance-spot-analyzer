@@ -3,8 +3,30 @@ import assert from 'node:assert/strict';
 
 const { extractFacts, verdictGate, researchConfidence, researchSummary, FACT_KEYS, CONFIDENCE_THRESHOLD } =
   await import('../researchCore.mjs');
-const { pickCoinId, pickCoinIdFromMarkets, tickerMatchesBinanceBase, createRateLimiter } =
+const { pickCoinId, pickCoinIdFromMarkets, tickerMatchesBinanceBase, cmcToGeckoLike, createRateLimiter } =
   await import('../research.mjs');
+
+test('تحويل بيانات CoinMarketCap إلى كائن gecko-like سليم الاستخراج', () => {
+  const mapEntry = { id: 34567, symbol: 'CRWDB', slug: 'crowd-business', name: 'Crowd Business' };
+  const meta = {
+    name: 'Crowd Business', category: 'Smart Contract Platform', tags: ['DeFi', 'Oracle'],
+    description: 'A decentralized smart contract platform.', urls: { website: ['https://example.com'] }
+  };
+  const like = cmcToGeckoLike(mapEntry, meta);
+  assert.equal(like.name, 'Crowd Business');
+  assert.deepEqual(like.description, { en: 'A decentralized smart contract platform.' });
+  assert.deepEqual(like.links.homepage, ['https://example.com']);
+  const f = extractFacts(like);
+  assert.equal(f.has_utility.value, true);
+  assert.equal(f.has_utility.confidence, 0.85);
+});
+
+test('تحويل CoinMarketCap بدون metadata يعمل بحد أدنى، وقائمة فارغة تعيد null', () => {
+  const minimal = cmcToGeckoLike({ id: 1, symbol: 'X', slug: 'x', name: 'X' }, null);
+  assert.equal(minimal.categories.length, 0);
+  assert.equal(minimal.description.en, '');
+  assert.equal(cmcToGeckoLike(null, null), null);
+});
 
 test('مطابقة الرموز عبر /coins/markets: رمز حرفي واحد يعاد مباشرة', () => {
   const markets = [{ id: 'magic-eden', symbol: 'ME', market_cap_rank: 120 }];

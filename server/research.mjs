@@ -33,6 +33,44 @@ async function throttledFetch(url, { attempts = 3 } = {}) {
   throw new Error('تجاوز حد CoinGecko بعد إعادة المحاولات');
 }
 
+/* ---- CoinMarketCap: مصدر ثانٍ منسّق للعملات الغائبة عن CoinGecko ---- */
+const CMC = 'https://pro-api.coinmarketcap.com/v1';
+const cmcLimiter = createRateLimiter(2200);
+
+export function cmcToGeckoLike(mapEntry, meta) {
+  if (!mapEntry) return null;
+  const cats = [meta?.category, ...(meta?.tags ?? [])].filter(c => typeof c === 'string' && c.trim());
+  return {
+    id: mapEntry.id,
+    slug: mapEntry.slug ?? String(mapEntry.symbol ?? '').toLowerCase(),
+    name: meta?.name ?? mapEntry.name ?? null,
+    categories: cats,
+    description: { en: typeof meta?.description === 'string' ? meta.description : '' },
+    links: { homepage: Array.isArray(meta?.urls?.website) ? meta.urls.website.filter(u => typeof u === 'string' && u) : [] }
+  };
+}
+
+async function cmcLookup(base) {
+  const key = process.env.CMC_API_KEY;
+  if (!key) return null;
+  const headers = { 'X-CMC_PRO_API_KEY': key, accept: 'application/json' };
+  await cmcLimiter.acquire();
+  const mapRes = await fetch(`${CMC}/cryptocurrency/map?symbol=${encodeURIComponent(base)}`, {
+    headers, signal: AbortSignal.timeout(15000)
+  });
+  if (!mapRes.ok) return null;
+  const mapJson = await mapRes.json();
+  const entry = Array.isArray(mapJson?.data) ? mapJson.data[0] : null;
+  if (!entry) return null;
+  await cmcLimiter.acquire();
+  const infoRes = await fetch(`${CMC}/cryptocurrency/info?symbol=${encodeURIComponent(base)}`, {
+    headers, signal: AbortSignal.timeout(15000)
+  });
+  if (!infoRes.ok) return cmcToGeckoLike(entry, null);
+  const infoJson = await infoRes.json();
+  return cmcToGeckoLike(entry, infoJson?.data?.[base] ?? null);
+}
+
 /** يطابق رمز الأصل مع نتيجة البحث: رمز صريح متساوٍ فقط */
 export function pickCoinId(searchResult, base) {
   const coins = Array.isArray(searchResult?.coins) ? searchResult.coins : [];
@@ -126,9 +164,41 @@ export async function researchSymbol(base) {
       }
     }
     if (!id) {
-      /* حالة نهائية: العملة غير موجودة في CoinGecko — لا فائدة من إعادة المحاولة الدورية */
+      /* الطبقة 4: CoinMarketCap كمصدر ثانٍ — نفس خط الأنابيب الحتمي (القواعد + بوابة 0.85) */
+      const cmcCoin = await cmcLookup(base).catch(() => null);
+      if (cmcCoin) {
+        const facts = extractFacts(cmcCoin, '');
+        const decisive = ['has_utility', 'is_memecoin', 'has_lending_interest', 'linked_haram_activity'];
+        const anyDecisive = decisive.some(k => facts[k].value !== null);
+        if (!anyDecisive && Array.isArray(cmcCoin?.links?.homepage)) {
+          const home = cmcCoin.links.homepage.find(u => typeof u === 'string' && u.startsWith('http'));
+          if (home) {
+            const homeText = await fetchHomepageText(home);
+            const enriched = extractFacts(cmcCoin, homeText);
+            for (const k of Object.keys(facts)) {
+              if (facts[k].value === null || enriched[k].confidence > facts[k].confidence) facts[k] = enriched[k];
+            }
+          }
+        }
+        const gated = verdictGate(facts);
+        out.coinName = cmcCoin.name;
+        out.geckoId = `cmc:${cmcCoin.id}`;
+        out.facts = facts;
+        out.gated = gated;
+        out.confidence = researchConfidence(facts);
+        out.summary = researchSummary(facts, gated);
+        out.sources = [`https://coinmarketcap.com/currencies/${cmcCoin.slug}/`];
+        const home = cmcCoin?.links?.homepage?.find(u => typeof u === 'string' && u.startsWith('http'));
+        if (home) out.sources.push(home);
+        out.status = out.summary.resolvedGated > 0 ? 'documented' : 'insufficient';
+        out.message = out.status === 'insufficient'
+          ? 'لا توجد بيانات كافية بثقة مقبولة (من CoinMarketCap) — تبقى للتحقق وإعادة البحث دورياً'
+          : '';
+        return out;
+      }
+      /* حالة نهائية: غير موجودة في المصدرين المنسقين — لا فائدة من إعادة المحاولة الدورية */
       out.status = 'not_found';
-      out.message = 'هذه العملة غير موجودة في CoinGecko — لا يتوفر بحث آلي لها. وثّقها يدوياً من النماذج أدناه.';
+      out.message = 'هذه العملة غير موجودة في CoinGecko ولا CoinMarketCap — لا يتوفر بحث آلي لها. وثّقها يدوياً من النماذج أدناه.';
       return out;
     }
     const coin = await throttledFetch(
