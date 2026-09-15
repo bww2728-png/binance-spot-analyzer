@@ -35,6 +35,20 @@ export interface CoinFlag {
   updated_at: number;
 }
 
+export interface BarcodeScan {
+  symbol: string;
+  is_barcode: boolean;
+  score: number;
+  gap_count: number;
+  big_wick_count: number;
+  candles_count: number;
+  threshold: number;
+  reason: string;
+  status: 'success' | 'failed';
+  source: string | null;
+  scanned_at: number;
+}
+
 /** صف التصنيف الشرعي المخزن لكل عملة */
 export interface CoinShariahRow {
   symbol: string;

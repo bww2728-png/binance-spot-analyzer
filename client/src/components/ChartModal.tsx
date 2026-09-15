@@ -106,13 +106,25 @@ export default function ChartModal() {
   const close = useStore(s => s.closeChart);
   const analyses = useStore(s => s.analyses);
   const update = useStore(s => s.updateAnalysis);
+  const scanBarcode = useStore(s => s.scanBarcode);
   const analysis = analyses.find(a => a.symbol === modal.symbol);
   const livePrice = useStore(s => s.prices[modal.symbol]);
-  const isBarcode = useStore(s => s.flags[modal.symbol]?.barcode === 1 || s.flags[modal.symbol.replace(/USDT$|USDC$|FDUSD$|BTC$|ETH$/, '')]?.barcode === 1);
+  const barcodeScan = useStore(s => s.barcodeScans[modal.symbol]);
+  const isBarcode = barcodeScan?.status === 'success' && barcodeScan.is_barcode;
   const [barcodeAck, setBarcodeAck] = useState(false);
+  const [barcodeScanning, setBarcodeScanning] = useState(false);
 
   const [tfLower, setTfLower] = useState(analysis?.tf_lower ?? '15m');
   const [tfUpper, setTfUpper] = useState(analysis?.tf_upper ?? '4h');
+
+  useEffect(() => {
+    let disposed = false;
+    setBarcodeScanning(true);
+    void scanBarcode(modal.symbol)
+      .catch(() => undefined)
+      .finally(() => { if (!disposed) setBarcodeScanning(false); });
+    return () => { disposed = true; };
+  }, [modal.symbol, scanBarcode]);
 
   const zones = useMemo(() => ({
     ssl: analysis?.ssl_price ?? null,
@@ -163,14 +175,20 @@ export default function ChartModal() {
         </div>
 
         <div className="p-5">
-          {isBarcode && !barcodeAck && (
+          {barcodeScanning && (
+            <div className="mb-5 rounded-xl p-3.5 text-[12px]" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
+              جارٍ تأكيد فحص الباركود على آخر 100 شمعة دقيقة…
+            </div>
+          )}
+          {barcodeScan?.status === 'success' && !barcodeAck && (
             <div
               className="mb-5 rounded-xl p-3.5 flex items-start justify-between gap-3 flex-wrap"
               style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.35)' }}
               role="alert"
             >
               <div className="text-[12.5px] leading-relaxed flex-1" style={{ color: '#fbbf24' }}>
-                <b>تحذير «باركود»:</b> شموع الدقيقة لهذه العملة متقطعة وغير مستقرة، فالشارت قد يبدو مضللاً.
+                <b>{isBarcode ? 'تحذير «باركود»:' : 'نتيجة فحص الباركود:'}</b> {barcodeScan.reason}.
+                الدرجة {barcodeScan.score} من 100، وفُحصت {barcodeScan.candles_count} شمعة.
                 مراقبة SSL/BSL تعمل على السعر الحي المباشر ولا تتأثر — والوسم تحذيري فقط ولا يستبعد العملة.
               </div>
               <button className="btn btn-accent !py-1.5 !px-3 text-[11px]" onClick={() => setBarcodeAck(true)}>

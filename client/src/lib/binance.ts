@@ -37,28 +37,6 @@ export async function fetchKlines(symbol: string, interval: string, limit = 200)
   return res.json();
 }
 
-/** تنبيه تلقائي اختياري: كشف شموع "الباركود" على فريم الدقيقة (متفرقة/غير مستقرة) */
-export async function detectBarcode(symbol: string): Promise<{ score: number; barcode: boolean }> {
-  try {
-    const raw = (await fetchKlines(symbol, '1m', 100)) as Candle[];
-    let gapCount = 0; let bigWick = 0;
-    for (let i = 0; i < raw.length; i++) {
-      const { open: o, high: h, low: l, close: c } = raw[i];
-      if (i > 0) {
-        const prevC = raw[i - 1].close;
-        if (Math.min(o, c) > prevC * 1.001 || Math.max(o, c) < prevC * 0.999) gapCount++;
-      }
-      const range = h - l;
-      const body = Math.abs(c - o);
-      if (range > 0 && body / range < 0.2) bigWick++;
-    }
-    const score = (gapCount / raw.length) * 60 + (bigWick / raw.length) * 40;
-    return { score: Math.round(score), barcode: score >= 35 };
-  } catch {
-    return { score: 0, barcode: false };
-  }
-}
-
 type StreamHandler = (data: unknown) => void;
 
 interface Conn {

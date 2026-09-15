@@ -72,6 +72,15 @@ export default {
     list: () => rest('/coin_flags?select=*'),
     upsert: (row) => rest('/coin_flags?on_conflict=symbol&select=*', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=representation' })
   },
+  barcodeScans: {
+    list: () => rest('/barcode_scans?select=*&order=scanned_at.desc'),
+    get: (symbol) => rest(`/barcode_scans?symbol=eq.${encodeURIComponent(symbol)}&select=*`),
+    upsert: (row) => rest('/barcode_scans?on_conflict=symbol&select=*', {
+      method: 'POST',
+      body: row,
+      prefer: 'resolution=merge-duplicates,return=representation'
+    })
+  },
   coinShariah: {
     list: () => rest('/coin_shariah?select=*'),
     upsert: (row) => rest('/coin_shariah?on_conflict=symbol&select=*', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=representation' }),

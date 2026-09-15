@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
+import { analyzeBarcode } from './barcodeCore.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -72,6 +73,17 @@ const serializeFlag = (f) => ({
   barcode: f.barcode ? 1 : 0
 });
 
+const serializeBarcodeScan = (row) => ({
+  ...row,
+  score: Number(row.score ?? 0),
+  gap_count: Number(row.gap_count ?? 0),
+  big_wick_count: Number(row.big_wick_count ?? 0),
+  candles_count: Number(row.candles_count ?? 0),
+  threshold: Number(row.threshold ?? 35),
+  is_barcode: !!row.is_barcode,
+  status: row.status || 'success'
+});
+
 const serializeSettings = (s) => ({
   ...s,
   sound_enabled: s.sound_enabled ? 1 : 0
@@ -117,20 +129,61 @@ app.delete('/api/analyses/:id', handle(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ---- coin flags ----
-app.get('/api/coin-flags', handle(async (_req, res) => {
-  const rows = await db.coinFlags.list();
-  res.json(rows.map(serializeFlag));
+// ---- فحص الباركود الآلي على شموع الدقيقة ----
+const scanBarcode = async (symbol) => {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const raw = await db.binance.klines(symbol, '1m', 100);
+      if (!Array.isArray(raw) || raw.length < 20) throw new Error('بيانات شموع غير كافية');
+      return analyzeBarcode(raw);
+    } catch (e) {
+      lastError = e;
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+  }
+  throw lastError ?? new Error('تعذر فحص الباركود');
+};
+
+app.get('/api/barcode-scans', handle(async (_req, res) => {
+  const rows = await db.barcodeScans.list();
+  res.json(rows.map(serializeBarcodeScan));
 }));
 
-app.put('/api/coin-flags/:symbol', handle(async (req, res) => {
+app.get('/api/barcode-scans/:symbol', handle(async (req, res) => {
+  const rows = await db.barcodeScans.get(req.params.symbol.toUpperCase());
+  res.json(rows[0] ? serializeBarcodeScan(rows[0]) : null);
+}));
+
+app.post('/api/barcode-scans/:symbol/scan', handle(async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
-  const all = await db.coinFlags.list();
-  const existing = all.find(f => f.symbol === symbol);
-  const halal = req.body.halal === undefined ? (existing ? existing.halal : true) : !!req.body.halal;
-  const barcode = req.body.barcode === undefined ? (existing ? existing.barcode : false) : !!req.body.barcode;
-  const rows = await db.coinFlags.upsert({ symbol, halal, barcode, updated_at: Date.now() });
-  res.json(serializeFlag(rows[0]));
+  let row;
+  try {
+    const result = await scanBarcode(symbol);
+    row = {
+      symbol,
+      ...result,
+      status: 'success',
+      source: 'Binance REST klines 1m',
+      scanned_at: Date.now()
+    };
+  } catch (error) {
+    row = {
+      symbol,
+      is_barcode: false,
+      score: 0,
+      gap_count: 0,
+      big_wick_count: 0,
+      candles_count: 0,
+      threshold: 35,
+      reason: `تعذر جلب شموع الدقيقة: ${error.message}`,
+      status: 'failed',
+      source: 'Binance REST klines 1m',
+      scanned_at: Date.now()
+    };
+  }
+  const rows = await db.barcodeScans.upsert(row);
+  res.json(serializeBarcodeScan(rows[0]));
 }));
 
 // ---- coin shariah (التصنيف الشرعي) ----
@@ -375,7 +428,42 @@ const periodicSync = async () => {
   }
 };
 
+const periodicBarcodeScan = async () => {
+  try {
+    const analyses = await db.analyses.list();
+    for (const analysis of analyses) {
+      try {
+        const result = await scanBarcode(analysis.symbol);
+        await db.barcodeScans.upsert({
+          symbol: analysis.symbol,
+          ...result,
+          status: 'success',
+          source: 'scheduled Binance REST klines 1m',
+          scanned_at: Date.now()
+        });
+      } catch (error) {
+        await db.barcodeScans.upsert({
+          symbol: analysis.symbol,
+          is_barcode: false,
+          score: 0,
+          gap_count: 0,
+          big_wick_count: 0,
+          candles_count: 0,
+          threshold: 35,
+          reason: `تعذر جلب شموع الدقيقة: ${error.message}`,
+          status: 'failed',
+          source: 'scheduled Binance REST klines 1m',
+          scanned_at: Date.now()
+        });
+      }
+    }
+  } catch (e) {
+    console.error('[barcode] periodic scan failed:', e.message);
+  }
+};
+
 setInterval(periodicSync, SYNC_MS);
+setInterval(periodicBarcodeScan, (Number(process.env.BARCODE_SCAN_HOURS) || 6) * 60 * 60 * 1000);
 
 // مزامنة تلقائية عند البدء إذا كانت فارغة أو متقادمة + بث فوري لأي جديد
 void (async () => {

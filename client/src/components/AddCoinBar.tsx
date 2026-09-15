@@ -102,7 +102,7 @@ export default function AddCoinBar() {
                   <span className="flex items-center gap-2 flex-wrap">
                     <span className="font-semibold text-[13px]" style={{ color: 'var(--text-1)' }}>{s.base}</span>
                     <span className={`badge ${vs.cls}`}>{vs.label}</span>
-                    {undocumented && <span className="badge badge-warn">قيد التوثيق</span>}
+                    {undocumented && <span className="badge badge-warn">غير موثق — ممنوع</span>}
                   </span>
                   <span className="num text-[11px]" style={{ color: 'var(--text-3)' }}>{s.symbol}</span>
                 </button>

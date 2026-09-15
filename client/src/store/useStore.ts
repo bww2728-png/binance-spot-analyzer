@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import type { Analysis, CoinFlag, CoinShariahRow, Candle, Settings } from '../lib/types';
+import type { Analysis, BarcodeScan, CoinShariahRow, Candle, Settings } from '../lib/types';
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
-import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, detectBarcode, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
+import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
 import { notifyBrowser, playAlarm } from '../lib/notifications';
 
 const API = '/api';
@@ -19,7 +19,7 @@ function initialTheme(): Theme {
 interface StoreState {
   symbols: SpotSymbol[];
   symbolsLoaded: boolean;
-  flags: Record<string, CoinFlag>;
+  barcodeScans: Record<string, BarcodeScan>;
   shariah: Record<string, CoinShariahRow>;
   shariahLoaded: boolean;
   analyses: Analysis[];
@@ -42,7 +42,7 @@ interface StoreState {
   addAnalysis: (symbol: string, extras?: Partial<Analysis>) => Promise<void>;
   updateAnalysis: (id: number, patch: Partial<Analysis>) => Promise<void>;
   deleteAnalysis: (id: number) => Promise<void>;
-  setFlag: (symbol: string, patch: { halal?: boolean; barcode?: boolean }) => Promise<void>;
+  scanBarcode: (symbol: string) => Promise<BarcodeScan>;
   refreshSymbols: (opts?: { silent?: boolean }) => Promise<void>;
   saveShariah: (symbol: string, row: Partial<CoinShariahRow>) => Promise<void>;
   deleteShariah: (symbol: string) => Promise<void>;
@@ -81,7 +81,7 @@ function alertIfHaramFollowed(symbol: string, verdict: string) {
 export const useStore = create<StoreState>((set, get) => ({
   symbols: [],
   symbolsLoaded: false,
-  flags: {},
+  barcodeScans: {},
   shariah: {},
   shariahLoaded: false,
   analyses: [],
@@ -101,14 +101,14 @@ export const useStore = create<StoreState>((set, get) => ({
       streams = new BinanceStreams();
       set({ streams });
     }
-    const [flags, analyses, settings] = await Promise.all([
-      api.getCoinFlags(),
+    const [barcodeScans, analyses, settings] = await Promise.all([
+      api.getBarcodeScans().catch(() => []),
       api.getAnalyses(),
       api.getSettings()
     ]);
-    const flagMap: Record<string, CoinFlag> = {};
-    for (const f of flags) flagMap[f.symbol] = f;
-    set({ flags: flagMap, analyses, settings: settings ?? null });
+    const barcodeMap: Record<string, BarcodeScan> = {};
+    for (const scan of barcodeScans) barcodeMap[scan.symbol] = scan;
+    set({ barcodeScans: barcodeMap, analyses, settings: settings ?? null });
     // شريعة: لا تُفشل init إذا تعذر الجدول
     try {
       const sh = await api.getShariah();
@@ -202,13 +202,6 @@ export const useStore = create<StoreState>((set, get) => ({
     const row = await api.createAnalysis({ symbol: symbol.toUpperCase(), ...(extras ?? {}) });
     set((st) => ({ analyses: [row, ...st.analyses] }));
     get().subscribePrice(row.symbol);
-    // فحص باركود تلقائي فور الإضافة: الوسم الحتمي إن وُجد النمط (بلا تدخل يدوي)
-    void detectBarcode(row.symbol).then(({ barcode }) => {
-      if (barcode) {
-        void get().setFlag(row.symbol, { barcode: true });
-        get().pushToast(`${row.symbol}: نمط «باركود» على فريم الدقيقة — وُسمت تلقائياً وسيظهر تحذير عند فتح شارتها`);
-      }
-    }).catch(() => { /* الفحص لا يمنع الإضافة */ });
   },
 
   updateAnalysis: async (id, patch) => {
@@ -232,9 +225,11 @@ export const useStore = create<StoreState>((set, get) => ({
     await api.deleteAnalysis(id);
   },
 
-  setFlag: async (symbol, patch) => {
-    const row = await api.setCoinFlag(symbol, patch);
-    set((st) => ({ flags: { ...st.flags, [symbol]: row } }));
+  scanBarcode: async (symbol) => {
+    const row = await api.scanBarcode(symbol);
+    set((st) => ({ barcodeScans: { ...st.barcodeScans, [symbol]: row } }));
+    if (row.status !== 'success') throw new Error(row.reason || 'تعذر فحص الباركود');
+    return row;
   },
 
   saveShariah: async (symbol, row) => {

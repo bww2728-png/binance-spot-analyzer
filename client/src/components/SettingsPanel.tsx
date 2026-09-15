@@ -1,9 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { requestNotificationPermission } from '../lib/notifications';
-import { evaluateShariah, factsForSymbol, DEFAULT_FACTS } from '../lib/shariah';
 import Toggle from './ui/Toggle';
-import ShariahBadge from './ShariahBadge';
 
 const QUOTES = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH'];
 
@@ -18,6 +16,8 @@ export default function SettingsPanel() {
   const settings = useStore(s => s.settings);
   const saveSettings = useStore(s => s.saveSettings);
   const analyses = useStore(s => s.analyses);
+  const barcodeScans = useStore(s => s.barcodeScans);
+  const lastSync = useStore(s => s.lastSync);
 
   const [notifPerm, setNotifPerm] = useState<NotificationPermission | 'unsupported'>(
     'Notification' in window ? Notification.permission : 'unsupported'
@@ -27,41 +27,20 @@ export default function SettingsPanel() {
 
   /* ---- التصنيف الشرعي ---- */
   const shariah = useStore(s => s.shariah);
-  const saveShariah = useStore(s => s.saveShariah);
-  const pushToast = useStore(s => s.pushToast);
-
-  const shariahSymbols = useMemo(() => {
-    const analyzed = analyses.map(a => a.symbol);
-    const catalog = Object.keys(DEFAULT_FACTS).map(b => `${b}USDT`);
-    return [...new Set([...analyzed, ...catalog])].sort();
-  }, [analyses]);
-
   const shariahStats = useMemo(() => {
     const counts = { halal: 0, haram: 0, uncertain: 0 };
-    for (const sym of shariahSymbols) {
-      const verdict = shariah[sym]?.verdict ?? evaluateShariah(factsForSymbol(sym), sym).verdict;
-      counts[verdict] += 1;
-    }
+    for (const a of analyses) counts[shariah[a.symbol]?.verdict ?? 'uncertain'] += 1;
     return counts;
-  }, [shariahSymbols, shariah]);
+  }, [analyses, shariah]);
 
-  const saveAllShariah = async () => {
-    let n = 0;
-    for (const sym of shariahSymbols) {
-      const facts = factsForSymbol(sym);
-      const res = evaluateShariah(facts, sym);
-      await saveShariah(sym, {
-        verdict: res.verdict,
-        facts: facts as unknown as Record<string, unknown>,
-        reasons: res.reasons,
-        evidence: res.evidence,
-        source: 'نظام التقييم الحتمي (قواعد مثبتة)',
-        notes: null
-      });
-      n += 1;
-    }
-    pushToast(`حُفظت تقييمات ${n} عملة في قاعدة البيانات`);
-  };
+  const barcodeStats = useMemo(() => {
+    const values = Object.values(barcodeScans);
+    return {
+      barcode: values.filter(v => v.status === 'success' && v.is_barcode).length,
+      normal: values.filter(v => v.status === 'success' && !v.is_barcode).length,
+      unknown: values.filter(v => v.status !== 'success').length
+    };
+  }, [barcodeScans]);
 
   return (
     <div className="p-6 space-y-8 max-w-5xl">
@@ -101,7 +80,7 @@ export default function SettingsPanel() {
       <section>
         <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
           <h2 className="text-[15px] font-bold" style={{ color: 'var(--text-1)' }}>التصنيف الشرعي (حلال / حرام)</h2>
-          <button className="btn btn-accent" onClick={() => void saveAllShariah()}>احفظ تقييمات كل العملات دفعة واحدة</button>
+          <span className="badge badge-neutral">تصنيف آلي — قراءة فقط</span>
         </div>
         <p className="text-xs mb-4 leading-relaxed max-w-3xl" style={{ color: 'var(--text-3)' }}>
           يقيّم النظام كل مشروع <b>تلقائياً</b> بمحرك قواعد حتمي يفحص الحقائق الموثقة (المنفعة، الإقراض بفائدة، الميسر،
@@ -112,21 +91,26 @@ export default function SettingsPanel() {
           <span className="badge badge-up">حلال: {shariahStats.halal}</span>
           <span className="badge badge-down">حرام: {shariahStats.haram}</span>
           <span className="badge badge-warn">للتحقق: {shariahStats.uncertain}</span>
-          <span className="badge badge-neutral">الأعمال المقيّمة: {shariahSymbols.length}</span>
+          <span className="badge badge-neutral">العملات في اللوحة: {analyses.length}</span>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-          {shariahSymbols.map(sym => (
-            <div
-              key={sym}
-              className="flex items-center justify-between gap-2 rounded-lg px-3.5 py-2"
-              style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', transition: 'border-color var(--transition)' }}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-2)'; }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-1)'; }}
-            >
-              <span className="font-semibold text-[13px] num" style={{ color: 'var(--text-1)' }}>{sym}</span>
-              <ShariahBadge symbol={sym} />
-            </div>
-          ))}
+        <div className="card p-4 text-[12px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
+          لا توجد مفاتيح يدوية للعملات. الحكم الناتج من قاعدة المعرفة المحلية هو المرجع الوحيد، ولا تُقبل الإضافة إلا للعملة الحلال الموثقة.
+        </div>
+      </section>
+
+      <section>
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
+          <h2 className="text-[15px] font-bold" style={{ color: 'var(--text-1)' }}>فحوصات الباركود — فريم الدقيقة</h2>
+          <span className="badge badge-neutral">فحص آلي — قراءة فقط</span>
+        </div>
+        <p className="text-xs mb-4 leading-relaxed max-w-3xl" style={{ color: 'var(--text-3)' }}>
+          يفحص النظام آخر 100 شمعة على فريم 1m وفق معيار الفجوات والظلال وعتبة 35%. النتيجة تحذير بصري فقط، ولا يوجد فلتر يدوي أو زر لتعديلها.
+        </p>
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
+          <span className="badge badge-warn">باركود: {barcodeStats.barcode}</span>
+          <span className="badge badge-up">ليست باركود: {barcodeStats.normal}</span>
+          <span className="badge badge-neutral">غير معروف: {barcodeStats.unknown}</span>
+          <span className="badge badge-neutral">آخر مزامنة للأزواج: {lastSync ? new Date(lastSync).toLocaleString('ar') : 'غير متوفر'}</span>
         </div>
       </section>
     </div>

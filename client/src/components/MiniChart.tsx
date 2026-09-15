@@ -34,7 +34,8 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
   const [ready, setReady] = useState(false);
   const subscribeKline = useStore(s => s.subscribeKline);
   const livePrice = useStore(s => s.prices[symbol]);
-  const isBarcode = useStore(s => s.flags[symbol]?.barcode === 1 || s.flags[symbol.replace(/USDT$|USDC$|FDUSD$|BTC$|ETH$/, '')]?.barcode === 1);
+  const barcodeScan = useStore(s => s.barcodeScans[symbol]);
+  const isBarcode = barcodeScan?.status === 'success' && barcodeScan.is_barcode;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -113,7 +114,7 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
         <div
           className="absolute bottom-1 left-1 text-[9.5px] font-semibold rounded px-1.5 py-0.5"
           style={{ background: 'rgba(245, 158, 11, 0.18)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)' }}
-          title="شموع الدقيقة متقطعة/غير مستقرة — الشارت قد يكون مضللاً"
+          title={`شموع الدقيقة متقطعة/غير مستقرة — الدرجة ${barcodeScan.score} — الشارت قد يكون مضللاً`}
         >
           باركود
         </div>

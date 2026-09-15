@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, CoinFlag, CoinShariahRow, EventLog, Settings } from './types';
+import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, Settings } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -21,7 +21,6 @@ const useSupabase = false;
 
 const SB = {
   analyses: 'analyses' as const,
-  coin_flags: 'coin_flags' as const,
   coin_shariah: 'coin_shariah' as const,
   settings: 'settings' as const,
   events_log: 'events_log' as const
@@ -76,17 +75,13 @@ const sbApi = {
     if (error) throw pgErr(error);
     return { ok: true };
   },
-  async getCoinFlags(): Promise<CoinFlag[]> {
-    const { data, error } = await supabase.from(SB.coin_flags).select('*');
-    if (error) throw pgErr(error);
-    return (data as AnyRow[]).map(r => fromDb<CoinFlag>(r));
+  async getBarcodeScans(): Promise<BarcodeScan[]> {
+    const res = await fetch(`${BASE}/barcode-scans`);
+    return j<BarcodeScan[]>(res);
   },
-  async setCoinFlag(symbol: string, body: { halal?: boolean; barcode?: boolean }): Promise<CoinFlag> {
-    const { data, error } = await supabase.from(SB.coin_flags)
-      .upsert({ symbol, ...body, updated_at: Date.now() }, { onConflict: 'symbol' })
-      .select().single();
-    if (error) throw pgErr(error);
-    return fromDb<CoinFlag>(data as AnyRow);
+  async scanBarcode(symbol: string): Promise<BarcodeScan> {
+    const res = await fetch(`${BASE}/barcode-scans/${encodeURIComponent(symbol)}/scan`, { method: 'POST' });
+    return j<BarcodeScan>(res);
   },
   async getShariah(): Promise<CoinShariahRow[]> {
     const { data, error } = await supabase.from(SB.coin_shariah).select('*').order('symbol');
@@ -154,9 +149,9 @@ const restApi = {
     fetch(`${BASE}/analyses/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<Analysis>),
   deleteAnalysis: (id: number) =>
     fetch(`${BASE}/analyses/${id}`, { method: 'DELETE' }).then(j<{ ok: boolean }>),
-  getCoinFlags: () => fetch(`${BASE}/coin-flags`).then(j<CoinFlag[]>),
-  setCoinFlag: (symbol: string, body: { halal?: boolean; barcode?: boolean }) =>
-    fetch(`${BASE}/coin-flags/${symbol}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<CoinFlag>),
+  getBarcodeScans: () => fetch(`${BASE}/barcode-scans`).then(j<BarcodeScan[]>),
+  scanBarcode: (symbol: string) =>
+    fetch(`${BASE}/barcode-scans/${encodeURIComponent(symbol)}/scan`, { method: 'POST' }).then(j<BarcodeScan>),
   getShariah: () => fetch(`${BASE}/shariah`).then(j<CoinShariahRow[]>),
   setShariah: (symbol: string, row: Partial<CoinShariahRow>) =>
     fetch(`${BASE}/shariah/${symbol}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row) }).then(j<CoinShariahRow>),

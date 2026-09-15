@@ -22,6 +22,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
   const addAnalysis = useStore(s => s.addAnalysis);
   const syncSymbols = useStore(s => s.syncSymbols);
   const pushToast = useStore(s => s.pushToast);
+  const scanBarcode = useStore(s => s.scanBarcode);
 
   const [adding, setAdding] = useState(false);
   const [tfLower, setTfLower] = useState<Timeframe>('15m');
@@ -31,6 +32,9 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
   const [basisLower, setBasisLower] = useState('');
   const [basisUpper, setBasisUpper] = useState('');
   const [suggesting, setSuggesting] = useState(false);
+  const [barcodeScan, setBarcodeScan] = useState<Awaited<ReturnType<typeof scanBarcode>> | null>(null);
+  const [barcodeScanning, setBarcodeScanning] = useState(false);
+  const [barcodeError, setBarcodeError] = useState('');
 
   const upSymbol = symbol.toUpperCase();
   const spotRow = useMemo(() => symbols.find(s => s.symbol === upSymbol), [symbols, upSymbol]);
@@ -87,6 +91,31 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
   }, [isSpot, upSymbol, tfLower, tfUpper]);
 
   const haramBlocked = verdict === 'haram' && !undocumented;
+  const shariahBlocked = verdict !== 'halal' || undocumented || assessment.evidence.length === 0;
+
+  useEffect(() => {
+    if (!isSpot) return;
+    let disposed = false;
+    setBarcodeScanning(true);
+    setBarcodeError('');
+    setBarcodeScan(null);
+    void (async () => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const result = await scanBarcode(upSymbol);
+          if (!disposed) setBarcodeScan(result);
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1)));
+        }
+      }
+      if (!disposed) setBarcodeError(String(lastError ?? 'تعذر فحص الباركود'));
+    })()
+      .finally(() => { if (!disposed) setBarcodeScanning(false); });
+    return () => { disposed = true; };
+  }, [isSpot, scanBarcode, upSymbol]);
 
   const confirm = async () => {
     setAdding(true);
@@ -97,7 +126,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
         tf_lower: tfLower,
         tf_upper: tfUpper
       });
-      pushToast(`أُضيفت ${upSymbol}${undocumented ? ' بوسم «قيد التوثيق»' : ''}`);
+      pushToast(`أُضيفت ${upSymbol}`);
       onClose();
     } catch (e) {
       pushToast(`فشل الإدراج: ${String(e)}`, 'alert');
@@ -198,8 +227,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
             </div>
             {undocumented && (
               <div className="rounded-lg p-2.5 text-[12px] leading-relaxed" style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)', color: '#fbbf24' }}>
-                لا توجد بيانات شرعية موثقة عن هذا المشروع في قاعدة المعرفة — سيُدرج بوسم برتقالي
-                «قيد التوثيق» حتى يُستكمل توثيقه (النظام لا يغفل أي عملة، والتحقق مسؤوليتك).
+                لا توجد بيانات شرعية موثقة عن هذا المشروع في قاعدة المعرفة — الإدراج مقفول حتى يكتمل التوثيق.
               </div>
             )}
             <p className="text-[12.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>{assessment.headline}</p>
@@ -233,9 +261,30 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
             <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-4)' }}>{assessment.disclaimer}</p>
           </section>
 
-          {/* 3) الاتجاه المقترح */}
+          {/* 3) فحص الباركود */}
+          <section className="card p-4 space-y-2.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>3) فحص الباركود — شموع الدقيقة</span>
+              {barcodeScanning && <span className="badge badge-neutral">جارٍ الفحص تلقائياً…</span>}
+              {!barcodeScanning && barcodeScan?.is_barcode && <span className="badge badge-warn">باركود — تحذير فقط</span>}
+              {!barcodeScanning && barcodeScan && !barcodeScan.is_barcode && <span className="badge badge-up">ليست باركود</span>}
+              {!barcodeScanning && barcodeError && <span className="badge badge-down">تعذر الفحص — ستتم إعادة المحاولة</span>}
+            </div>
+            {barcodeScan && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]" style={{ color: 'var(--text-2)' }}>
+                <span>الدرجة: <b className="num">{barcodeScan.score}</b></span>
+                <span>الشموع: <b className="num">{barcodeScan.candles_count}</b></span>
+                <span>الفجوات: <b className="num">{barcodeScan.gap_count}</b></span>
+                <span>الظلال: <b className="num">{barcodeScan.big_wick_count}</b></span>
+              </div>
+            )}
+            {barcodeScan && <p className="text-[11.5px]" style={{ color: 'var(--text-3)' }}>{barcodeScan.reason} — آخر فحص: {new Date(barcodeScan.scanned_at).toLocaleString('ar')}</p>}
+            {barcodeError && <p className="text-[11.5px]" style={{ color: 'var(--down)' }}>تعذر إكمال الفحص بعد المحاولات التلقائية؛ لن يتم تمكين الإضافة حتى ينجح الفحص.</p>}
+          </section>
+
+          {/* 4) الاتجاه المقترح */}
           <section className="card p-4 space-y-3">
-            <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>3) الاتجاه المقترح آلياً (قابل للتعديل)</span>
+            <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>4) الاتجاه المقترح آلياً (قابل للتعديل)</span>
             {suggesting && <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>…يحسب الاقتراح من الشموع</div>}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -276,16 +325,18 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
           {/* أزرار القرار */}
           <div className="flex items-center justify-between gap-3 flex-wrap pt-1">
             <button className="btn" onClick={onClose} disabled={adding}>إلغاء</button>
-            {haramBlocked ? (
+            {haramBlocked || shariahBlocked ? (
               <div className="flex items-center gap-2">
-                <span className="text-[12px]" style={{ color: '#fb7185' }}>محرّمة حسب البيانات الموثقة — الإدراج مقفول</span>
+                <span className="text-[12px]" style={{ color: verdict === 'haram' ? '#fb7185' : '#fbbf24' }}>
+                  {verdict === 'haram' ? 'محرّمة حسب البيانات الموثقة' : 'لا يوجد حكم حلال موثق — الإدراج مقفول'}
+                </span>
                 <button className="btn btn-accent" disabled>تأكيد الإضافة</button>
               </div>
             ) : (
               <button
                 className="btn btn-accent"
                 onClick={() => void confirm()}
-                disabled={adding || alreadyAdded || (!isSpot && !undocumented)}
+                disabled={adding || alreadyAdded || !isSpot || barcodeScanning || !barcodeScan || !!barcodeError}
                 title={(!isSpot && !undocumented) ? 'غير متوفر في قائمة السبوت — حدّث القائمة أولاً' : ''}
               >
                 {adding ? '…يُدرج' : 'تأكيد الإضافة'}
