@@ -26,7 +26,8 @@ const SERIOUS_CATEGORIES = [
   'gaming', 'gamefi', 'metaverse', 'nft', 'launchpad', 'exchange',
   'wallet', 'dao', 'governance', 'payments', 'interoperability',
   'scaling', 'rollup', 'data availability', 'zk rollup', 'optimistic rollup',
-  'artificial intelligence', 'ai agents', 'compute network', 'insurance'
+  'artificial intelligence', 'ai agents', 'compute network', 'insurance',
+  'decentralized finance'
 ];
 
 /** عناصر تُبطل شبهة الخصوصية: بنية تحتية معلنة لا أدوات إخفاء هوية */
@@ -44,7 +45,9 @@ const listHas = (list, ...needles) => needles.some(n => list.some(c => c.include
  */
 export function extractFacts(gecko, homepageText = '') {
   const categories = (gecko?.categories ?? []).map(c => String(c).toLowerCase());
-  const desc = String(gecko?.description ?? '').toLowerCase();
+  /* وصف CoinGecko يأتي كائناً {en: "..."} أو نصاً — نقبل الصيغتين */
+  const rawDesc = gecko?.description;
+  const desc = String(typeof rawDesc === 'string' ? rawDesc : (rawDesc?.en ?? '')).toLowerCase();
   const web = String(homepageText ?? '').toLowerCase();
   const hay = desc + '\n' + web;
 
@@ -103,6 +106,10 @@ export function extractFacts(gecko, homepageText = '') {
   kw(
     /\b(backed by|proof of reserves|fully collateralized)\b/,
     'is_asset_backed', 0.85, 'وصف رسمي: مغطاة بأصل أو ضمانات'
+  );
+  kw(
+    /\bstaking rewards?\b|\bproof[- ]of[- ]stake\b|\bstake\b.{0,50}\b(rewards?|yield)\b|\b(rewards?|yield)\b.{0,50}\bstak/,
+    'has_fixed_yield', 0.85, 'ذكر مكافآت الستيكنغ صراحة في المواد الرسمية للمشروع'
   );
 
   /* ---- 3) المنفعة: من التصنيفات الجدية فقط — الغياب ليس دليل منفعة ولا دليل عدمها ---- */

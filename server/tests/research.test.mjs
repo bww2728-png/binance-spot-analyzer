@@ -55,6 +55,54 @@ test('تحقق تيكارز بينانس: base مختلف أو شاذ أو بل�
   assert.equal(tickerMatchesBinanceBase(null, 'VELODROME'), false);
 });
 
+test('سد فجوة DeFi: عملة Sun Token الحقيقية (تصنيف DeFi + وصف staking rewards) تحسم منفعة وعائداً', () => {
+  const f = extractFacts({
+    categories: ['Decentralized Finance (DeFi)', 'Tron Ecosystem', 'Made in China'],
+    description: 'The SUN.io platform is TRON\'s first one-stop platform that supports stablecoin swap, token mining and self-governance. The new SUN token, as a multifunctional governance token, will grant token holders various rights and benefits such as the voting and governance right in the community, value capture, staking rewards, etc..'
+  });
+  assert.equal(f.has_utility.value, true);
+  assert.equal(f.has_utility.confidence, 0.85);
+  assert.equal(f.has_fixed_yield.value, true);
+  assert.equal(f.has_fixed_yield.confidence, 0.85);
+});
+
+test('وصف CoinGecko ككائن {en}: يُقرأ صحيحاً (خلل التوصيل التاريخي)', () => {
+  const f = extractFacts({
+    categories: ['Terra Ecosystem'],
+    description: { en: 'The network maintains security through a Proof of Stake system using the Tendermint consensus mechanism, and stakers earn rewards.' }
+  });
+  assert.equal(f.has_fixed_yield.value, true);
+  assert.equal(f.has_fixed_yield.confidence, 0.85);
+});
+
+test('قاعدة إثبات الحصة النصية: وصف رسمي بproof-of-stake يحسم العائد بلا تصنيفات', () => {
+  const f = extractFacts({
+    categories: ['Terra Ecosystem'],
+    description: 'Terra 2.0 is a proof-of-stake blockchain; stakers secure the network and earn rewards.'
+  });
+  assert.equal(f.has_fixed_yield.value, true);
+  assert.equal(f.has_fixed_yield.confidence, 0.85);
+  assert.equal(f.has_utility.value, null);
+});
+
+test('انحدار: عملة ميم بلا تصنيفات جدية تبقى بلا منفعة (سلوك سابق محفوظ)', () => {
+  const f = extractFacts({
+    categories: ['Meme', 'Solana Ecosystem'],
+    description: 'A community-driven token celebrating internet culture.'
+  });
+  assert.equal(f.has_utility.value, false);
+  assert.equal(f.has_utility.confidence, 0.8);
+});
+
+test('انحدار: فئة Decentralized Lottery وحدها لا تمنح منفعة', () => {
+  const f = extractFacts({
+    categories: ['Decentralized Lottery'],
+    description: 'Participate in decentralized lottery draws.'
+  });
+  assert.equal(f.has_utility.value, null);
+  assert.equal(f.has_fixed_yield.value, null);
+});
+
 test('عملة ميم رسمية: ميم + مضاربة + بلا منفعة بثقة عالية', () => {
   const f = extractFacts({
     categories: ['Meme', 'BNB Chain Ecosystem'],
