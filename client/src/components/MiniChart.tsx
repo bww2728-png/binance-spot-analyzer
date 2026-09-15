@@ -112,7 +112,7 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
       <div ref={containerRef} style={{ height }} className="rounded overflow-hidden" data-zones={zonesKey} />
       {isBarcode && (
         <div
-          className="absolute bottom-1 left-1 text-[9.5px] font-semibold rounded px-1.5 py-0.5"
+          className="absolute bottom-1 left-1 z-10 text-[9.5px] font-semibold rounded px-1.5 py-0.5"
           style={{ background: 'rgba(245, 158, 11, 0.18)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)' }}
           title={`شموع الدقيقة متقطعة/غير مستقرة — الدرجة ${barcodeScan.score} — الشارت قد يكون مضللاً`}
         >
@@ -121,7 +121,7 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
       )}
       {livePrice !== undefined && (
         <div
-          className="num absolute top-1 left-1 text-[10px] rounded px-1.5 py-0.5"
+          className="num absolute top-1 left-1 z-10 text-[10px] rounded px-1.5 py-0.5"
           style={{ background: 'rgba(10, 14, 22, 0.75)', color: 'var(--text-1)', border: '1px solid var(--border-1)' }}
         >
           {livePrice}

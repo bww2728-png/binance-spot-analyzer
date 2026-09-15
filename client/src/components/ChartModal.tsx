@@ -133,7 +133,7 @@ function BigChart({ symbol, timeframe, zones }: {
     <div className="relative">
       <div ref={containerRef} style={{ height: 340 }} className="rounded overflow-hidden" />
       {loading && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(15,21,34,0.45)' }}>
+        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(15,21,34,0.45)' }}>
           <span className="text-[12px] font-semibold" style={{ color: 'var(--text-2)' }}>جاري تحميل الشموع…</span>
         </div>
       )}
@@ -141,14 +141,14 @@ function BigChart({ symbol, timeframe, zones }: {
         <button
           type="button"
           onClick={() => void load(true)}
-          className="absolute bottom-3 left-3 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow"
+          className="absolute bottom-3 left-3 z-10 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow"
           style={{ background: 'var(--accent)', color: '#fff' }}
         >
           تحميل المزيد من التاريخ
         </button>
       )}
       {!canLoadMore && !loading && candlesRef.current.length > 0 && (
-        <div className="absolute bottom-3 left-3 text-[10.5px] px-2 py-1 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
+        <div className="absolute bottom-3 left-3 z-10 text-[10.5px] px-2 py-1 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
           لا توجد بيانات أقدم
         </div>
       )}
