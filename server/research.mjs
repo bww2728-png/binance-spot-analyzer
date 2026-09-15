@@ -126,8 +126,9 @@ export async function researchSymbol(base) {
       }
     }
     if (!id) {
-      out.status = 'insufficient';
-      out.message = 'لم يُعثر عبر البحث ولا مطابقة الرموز ولا أسواق بينانس في CoinGecko — يمكنك التوثيق يدوياً أو انتظار إعادة البحث الدورية';
+      /* حالة نهائية: العملة غير موجودة في CoinGecko — لا فائدة من إعادة المحاولة الدورية */
+      out.status = 'not_found';
+      out.message = 'هذه العملة غير موجودة في CoinGecko — لا يتوفر بحث آلي لها. وثّقها يدوياً من النماذج أدناه.';
       return out;
     }
     const coin = await throttledFetch(

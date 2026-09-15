@@ -47,7 +47,9 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
       pushToast(
         research.status === 'documented'
           ? `اكتمل البحث الآلي عن ${upSymbol} — ${research.summary.resolvedGated} حقيقة موثقة بثقة ${Math.round(research.confidence * 100)}%`
-          : `البحث عن ${upSymbol}: ${research.message}`,
+          : research.status === 'not_found'
+            ? `${upSymbol}: غير موجودة في CoinGecko — التوثيق اليدوي متاح`
+            : `البحث عن ${upSymbol}: ${research.message}`,
         research.status === 'documented' ? 'info' : 'alert'
       );
     } catch (e) {
@@ -345,8 +347,12 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
                   <span className="text-[12.5px] font-bold" style={{ color: 'var(--text-1)' }}>
                     نتيجة البحث الآلي{autoResearch.coinName ? `: ${autoResearch.coinName}` : ''}
                   </span>
-                  <span className={`badge ${autoResearch.status === 'documented' ? 'badge-up' : 'badge-warn'}`}>
-                    {autoResearch.status === 'documented' ? `موثق — ثقة ${Math.round(autoResearch.confidence * 100)}%` : 'لا بيانات كافية'}
+                  <span className={`badge ${autoResearch.status === 'documented' ? 'badge-up' : autoResearch.status === 'not_found' ? 'badge-neutral' : 'badge-warn'}`}>
+                    {autoResearch.status === 'documented'
+                      ? `موثق — ثقة ${Math.round(autoResearch.confidence * 100)}%`
+                      : autoResearch.status === 'not_found'
+                        ? 'غير موجودة في CoinGecko'
+                        : 'لا بيانات كافية'}
                   </span>
                 </div>
                 {autoResearch.status === 'documented' ? (
@@ -383,6 +389,17 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
                       </button>
                     </div>
                   </>
+                ) : autoResearch.status === 'not_found' ? (
+                  <div className="text-[11.5px] space-y-1.5" style={{ color: 'var(--text-2)' }}>
+                    <span>
+                      هذه العملة <b>غير موجودة في CoinGecko</b> (فحصنا البحث ومطابقة الرموز وأسواق بينانس) —
+                      لا يتوفر بحث آلي لها، ولا تُعاد محاولتها الدورية. التوثيق اليدوي متاح دائماً.
+                    </span>
+                    <div className="flex gap-1.5 flex-wrap">
+                      <button className="btn !py-1 !px-2.5 text-[11px]" onClick={openDoc}>وثّق يدوياً</button>
+                      <button className="btn !py-1 !px-2.5 text-[11px]" onClick={() => { setAutoResearch(null); }}>إغلاق النتيجة</button>
+                    </div>
+                  </div>
                 ) : (
                   <div className="text-[11.5px]" style={{ color: 'var(--text-3)' }}>
                     {autoResearch.message} — يمكنك التوثيق يدوياً أو انتظار إعادة البحث الدورية.

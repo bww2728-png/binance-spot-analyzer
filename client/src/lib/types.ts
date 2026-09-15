@@ -56,7 +56,7 @@ export interface FactExtract {
 }
 
 export interface ShariahResearch {
-  status: 'documented' | 'insufficient' | 'failed';
+  status: 'documented' | 'insufficient' | 'not_found' | 'failed';
   coinName: string | null;
   geckoId: string | null;
   facts: Record<string, FactExtract>;
@@ -72,6 +72,7 @@ export interface ShariahResearchStatus {
   documented: number;
   autoDocumented: number;
   insufficient: number;
+  notFound: number;
   lastRunAt: number;
   changes: { symbol: string; message: string; meta: { from?: string; to?: string; source?: string } | null; ts: number }[];
 }

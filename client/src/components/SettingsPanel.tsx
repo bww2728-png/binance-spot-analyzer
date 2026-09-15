@@ -141,6 +141,7 @@ export default function SettingsPanel() {
           <span className="badge badge-up">موثق آلياً: {researchStatus?.autoDocumented ?? '…'}</span>
           <span className="badge badge-warn">بانتظار البحث: {researchStatus?.pending ?? '…'}</span>
           <span className="badge badge-neutral">بلا بيانات كافية: {researchStatus?.insufficient ?? '…'}</span>
+          <span className="badge badge-neutral">غير موجودة في CoinGecko: {researchStatus?.notFound ?? '…'}</span>
           <span className="badge badge-neutral">
             آخر دورة: {researchStatus?.lastRunAt ? new Date(researchStatus.lastRunAt).toLocaleString('ar') : 'لم تبدأ بعد'}
           </span>
