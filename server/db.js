@@ -78,8 +78,16 @@ export default {
         return await rest('/barcode_scans?select=*&order=scanned_at.desc');
       } catch (error) {
         if (error.status !== 404) throw error;
+        const events = await rest('/events_log?type=eq.barcode_scan&select=*&order=ts.desc');
+        const latest = new Map();
+        for (const event of events) {
+          if (latest.has(event.symbol)) continue;
+          try {
+            latest.set(event.symbol, JSON.parse(event.meta || '{}'));
+          } catch { /* ignore malformed compatibility records */ }
+        }
         const flags = await rest('/coin_flags?select=*');
-        return flags.map((f) => ({
+        const legacy = flags.map((f) => ({
           symbol: f.symbol,
           is_barcode: !!f.barcode,
           score: 0,
@@ -92,6 +100,7 @@ export default {
           source: 'coin_flags compatibility',
           scanned_at: f.updated_at
         }));
+        return [...latest.values(), ...legacy.filter(row => !latest.has(row.symbol))];
       }
     },
     get: async (symbol) => {
@@ -99,6 +108,10 @@ export default {
         return await rest(`/barcode_scans?symbol=eq.${encodeURIComponent(symbol)}&select=*`);
       } catch (error) {
         if (error.status !== 404) throw error;
+        const events = await rest(`/events_log?type=eq.barcode_scan&symbol=eq.${encodeURIComponent(symbol)}&select=*&order=ts.desc&limit=1`);
+        if (events[0]?.meta) {
+          try { return [JSON.parse(events[0].meta)]; } catch { /* fall through */ }
+        }
         const flags = await rest(`/coin_flags?symbol=eq.${encodeURIComponent(symbol)}&select=*`);
         return flags.map((f) => ({
           symbol: f.symbol,
@@ -124,10 +137,17 @@ export default {
         });
       } catch (error) {
         if (error.status !== 404) throw error;
-        return rest('/coin_flags?on_conflict=symbol&select=*', {
+        const compat = { ...row, scanned_at: row.scanned_at };
+        return rest('/events_log?select=*', {
           method: 'POST',
-          body: { symbol: row.symbol, halal: true, barcode: row.is_barcode, updated_at: row.scanned_at },
-          prefer: 'resolution=merge-duplicates,return=representation'
+          body: {
+            symbol: row.symbol,
+            type: 'barcode_scan',
+            message: row.reason,
+            meta: JSON.stringify(compat),
+            ts: row.scanned_at
+          },
+          prefer: 'return=representation'
         }).then(() => [row]);
       }
     }
