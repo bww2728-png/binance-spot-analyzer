@@ -59,7 +59,7 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
 
     let disposed = false;
     let lastBarTime = 0;
-    void fetchKlines(symbol, timeframe, 120).then(candles => {
+    void fetchKlines(symbol, timeframe, 250).then(candles => {
       if (disposed || candles.length === 0) return;
       series.setData(candles.map(toBar));
       lastBarTime = candles[candles.length - 1].time;

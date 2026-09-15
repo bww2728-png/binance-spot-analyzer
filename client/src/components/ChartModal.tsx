@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
-import { fetchKlines } from '../lib/binance';
+import { fetchKlines, fetchOlderKlines } from '../lib/binance';
 import type { Candle, Timeframe } from '../lib/types';
 import { TIMEFRAMES } from '../lib/types';
-import { createChart, CandlestickSeries, type ISeriesApi, type IPriceLine, type UTCTimestamp } from 'lightweight-charts';
+import { createChart, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp } from 'lightweight-charts';
 import { CHART_COLORS } from './MiniChart';
 import Toggle from './ui/Toggle';
 
@@ -18,9 +18,57 @@ function BigChart({ symbol, timeframe, zones }: {
   zones: { ssl: number | null; bsl: number | null };
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
   const subscribeKline = useStore(s => s.subscribeKline);
   const [ready, setReady] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [canLoadMore, setCanLoadMore] = useState(false);
+  const [showLoadMore, setShowLoadMore] = useState(false);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const candlesRef = useRef<Candle[]>([]);
+  const canLoadMoreRef = useRef(false);
+
+  const load = async (loadOlder = false) => {
+    setLoading(true);
+    try {
+      let candles: Candle[];
+      if (loadOlder && candlesRef.current.length) {
+        const oldest = candlesRef.current[0].time;
+        const older = await fetchOlderKlines(symbol, timeframe, oldest);
+        if (older.length === 0) {
+          setCanLoadMore(false);
+          canLoadMoreRef.current = false;
+          setShowLoadMore(false);
+          setLoading(false);
+          return;
+        }
+        candles = [...older, ...candlesRef.current].sort((a, b) => a.time - b.time);
+      } else {
+        candles = await fetchKlines(symbol, timeframe, 1000);
+      }
+      candlesRef.current = candles;
+      if (!candles.length) {
+        setCanLoadMore(false);
+        canLoadMoreRef.current = false;
+        setShowLoadMore(false);
+        setLoading(false);
+        return;
+      }
+      const chart = chartRef.current;
+      const series = seriesRef.current;
+      if (chart && series) {
+        series.setData(candles.map(toBar));
+        if (!loadOlder) chart.timeScale().fitContent();
+      }
+      setCanLoadMore(candles.length >= 1000);
+      canLoadMoreRef.current = candles.length >= 1000;
+      setShowLoadMore(false);
+    } catch (e) {
+      console.error('[chart] load failed', e);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -32,24 +80,34 @@ function BigChart({ symbol, timeframe, zones }: {
       timeScale: { timeVisible: true, secondsVisible: false },
       crosshair: { mode: 0 }
     });
+    chartRef.current = chart;
     const s = chart.addSeries(CandlestickSeries, {
       upColor: CHART_COLORS.up, downColor: CHART_COLORS.down, borderVisible: false,
       wickUpColor: CHART_COLORS.up, wickDownColor: CHART_COLORS.down
     });
     seriesRef.current = s;
     setReady(true);
+    candlesRef.current = [];
+    void load(false);
+
     let disposed = false;
     let lastTime = 0;
-    void fetchKlines(symbol, timeframe, 300).then(candles => {
-      if (disposed || !candles.length) return;
-      s.setData(candles.map(toBar));
-      lastTime = candles[candles.length - 1].time;
-      chart.timeScale().fitContent();
-    }).catch(() => { /* ignore */ });
     const unsub = subscribeKline(symbol, timeframe, (k: Candle) => {
       if (disposed) return;
       if (k.time >= lastTime) { s.update(toBar(k)); lastTime = k.time; }
     });
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (!range || !canLoadMoreRef.current) return;
+      const from = range.from;
+      const dataSize = candlesRef.current.length;
+      if (dataSize > 0 && from <= dataSize * 0.15) {
+        setShowLoadMore(true);
+      } else {
+        setShowLoadMore(false);
+      }
+    });
+
     const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }));
     ro.observe(el);
     return () => {
@@ -57,10 +115,16 @@ function BigChart({ symbol, timeframe, zones }: {
       ro.disconnect();
       unsub();
       chart.remove();
+      chartRef.current = null;
       seriesRef.current = null;
       setReady(false);
+      setShowLoadMore(false);
+      setCanLoadMore(false);
+      canLoadMoreRef.current = false;
     };
   }, [symbol, timeframe, subscribeKline]);
+
+  // reset loadMore flag when timeframe/symbol changes (handled by effect teardown)
 
   useEffect(() => {
     const series = seriesRef.current;
@@ -79,7 +143,31 @@ function BigChart({ symbol, timeframe, zones }: {
     };
   }, [zones.ssl, zones.bsl, ready]);
 
-  return <div ref={containerRef} className="rounded-lg" style={{ border: '1px solid var(--border-1)' }} />;
+  return (
+    <div className="relative">
+      <div ref={containerRef} style={{ height: 340 }} className="rounded overflow-hidden" />
+      {loading && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(15,21,34,0.45)' }}>
+          <span className="text-[12px] font-semibold" style={{ color: 'var(--text-2)' }}>جاري تحميل الشموع…</span>
+        </div>
+      )}
+      {showLoadMore && canLoadMore && (
+        <button
+          type="button"
+          onClick={() => void load(true)}
+          className="absolute bottom-3 left-3 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow"
+          style={{ background: 'var(--accent)', color: '#fff' }}
+        >
+          تحميل المزيد من التاريخ
+        </button>
+      )}
+      {!canLoadMore && !loading && candlesRef.current.length > 0 && (
+        <div className="absolute bottom-3 left-3 text-[10.5px] px-2 py-1 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
+          لا توجد بيانات أقدم
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** زر حبوبة (Pill) لاختيار الفريم */

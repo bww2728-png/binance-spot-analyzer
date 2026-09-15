@@ -46,7 +46,12 @@ async function fetchBinanceJson(path, timeoutMs = 30000) {
 export default {
   binance: {
     exchangeInfo: () => fetchBinanceJson('/api/v3/exchangeInfo', 30000),
-    klines: (symbol, interval, limit) => fetchBinanceJson(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, 15000)
+    klines: (symbol, interval, limit, startTime, endTime) => {
+      const params = new URLSearchParams({ symbol, interval, limit: String(limit) });
+      if (startTime) params.set('startTime', String(startTime));
+      if (endTime) params.set('endTime', String(endTime));
+      return fetchBinanceJson(`/api/v3/klines?${params.toString()}`, 15000);
+    },
   },
   symbols: {
     list: (quote) => {

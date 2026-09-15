@@ -447,9 +447,15 @@ app.post('/api/symbols/sync', handle(async (_req, res) => {
 
 // ---- وكيل شموع بينانس (REST) ----
 app.get('/api/klines', handle(async (req, res) => {
-  const { symbol, interval, limit } = req.query;
+  const { symbol, interval, limit, startTime, endTime } = req.query;
   if (!symbol || !interval) return res.status(400).json({ error: 'symbol and interval required' });
-  const raw = await db.binance.klines(symbol, interval, Math.min(Number(limit) || 200, 1000));
+  const raw = await db.binance.klines(
+    symbol,
+    interval,
+    Math.min(Number(limit) || 200, 1000),
+    startTime ? Number(startTime) : undefined,
+    endTime ? Number(endTime) : undefined
+  );
   const candles = raw.map(k => ({
     time: Math.floor(Number(k[0]) / 1000),
     open: parseFloat(String(k[1])),

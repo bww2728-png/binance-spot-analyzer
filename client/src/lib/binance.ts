@@ -31,10 +31,53 @@ export async function syncSymbols(): Promise<{ total: number; saved: number }> {
   return res.json();
 }
 
-export async function fetchKlines(symbol: string, interval: string, limit = 200): Promise<Candle[]> {
-  const res = await fetch(`${API}/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`);
+const klinesCache = new Map<string, Candle[]>();
+
+function cacheKey(symbol: string, interval: string) {
+  return `${symbol}:${interval}`;
+}
+
+function mergeCandles(existing: Candle[] = [], incoming: Candle[] = []): Candle[] {
+  const map = new Map<number, Candle>();
+  for (const c of existing) map.set(c.time, c);
+  for (const c of incoming) map.set(c.time, c);
+  return Array.from(map.values()).sort((a, b) => a.time - b.time);
+}
+
+export { mergeCandles };
+
+export async function fetchKlines(
+  symbol: string,
+  interval: string,
+  limit = 1000,
+  startTime?: number,
+  endTime?: number
+): Promise<Candle[]> {
+  const key = cacheKey(symbol, interval);
+  const params = new URLSearchParams({
+    symbol,
+    interval,
+    limit: String(Math.min(limit, 1000))
+  });
+  if (startTime) params.set('startTime', String(startTime));
+  if (endTime) params.set('endTime', String(endTime));
+  const res = await fetch(`${API}/klines?${params.toString()}`);
   if (!res.ok) throw new Error(`klines HTTP ${res.status}`);
-  return res.json();
+  const incoming: Candle[] = await res.json();
+  const merged = mergeCandles(klinesCache.get(key), incoming);
+  klinesCache.set(key, merged);
+  return merged;
+}
+
+/** يجلب دفعات تاريخية إضافية قبل أقدم شمعة محفوظة */
+export async function fetchOlderKlines(
+  symbol: string,
+  interval: string,
+  oldestTime: number
+): Promise<Candle[]> {
+  const startTime = oldestTime * 1000 - 1; // Binance uses ms
+  const incoming = await fetchKlines(symbol, interval, 1000, startTime);
+  return incoming.filter(c => c.time < oldestTime);
 }
 
 type StreamHandler = (data: unknown) => void;
