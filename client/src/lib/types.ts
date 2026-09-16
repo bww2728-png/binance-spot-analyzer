@@ -67,6 +67,25 @@ export interface ShariahResearch {
   message: string;
 }
 
+export interface LiquidityZone {
+  id: string;
+  symbol: string;
+  type: 'BSL' | 'SSL';
+  price: number;
+  timeframe: string;
+  note: string;
+  created_at: number;
+  expires_at: number | null;
+  active: boolean;
+}
+
+export interface LiquidityZoneEvent {
+  type: 'zone_near' | 'zone_swept';
+  symbol: string;
+  zone: LiquidityZone;
+  price: number;
+}
+
 export interface ShariahResearchStatus {
   pending: number;
   documented: number;

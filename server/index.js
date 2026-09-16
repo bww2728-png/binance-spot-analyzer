@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
@@ -337,6 +338,99 @@ app.get('/api/shariah-research/status', handle(async (_req, res) => {
     }))
   });
 }));
+
+// ---- مناطق السيولة: CRUD + بث + مراقبة الاقتراب والسحب ----
+app.get('/api/zones', handle(async (_req, res) => {
+  res.json({ zones: await db.zones.list() });
+}));
+
+app.get('/api/zones/:symbol', handle(async (req, res) => {
+  res.json({ zones: await db.zones.list(req.params.symbol) });
+}));
+
+app.post('/api/zones', handle(async (req, res) => {
+  const b = req.body ?? {};
+  const symbol = String(b.symbol ?? '').toUpperCase();
+  const price = Number(b.price);
+  if (!symbol || !Number.isFinite(price) || price <= 0) {
+    return res.status(400).json({ error: 'بيانات منطقة غير صالحة' });
+  }
+  const zone = {
+    id: crypto.randomUUID(),
+    symbol,
+    type: b.type === 'BSL' ? 'BSL' : 'SSL',
+    price,
+    timeframe: String(b.timeframe ?? ''),
+    note: String(b.note ?? '').slice(0, 500),
+    created_at: Date.now(),
+    expires_at: Number(b.expires_at) > 0 ? Number(b.expires_at) : null,
+    active: true
+  };
+  await db.zones.append(zone);
+  broadcast({ type: 'zones_changed', symbol });
+  res.json({ ok: true, zone });
+}));
+
+app.patch('/api/zones/:id', handle(async (req, res) => {
+  const all = await db.zones.list();
+  const cur = all.find(z => z.id === req.params.id);
+  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
+  const b = req.body ?? {};
+  const zone = {
+    ...cur,
+    price: b.price != null && Number(b.price) > 0 ? Number(b.price) : cur.price,
+    note: b.note != null ? String(b.note).slice(0, 500) : cur.note,
+    type: b.type === 'BSL' || b.type === 'SSL' ? b.type : cur.type,
+    active: typeof b.active === 'boolean' ? b.active : cur.active
+  };
+  await db.zones.append(zone);
+  broadcast({ type: 'zones_changed', symbol: zone.symbol });
+  res.json({ ok: true, zone });
+}));
+
+app.delete('/api/zones/:id', handle(async (req, res) => {
+  const all = await db.zones.list();
+  const cur = all.find(z => z.id === req.params.id);
+  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
+  await db.zones.append({ ...cur, active: false });
+  broadcast({ type: 'zones_changed', symbol: cur.symbol });
+  res.json({ ok: true });
+}));
+
+// مراقبة المناطق: اقتراب السعر (≤0.2%) وسحب السيولة (عبور السعر للمنطقة)
+const zoneNotify = new Map();
+setInterval(() => {
+  void (async () => {
+    try {
+      const zones = await db.zones.list();
+      const now = Date.now();
+      const live = zones.filter(z => z.active && (!z.expires_at || z.expires_at > now));
+      if (!live.length) return;
+      const symbols = [...new Set(live.map(z => z.symbol))];
+      const prices = await db.binance.tickerPrices(symbols);
+      for (const z of live) {
+        const p = prices[z.symbol];
+        if (!p) continue;
+        const st = zoneNotify.get(z.id) ?? { near: false, swept: false };
+        if (!st.swept) {
+          const dist = Math.abs(p - z.price) / z.price;
+          if (dist <= 0.002 && !st.near) {
+            st.near = true;
+            broadcast({ type: 'zone_near', symbol: z.symbol, zone: z, price: p });
+          } else if (dist > 0.005 && st.near) {
+            st.near = false;
+          }
+          const crossed = z.type === 'BSL' ? p >= z.price : p <= z.price;
+          if (crossed) {
+            st.swept = true;
+            broadcast({ type: 'zone_swept', symbol: z.symbol, zone: z, price: p });
+          }
+          zoneNotify.set(z.id, st);
+        }
+      }
+    } catch { /* أخطاء المراقبة لا تعطل الخدمة */ }
+  })();
+}, 30000);
 
 // ---- المهمة الدورية: توثيق كل الأزواج غير الموثقة بالتدريج + إعادة بحث العملات غير الكافية ----
 const periodicResearch = async () => {

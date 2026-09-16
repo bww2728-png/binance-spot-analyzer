@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, Settings, ShariahResearch, ShariahResearchStatus } from './types';
+import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -139,6 +139,52 @@ const sbApi = {
       .select().single();
     if (error) throw pgErr(error);
     return data as EventLog;
+  },
+  async getZones(symbol?: string): Promise<{ zones: LiquidityZone[] }> {
+    let q = supabase.from(SB.events_log).select('*').eq('type', 'liquidity_zone').order('ts', { ascending: true }).limit(2000);
+    if (symbol) q = q.eq('symbol', symbol.toUpperCase());
+    const { data, error } = await q;
+    if (error) throw pgErr(error);
+    const latest = new Map<string, LiquidityZone>();
+    for (const e of data as EventLog[]) {
+      try {
+        const z = JSON.parse(e.meta || 'null') as LiquidityZone | null;
+        if (z?.id) latest.set(z.id, z);
+      } catch { /* ignore */ }
+    }
+    return { zones: [...latest.values()].filter(z => z.active !== false) };
+  },
+  async createZone(body: { symbol: string; timeframe: string; type: 'BSL' | 'SSL'; price: number; note?: string; expires_at?: number | null }): Promise<{ ok: boolean; zone: LiquidityZone }> {
+    const zone: LiquidityZone = {
+      id: crypto.randomUUID(),
+      symbol: body.symbol.toUpperCase(),
+      type: body.type,
+      price: body.price,
+      timeframe: body.timeframe,
+      note: body.note ?? '',
+      created_at: Date.now(),
+      expires_at: body.expires_at ?? null,
+      active: true
+    };
+    const { error } = await supabase.from(SB.events_log).insert({
+      ts: Date.now(), symbol: zone.symbol, type: 'liquidity_zone', message: zone.note || zone.type, meta: JSON.stringify(zone)
+    });
+    if (error) throw pgErr(error);
+    return { ok: true, zone };
+  },
+  async updateZone(id: string, body: { price?: number; note?: string; type?: 'BSL' | 'SSL'; active?: boolean }): Promise<{ ok: boolean; zone: LiquidityZone }> {
+    const { zones } = await this.getZones();
+    const cur = zones.find(z => z.id === id);
+    if (!cur) throw new Error('المنطقة غير موجودة');
+    const zone: LiquidityZone = { ...cur, ...body };
+    const { error } = await supabase.from(SB.events_log).insert({
+      ts: Date.now(), symbol: zone.symbol, type: 'liquidity_zone', message: zone.note || zone.type, meta: JSON.stringify(zone)
+    });
+    if (error) throw pgErr(error);
+    return { ok: true, zone };
+  },
+  async deleteZone(id: string): Promise<{ ok: boolean }> {
+    return this.updateZone(id, { active: false });
   }
 };
 
@@ -185,7 +231,15 @@ const restApi = {
     return fetch(`${BASE}/events?${q}`).then(j<EventLog[]>);
   },
   postEvent: (symbol: string, type: string, message: string, meta?: unknown) =>
-    fetch(`${BASE}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol, type, message, meta }) }).then(j<EventLog>)
+    fetch(`${BASE}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol, type, message, meta }) }).then(j<EventLog>),
+  getZones: (symbol?: string) =>
+    fetch(`${BASE}/zones${symbol ? '/' + encodeURIComponent(symbol) : ''}`).then(j<{ zones: LiquidityZone[] }>),
+  createZone: (body: { symbol: string; timeframe: string; type: 'BSL' | 'SSL'; price: number; note?: string; expires_at?: number | null }) =>
+    fetch(`${BASE}/zones`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
+  updateZone: (id: string, body: { price?: number; note?: string; type?: 'BSL' | 'SSL'; active?: boolean }) =>
+    fetch(`${BASE}/zones/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
+  deleteZone: (id: string) =>
+    fetch(`${BASE}/zones/${id}`, { method: 'DELETE' }).then(j<{ ok: boolean }>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

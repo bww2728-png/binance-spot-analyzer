@@ -255,11 +255,14 @@ export interface KlineMsg {
    ============================================================ */
 
 export interface SymbolsUpdateMsg {
-  type: 'symbols_updated' | 'hello';
+  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | string;
   total?: number;
   changed?: number;
   new_bases?: string[];
   last_updated?: number;
+  symbol?: string;
+  zone?: import('./types').LiquidityZone;
+  price?: number;
 }
 
 /** اتصال WebSocket بنفس أصل الخادم (مسار /ws) مع إعادة اتصال تلقائي */
@@ -277,7 +280,7 @@ export function connectSymbolsSocket(onUpdate: (msg: SymbolsUpdateMsg) => void):
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data as string) as SymbolsUpdateMsg;
-        if (msg.type === 'symbols_updated' || msg.type === 'hello') onUpdate(msg);
+        if (msg.type) onUpdate(msg);
       } catch { /* ignore malformed */ }
     };
     ws.onclose = () => {

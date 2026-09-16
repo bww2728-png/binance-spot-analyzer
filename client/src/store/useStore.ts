@@ -22,6 +22,8 @@ function initialTheme(): Theme {
 interface StoreState {
   symbols: SpotSymbol[];
   symbolsLoaded: boolean;
+  zoneCounts: Record<string, number> | null;
+  refreshZoneCounts: () => Promise<void>;
   barcodeScans: Record<string, BarcodeScan>;
   shariah: Record<string, CoinShariahRow>;
   shariahLoaded: boolean;
@@ -85,6 +87,7 @@ function alertIfHaramFollowed(symbol: string, verdict: string) {
 export const useStore = create<StoreState>((set, get) => ({
   symbols: [],
   symbolsLoaded: false,
+  zoneCounts: null,
   barcodeScans: {},
   shariah: {},
   shariahLoaded: false,
@@ -172,11 +175,28 @@ export const useStore = create<StoreState>((set, get) => ({
       symbolsChannelStarted = true;
       connectSymbolsSocket((msg) => {
         if (msg.type === 'symbols_updated') void get().refreshSymbols({ silent: false });
+        else if (msg.type === 'zones_changed') void get().refreshZoneCounts();
+        else if (msg.type === 'zone_near' && msg.zone && msg.symbol) {
+          get().pushToast(`ⓘ ${msg.symbol}: السعر يقترب من منطقة ${msg.zone.type}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert');
+        } else if (msg.type === 'zone_swept' && msg.zone && msg.symbol) {
+          get().pushToast(`⚡ ${msg.symbol}: سحب سيولة ${msg.zone.type} عند ${msg.zone.price}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert');
+        }
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));
     }
     // اشتراك بأسعار كل العملات المحللة
     for (const a of analyses) get().subscribePrice(a.symbol);
+    void get().refreshZoneCounts();
+  },
+
+  /** عدّادات مناطق السيولة لكل عملة (تُحدَّث عند أي تغيير عبر البث) */
+  refreshZoneCounts: async () => {
+    try {
+      const { zones } = await api.getZones();
+      const counts: Record<string, number> = {};
+      for (const z of zones) counts[z.symbol] = (counts[z.symbol] ?? 0) + 1;
+      set({ zoneCounts: counts });
+    } catch { /* العدادات تُحدَّث لاحقاً */ }
   },
 
   /** إعادة جلب القائمة من قاعدة البيانات + إشعار بالأصول الجديدة إن وُجدت */

@@ -52,6 +52,40 @@ export default {
       if (endTime) params.set('endTime', String(endTime));
       return fetchBinanceJson(`/api/v3/klines?${params.toString()}`, 15000);
     },
+    tickerPrices: async (symbols) => {
+      const q = encodeURIComponent(JSON.stringify(symbols));
+      const rows = await fetchBinanceJson(`/api/v3/ticker/price?symbols=${q}`, 10000);
+      const out = {};
+      for (const r of rows) out[r.symbol] = Number(r.price);
+      return out;
+    },
+  },
+  zones: {
+    /** أحدث حالة لكل منطقة (id) — منطقة محفوظة كحدث نوع liquidity_zone في events_log */
+    list: async (symbol) => {
+      const q = new URLSearchParams({ type: 'eq.liquidity_zone', select: '*', order: 'ts.asc', limit: '2000' });
+      if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      const events = await rest(`/events_log?${q}`);
+      const latest = new Map();
+      for (const e of events) {
+        try {
+          const z = JSON.parse(e.meta || 'null');
+          if (z?.id) latest.set(z.id, z);
+        } catch { /* تجاهل السجلات التالفة */ }
+      }
+      return [...latest.values()].filter(z => z.active !== false);
+    },
+    append: (zone) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: String(zone.symbol).toUpperCase(),
+        type: 'liquidity_zone',
+        message: zone.note || zone.type,
+        meta: JSON.stringify(zone),
+        ts: Date.now()
+      },
+      prefer: 'return=representation'
+    })
   },
   symbols: {
     list: (quote) => {

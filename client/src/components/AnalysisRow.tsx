@@ -67,6 +67,7 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
   const remove = useStore(s => s.deleteAnalysis);
   const price = useStore(s => s.prices[a.symbol]);
   const openChart = useStore(s => s.openChart);
+  const zoneCount = useStore(s => s.zoneCounts?.[a.symbol] ?? 0);
 
   const up = isUptrend(a);
   const down = a.trend_lower === 'down' && a.trend_upper === 'down';
@@ -178,7 +179,7 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
       {cell(COLS[15], 'chart', (
         <div
           onClick={() => openChart(a.symbol, a.tf_lower, a.tf_upper)}
-          className="cursor-pointer rounded-lg overflow-hidden self-center"
+          className="cursor-pointer rounded-lg overflow-hidden self-center relative"
           style={{ border: '1px solid var(--border-1)', transition: 'border-color var(--transition), box-shadow var(--transition)' }}
           title="افتح الشارت الكامل"
           onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--accent)'; (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-md)'; }}
@@ -187,6 +188,15 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
           {price !== undefined
             ? <MiniChart symbol={a.symbol} timeframe={tfLower} zones={zones} height={88} />
             : <div className="flex items-center justify-center text-[11px]" style={{ height: 88, color: 'var(--text-4)' }}>بانتظار السعر…</div>}
+          {zoneCount > 0 && (
+            <div
+              className="absolute top-1 left-1 z-10 num text-[10px] font-bold px-1.5 py-0.5 rounded-md"
+              style={{ background: 'var(--accent)', color: '#fff', boxShadow: 'var(--shadow-sm)' }}
+              title={`${zoneCount} منطقة سيولة معتمدة — افتح الشارت`}
+            >
+              {zoneCount} ℤ
+            </div>
+          )}
         </div>
       ))}
       {cell(COLS[16], 'info', (

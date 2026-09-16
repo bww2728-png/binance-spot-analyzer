@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
+import { api } from '../lib/api';
 import { fetchKlines, fetchOlderKlines } from '../lib/binance';
-import type { Candle, Timeframe } from '../lib/types';
+import type { Candle, LiquidityZone, Timeframe } from '../lib/types';
 import { TIMEFRAMES } from '../lib/types';
 import { createChart, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp } from 'lightweight-charts';
 import { CHART_COLORS } from './MiniChart';
@@ -12,10 +13,15 @@ const toBar = (c: Candle) => ({
   open: c.open, high: c.high, low: c.low, close: c.close
 });
 
-function BigChart({ symbol, timeframe, zones }: {
+const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
+
+function BigChart({ symbol, timeframe, zones, zoneList, annotate, onChartClick }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
+  zoneList: LiquidityZone[];
+  annotate: boolean;
+  onChartClick: (price: number, timeframe: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -26,6 +32,11 @@ function BigChart({ symbol, timeframe, zones }: {
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const canLoadMoreRef = useRef(false);
+  // مراجع وضع التعليم — لتجنّب إعادة تسجيل مستمع النقر عند كل تغيير حالة
+  const annotateRef = useRef(annotate);
+  const clickHandlerRef = useRef(onChartClick);
+  annotateRef.current = annotate;
+  clickHandlerRef.current = onChartClick;
 
   const load = async (loadOlder = false) => {
     setLoading(true);
@@ -84,6 +95,13 @@ function BigChart({ symbol, timeframe, zones }: {
       wickUpColor: CHART_COLORS.up, wickDownColor: CHART_COLORS.down
     });
     seriesRef.current = s;
+    // التقاط النقر في وضع التعليم: تحويل إحداثي Y إلى سعر
+    chart.subscribeClick(param => {
+      if (!annotateRef.current || !param.point) return;
+      const price = s.coordinateToPrice(param.point.y);
+      if (price == null) return;
+      clickHandlerRef.current(Number(price), timeframe);
+    });
     setReady(true);
     candlesRef.current = [];
     void load(false);
@@ -129,9 +147,36 @@ function BigChart({ symbol, timeframe, zones }: {
     };
   }, [zones.ssl, zones.bsl, ready]);
 
+  // مناطق السيولة المحفوظة (التعليم اليدوي): خطوط متقطعة بعناوين الملاحظة
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series || !ready) return;
+    const lines: IPriceLine[] = [];
+    for (const z of zoneList) {
+      const title = z.note ? `${z.type}: ${z.note.slice(0, 26)}` : z.type;
+      lines.push(series.createPriceLine({
+        price: z.price,
+        color: ZONE_COLOR[z.type],
+        title,
+        lineWidth: 1,
+        lineStyle: 3, // متقطع نقطي — يميز مناطق التعليم عن خطوط السعر اليدوي
+        axisLabelVisible: true
+      }));
+    }
+    return () => {
+      for (const l of lines) {
+        try { series.removePriceLine(l); } catch { /* ignore */ }
+      }
+    };
+  }, [zoneList, ready]);
+
   return (
     <div className="relative">
-      <div ref={containerRef} style={{ height: 340 }} className="rounded overflow-hidden" />
+      <div
+        ref={containerRef}
+        style={{ height: 340, cursor: annotate ? 'crosshair' : 'default' }}
+        className="rounded overflow-hidden"
+      />
       {loading && (
         <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(15,21,34,0.45)' }}>
           <span className="text-[12px] font-semibold" style={{ color: 'var(--text-2)' }}>جاري تحميل الشموع…</span>
@@ -150,6 +195,11 @@ function BigChart({ symbol, timeframe, zones }: {
       {!canLoadMore && !loading && candlesRef.current.length > 0 && (
         <div className="absolute bottom-3 left-3 z-10 text-[10.5px] px-2 py-1 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
           لا توجد بيانات أقدم
+        </div>
+      )}
+      {annotate && !loading && (
+        <div className="absolute top-2 left-2 z-10 text-[10.5px] font-semibold px-2 py-1 rounded pointer-events-none" style={{ background: 'rgba(59,130,246,0.85)', color: '#fff' }}>
+          وضع التعليم: انقر على السعر لتحديد منطقة
         </div>
       )}
     </div>
@@ -174,7 +224,121 @@ function TfPill({ active, label, onClick }: { active: boolean; label: string; on
   );
 }
 
-/** نافذة شارت تحليل كامل: الفريمان الأصغر والأكبر جنباً إلى جنب + تحرير المناطق */
+/** حوار إضافة/تعديل منطقة سيولة */
+function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
+  symbol: string;
+  timeframe: string;
+  price: number;
+  zone: LiquidityZone | null;
+  onClose: () => void;
+}) {
+  const pushToast = useStore(s => s.pushToast);
+  const refreshZoneCounts = useStore(s => s.refreshZoneCounts);
+  const [type, setType] = useState<'BSL' | 'SSL'>(zone?.type ?? 'BSL');
+  const [zonePrice, setZonePrice] = useState(String(zone?.price ?? price));
+  const [note, setNote] = useState(zone?.note ?? '');
+  const [expiry, setExpiry] = useState(String(
+    zone?.expires_at ? Math.max(24, Math.round((zone.expires_at - Date.now()) / 3600000)) : 0
+  ));
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    const p = Number(zonePrice);
+    if (!Number.isFinite(p) || p <= 0) { pushToast('السعر غير صالح', 'alert'); return; }
+    setSaving(true);
+    try {
+      const expiresAt = Number(expiry) > 0 ? Date.now() + Number(expiry) * 3600000 : null;
+      if (zone) {
+        await api.updateZone(zone.id, { price: p, note, type, active: true });
+        pushToast('تم تحديث المنطقة');
+      } else {
+        await api.createZone({ symbol, timeframe, type, price: p, note, expires_at: expiresAt });
+        pushToast(`حُفظت منطقة ${type} على ${symbol}`);
+      }
+      await refreshZoneCounts();
+      onClose();
+    } catch (e) {
+      pushToast(`تعذر الحفظ: ${String(e)}`, 'alert');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!zone) return;
+    setSaving(true);
+    try {
+      await api.deleteZone(zone.id);
+      await refreshZoneCounts();
+      pushToast('حُذفت المنطقة');
+      onClose();
+    } catch (e) {
+      pushToast(`تعذر الحذف: ${String(e)}`, 'alert');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center p-4" style={{ background: 'rgba(4,6,10,0.6)' }} onClick={onClose}>
+      <div
+        className="rounded-xl p-4 w-full max-w-sm space-y-3"
+        style={{ background: 'var(--surface-1)', border: '1px solid var(--border-2)', boxShadow: 'var(--shadow-lg)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>
+          {zone ? 'تعديل منطقة سيولة' : 'منطقة سيولة جديدة'} — {symbol}
+        </div>
+        <div className="flex gap-2">
+          <button
+            className={`btn flex-1 !py-1.5 text-[12px] ${type === 'BSL' ? 'btn-accent' : ''}`}
+            style={type === 'BSL' ? { background: ZONE_COLOR.BSL, color: '#fff' } : {}}
+            onClick={() => setType('BSL')}
+          >
+            BSL شرائية
+          </button>
+          <button
+            className={`btn flex-1 !py-1.5 text-[12px] ${type === 'SSL' ? 'btn-accent' : ''}`}
+            style={type === 'SSL' ? { background: ZONE_COLOR.SSL, color: '#fff' } : {}}
+            onClick={() => setType('SSL')}
+          >
+            SSL بيعية
+          </button>
+        </div>
+        <label className="block text-[12px]" style={{ color: 'var(--text-2)' }}>
+          السعر
+          <input type="number" step="any" className="num w-full mt-1" value={zonePrice} onChange={e => setZonePrice(e.target.value)} />
+        </label>
+        <label className="block text-[12px]" style={{ color: 'var(--text-2)' }}>
+          ملاحظة
+          <textarea className="w-full mt-1" rows={2} value={note} placeholder="مثال: قمة سوينغ متساوية — سيولة وقف" onChange={e => setNote(e.target.value)} />
+        </label>
+        <label className="block text-[12px]" style={{ color: 'var(--text-2)' }}>
+          الصلاحية
+          <select className="w-full mt-1" value={expiry} onChange={e => setExpiry(e.target.value)}>
+            <option value="0">بلا انتهاء</option>
+            <option value="24">24 ساعة</option>
+            <option value="168">7 أيام</option>
+            <option value="720">30 يوماً</option>
+          </select>
+        </label>
+        <div className="flex gap-2 pt-1">
+          <button className="btn btn-accent flex-1 !py-1.5 text-[12px]" disabled={saving} onClick={() => void save()}>
+            {saving ? '…' : 'حفظ'}
+          </button>
+          {zone && (
+            <button className="btn flex-1 !py-1.5 text-[12px]" disabled={saving} onClick={() => void remove()} style={{ color: ZONE_COLOR.BSL }}>
+              حذف
+            </button>
+          )}
+          <button className="btn flex-1 !py-1.5 text-[12px]" onClick={onClose}>إلغاء</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** نافذة شارت تحليل كامل: الفريمان الأصغر والأكبر جنباً إلى جنب + تحرير المناطق + وضع التعليم */
 export default function ChartModal() {
   const modal = useStore(s => s.chartModal)!;
   const close = useStore(s => s.closeChart);
@@ -190,6 +354,21 @@ export default function ChartModal() {
 
   const [tfLower, setTfLower] = useState(analysis?.tf_lower ?? '15m');
   const [tfUpper, setTfUpper] = useState(analysis?.tf_upper ?? '4h');
+
+  // ---- وضع التعليم ومناطق السيولة ----
+  const zoneCounts = useStore(s => s.zoneCounts);
+  const [annotate, setAnnotate] = useState(false);
+  const [zoneList, setZoneList] = useState<LiquidityZone[]>([]);
+  const [zoneDialog, setZoneDialog] = useState<null | { price: number; timeframe: string; zone: LiquidityZone | null }>(null);
+
+  // تحميل المناطق عند الفتح وعند أي تغيير مُبثّ (zoneCounts تتغير عند zones_changed)
+  useEffect(() => {
+    let disposed = false;
+    void api.getZones(modal.symbol)
+      .then(({ zones }) => { if (!disposed) setZoneList(zones); })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [modal.symbol, zoneCounts]);
 
   useEffect(() => {
     let disposed = false;
@@ -212,6 +391,24 @@ export default function ChartModal() {
     else { setTfUpper(tf); patch({ tf_upper: tf }); }
   };
 
+  /** نقرة وضع التعليم: أقرب منطقة محفوظة ضمن 0.4% → تعديل، وإلا منطقة جديدة */
+  const handleChartClick = (price: number, timeframe: string) => {
+    if (zoneDialog) return;
+    const near = zoneList.find(z => Math.abs(z.price - price) / z.price <= 0.004);
+    if (near) {
+      setZoneDialog({ price: near.price, timeframe, zone: near });
+      return;
+    }
+    const suggested = livePrice != null && price < livePrice ? 'SSL' : 'BSL';
+    setZoneDialog({ price, timeframe, zone: null, ...({ suggested } as object) } as never);
+    // الطريقة أعلاه لنقل النوع المقترح معقدة — نستخدم حالة مبسطة بدلها:
+    setZoneDialog({ price, timeframe, zone: null } as never);
+    suggestedTypeRef.current = suggested;
+  };
+  const suggestedTypeRef = useRef<'BSL' | 'SSL'>('BSL');
+
+  const zoneCount = zoneCounts?.[modal.symbol] ?? 0;
+
   return (
     <div
       className="anim-overlay fixed inset-0 z-40 flex items-center justify-center p-4"
@@ -233,6 +430,19 @@ export default function ChartModal() {
             {livePrice !== undefined && (
               <span className="num text-sm px-2.5 py-1 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>
                 {livePrice.toLocaleString('en', { maximumFractionDigits: 8 })}
+              </span>
+            )}
+            <button
+              className={`btn !py-1.5 !px-3 text-[11.5px] ${annotate ? 'btn-accent' : ''}`}
+              style={annotate ? { background: '#3b82f6', color: '#fff' } : {}}
+              onClick={() => setAnnotate(v => !v)}
+              title="تعليم مناطق السيولة بالنقر على الشارت"
+            >
+              {annotate ? 'وضع التعليم: مفعل' : 'وضع التعليم'}
+            </button>
+            {zoneCount > 0 && (
+              <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold" style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}>
+                {zoneCount} منطقة
               </span>
             )}
           </div>
@@ -303,7 +513,7 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} onChartClick={handleChartClick} />
             </div>
             <div>
               <div className="flex items-center gap-2.5 mb-2">
@@ -314,10 +524,22 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} onChartClick={handleChartClick} />
             </div>
           </div>
         </div>
+
+        {zoneDialog && (
+          <div className="absolute inset-0">
+            <ZoneDialog
+              symbol={modal.symbol}
+              timeframe={zoneDialog.timeframe}
+              price={zoneDialog.price}
+              zone={zoneDialog.zone}
+              onClose={() => setZoneDialog(null)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
