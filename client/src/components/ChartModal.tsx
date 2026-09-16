@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
 import { fetchKlines, fetchOlderKlines } from '../lib/binance';
@@ -8,6 +8,8 @@ import { createChart, CandlestickSeries, type ISeriesApi, type IPriceLine, type 
 import { CHART_COLORS } from './MiniChart';
 import Toggle from './ui/Toggle';
 import AcademyModal from './AcademyModal';
+import { useZoneBands, zoneRange } from './ZoneBands';
+import ZoneListPanel from './ZoneListPanel';
 
 const toBar = (c: Candle) => ({
   time: c.time as UTCTimestamp,
@@ -16,7 +18,7 @@ const toBar = (c: Candle) => ({
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
 
-function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick }: {
+function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
@@ -24,6 +26,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   annotate: boolean;
   showAuto: boolean;
   onChartClick: (price: number, timeframe: string) => void;
+  highlightId: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -149,55 +152,22 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     };
   }, [zones.ssl, zones.bsl, ready]);
 
-  // مناطق التعليم اليدوي: خطوط متقطعة نقطية بعناوين الملاحظة
-  useEffect(() => {
-    const series = seriesRef.current;
-    if (!series || !ready) return;
-    const lines: IPriceLine[] = [];
-    for (const z of zoneList.filter(z => z.source !== 'auto')) {
-      const title = z.note ? `${z.type}: ${z.note.slice(0, 26)}` : z.type;
-      lines.push(series.createPriceLine({
-        price: z.price,
-        color: ZONE_COLOR[z.type],
-        title,
-        lineWidth: 1,
-        lineStyle: 3, // متقطع نقطي — يميز مناطق التعليم عن خطوط السعر اليدوي
-        axisLabelVisible: true
-      }));
-    }
-    return () => {
-      for (const l of lines) {
-        try { series.removePriceLine(l); } catch { /* ignore */ }
-      }
-    };
-  }, [zoneList, ready]);
+  // مناطق السيولة تُرسم كمناطق مظللة (Bands) عبر canvas overlay — لا خطوط
+  const visibleZones = useMemo(() => {
+    const list = showAuto
+      ? zoneList
+      : zoneList.filter(z => z.source !== 'auto');
+    // الآلي: يُقيَّد بفريم الشارت المعروض؛ اليدوي: يظهر على كل الفريمات
+    return list.filter(z => z.source !== 'auto' || (z.timeframe ?? '') === timeframe);
+  }, [zoneList, showAuto, timeframe]);
 
-  // مناطق الكشف الآلي لنفس الفريم: خطوط متقطعة بشفافية حسب درجة الثقة
-  useEffect(() => {
-    const series = seriesRef.current;
-    if (!series || !ready) return;
-    const lines: IPriceLine[] = [];
-    if (showAuto) {
-      for (const z of zoneList.filter(z => z.source === 'auto' && (z.timeframe ?? '') === timeframe)) {
-        const alpha = Math.min(0.95, 0.35 + (z.score ?? 50) / 100 * 0.6);
-        const rgb = z.type === 'BSL' ? '242,54,69' : '8,153,129';
-        const title = z.swept ? `${z.type} آلي ${z.score}٪ مُسحوبة` : `${z.type} آلي ${z.score}٪`;
-        lines.push(series.createPriceLine({
-          price: z.price,
-          color: `rgba(${rgb},${alpha.toFixed(2)})`,
-          title,
-          lineWidth: 1,
-          lineStyle: 2, // متقطع — يميز الآلي عن التعليم النقطي
-          axisLabelVisible: true
-        }));
-      }
-    }
-    return () => {
-      for (const l of lines) {
-        try { series.removePriceLine(l); } catch { /* ignore */ }
-      }
-    };
-  }, [zoneList, ready, showAuto, timeframe]);
+  const getPriceCoord = useCallback((price: number) => {
+    const s = seriesRef.current;
+    if (!s) return null;
+    return s.priceToCoordinate(price);
+  }, []);
+
+  const bandsCanvasRef = useZoneBands(containerRef, chartRef, getPriceCoord, visibleZones, highlightId);
 
   return (
     <div className="relative">
@@ -205,6 +175,11 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
         ref={containerRef}
         style={{ height: 340, cursor: annotate ? 'crosshair' : 'default' }}
         className="rounded overflow-hidden"
+      />
+      <canvas
+        ref={bandsCanvasRef}
+        className="absolute top-0 left-0 pointer-events-none"
+        style={{ zIndex: 5 }}
       />
       {loading && (
         <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(15,21,34,0.45)' }}>
@@ -450,6 +425,22 @@ export default function ChartModal() {
   const [autoDialog, setAutoDialog] = useState<null | { zone: LiquidityZone }>(null);
   const [academyOpen, setAcademyOpen] = useState(false);
   const [accuracy, setAccuracy] = useState<number | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** وميض المنطقة على الشارتين لثانيتين */
+  const flashZone = (id: string) => {
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    setHighlightId(id);
+    highlightTimer.current = setTimeout(() => setHighlightId(null), 2000);
+  };
+
+  /** اختيار من القائمة الجانبية: وميض + فتح حوار التفاصيل */
+  const pickFromPanel = (z: LiquidityZone) => {
+    flashZone(z.id);
+    if (z.source === 'auto') setAutoDialog({ zone: z });
+    else setZoneDialog({ price: z.price, timeframe: z.timeframe, zone: z });
+  };
 
   // تحميل المناطق عند الفتح وعند أي تغيير مُبثّ (zoneCounts تتغير عند zones_changed)
   useEffect(() => {
@@ -495,10 +486,13 @@ export default function ChartModal() {
     else { setTfUpper(tf); patch({ tf_upper: tf }); }
   };
 
-  /** نقرة وضع التعليم: أقرب منطقة محفوظة ضمن 0.4% → آلية: تغذية راجعة، يدوية: تعديل، وإلا منطقة جديدة */
+  /** نقرة وضع التعليم: داخل حدود منطقة مظللة → آلية: تغذية راجعة، يدوية: تعديل، وإلا منطقة جديدة */
   const handleChartClick = (price: number, timeframe: string) => {
     if (zoneDialog || autoDialog) return;
-    const near = zoneList.find(z => Math.abs(z.price - price) / z.price <= 0.004);
+    const near = zoneList.find(z => {
+      const { low, high } = zoneRange(z);
+      return price >= low && price <= high;
+    });
     if (near && near.source === 'auto') {
       setAutoDialog({ zone: near });
       return;
@@ -643,7 +637,7 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} />
             </div>
             <div>
               <div className="flex items-center gap-2.5 mb-2">
@@ -654,8 +648,13 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} />
             </div>
+          </div>
+
+          {/* القائمة الجانبية: أين حدد النظام/أنت المناطق — النقر يميّزها بوميض */}
+          <div className="mt-5">
+            <ZoneListPanel zones={zoneList} onPick={pickFromPanel} />
           </div>
         </div>
 

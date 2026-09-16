@@ -168,6 +168,7 @@ export function buildSnapshot({ symbol, perTf, existingAuto, now = Date.now(), m
         clusterCount: z.clusterCount,
         swept: z.swept,
         sweptAt: z.sweptAt,
+        bandPct: z.bandPct,
         source: 'auto',
         created_at: prev?.created_at ?? now,
         updated_at: now,

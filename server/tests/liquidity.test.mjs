@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   findPivots, clusterEquals, detectSweeps, detectFVGs, candidateZones,
-  isRoundNumber, referenceLevels, pivotStrengthFor
+  isRoundNumber, referenceLevels, pivotStrengthFor, atr14, bandPctFor
 } from '../liquidity/structure.mjs';
 import { computeCvd } from '../liquidity/derivatives.mjs';
 import {
@@ -273,4 +273,21 @@ test('referenceLevels: أعلى وأدنى النافذة الأخيرة', () =>
   const r = referenceLevels(cs);
   assert.equal(r.high, 10);
   assert.equal(r.low, 0.5);
+});
+
+test('atr14 + bandPctFor: المتقلب عرضه أوسع، والحدود محترمة', () => {
+  const flat = Array.from({ length: 30 }, (_, i) => candle(i, 100, 100.1, 99.9, 100));
+  const wild = Array.from({ length: 30 }, (_, i) => candle(i, 100, 104, 96, 100));
+  const bandFlat = bandPctFor(flat, 100);
+  const bandWild = bandPctFor(wild, 100);
+  assert.ok(bandWild > bandFlat * 5);
+  assert.ok(bandFlat >= 0.0005 && bandFlat <= 0.012);
+  assert.ok(bandWild >= 0.0005 && bandWild <= 0.012);
+  // بيانات غير كافية → الاحتياط 0.15%
+  assert.equal(bandPctFor(flat.slice(0, 5), 100), 0.0015);
+  // candidateZones يعيّن bandPct لكل منطقة
+  const zig = [10, 11, 12, 11, 10, 11, 12.01, 11, 10, 11, 12.02, 11, 10.5];
+  const cs = zig.map((p, i) => candle(i * 60000, p, p, p, p));
+  const out = candidateZones(cs, { strength: 1, pivotsLimit: 10 });
+  for (const z of out.zones) assert.ok(z.bandPct > 0 && z.bandPct <= 0.012);
 });

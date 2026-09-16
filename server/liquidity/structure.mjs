@@ -83,6 +83,29 @@ export function detectFVGs(candles) {
   return out;
 }
 
+/** ATR14: متوسط المدى الحقيقي لآخر 14 شمعة (0 إن لم تكفِ البيانات) */
+export function atr14(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  let sum = 0;
+  for (let i = candles.length - period; i < candles.length; i += 1) {
+    const prevClose = candles[i - 1].close;
+    const tr = Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - prevClose),
+      Math.abs(candles[i].low - prevClose)
+    );
+    sum += tr;
+  }
+  return sum / period;
+}
+
+/** عرض المنطقة المظللة: نصف ATR تقريباً، ضمن حدود معقولة — نسبة من السعر */
+export function bandPctFor(candles, price) {
+  const atr = atr14(candles);
+  if (!atr || !price) return 0.0015; // 0.15% احتياطاً
+  return Math.min(0.012, Math.max(0.0005, (atr / price) * 0.6));
+}
+
 /**
  * مرشحات المناطق من آخر pivotsLimit قمة/قاع:
  * كل عنقود متساوٍ → منطقة واحدة (سعر العنقود وعدده)، وكل قمة/قاع منفرد → منطقة مستقلة.
@@ -131,6 +154,7 @@ export function candidateZones(candles, {
       zone.sweptAt = sw.time;
     }
     if (fvgNear(zone.price)) zone.fvgNear = true;
+    zone.bandPct = bandPctFor(candles, zone.price);
     merged.set(key, zone);
   }
   return { zones: [...merged.values()], pivots, clusters, sweeps, fvgs, computedAt: now };
