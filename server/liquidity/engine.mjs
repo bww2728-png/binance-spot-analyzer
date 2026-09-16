@@ -169,6 +169,7 @@ export function buildSnapshot({ symbol, perTf, existingAuto, now = Date.now(), m
         swept: z.swept,
         sweptAt: z.sweptAt,
         bandPct: z.bandPct,
+        anchorTime: z.anchorTime,
         source: 'auto',
         created_at: prev?.created_at ?? now,
         updated_at: now,

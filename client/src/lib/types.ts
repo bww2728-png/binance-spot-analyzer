@@ -83,6 +83,8 @@ export interface LiquidityZone {
   reasons?: string[];
   clusterCount?: number;
   swept?: boolean;
+  bandPct?: number | null;
+  anchorTime?: number | null;
   feedback?: 'confirm' | 'reject' | null;
   updated_at?: number;
 }
