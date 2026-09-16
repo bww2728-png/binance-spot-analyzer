@@ -14,6 +14,7 @@ ENV NODE_ENV=production
 COPY server/package.json server/package-lock.json ./server/
 RUN cd server && npm ci --omit=dev
 COPY server/index.js server/db.js server/research.mjs server/researchCore.mjs server/barcodeCore.mjs ./server/
+COPY server/liquidity ./server/liquidity/
 COPY --from=client-build /app/client/dist ./client/dist
 
 EXPOSE 8080
