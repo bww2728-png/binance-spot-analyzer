@@ -68,7 +68,7 @@ export async function detectSymbol({
         strength: pivotStrengthFor(tf),
         eqhTolerancePct: calibration.eqhTolerancePct
       });
-      const scored = scoreZones(cands, {
+      const scored = scoreZones(cands.zones, {
         ...signals,
         ...book,
         liqClusters
