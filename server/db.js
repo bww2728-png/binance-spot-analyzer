@@ -85,6 +85,22 @@ export default {
         ts: Date.now()
       },
       prefer: 'return=representation'
+    }),
+    /** أحدث معايرة محفوظة (حدث zone_calibration — الأحدث يفوز) */
+    getCalibration: async () => {
+      const events = await rest('/events_log?type=eq.zone_calibration&select=*&order=ts.desc&limit=1');
+      return events.length ? events[0] : null;
+    },
+    appendCalibration: (cal) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: 'GLOBAL',
+        type: 'zone_calibration',
+        message: `معايرة: حد الدني ${cal.minScore}`,
+        meta: JSON.stringify(cal),
+        ts: Date.now()
+      },
+      prefer: 'return=representation'
     })
   },
   symbols: {

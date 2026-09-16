@@ -7,6 +7,7 @@ import { TIMEFRAMES } from '../lib/types';
 import { createChart, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp } from 'lightweight-charts';
 import { CHART_COLORS } from './MiniChart';
 import Toggle from './ui/Toggle';
+import AcademyModal from './AcademyModal';
 
 const toBar = (c: Candle) => ({
   time: c.time as UTCTimestamp,
@@ -15,12 +16,13 @@ const toBar = (c: Candle) => ({
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
 
-function BigChart({ symbol, timeframe, zones, zoneList, annotate, onChartClick }: {
+function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
   zoneList: LiquidityZone[];
   annotate: boolean;
+  showAuto: boolean;
   onChartClick: (price: number, timeframe: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -147,12 +149,12 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, onChartClick }
     };
   }, [zones.ssl, zones.bsl, ready]);
 
-  // مناطق السيولة المحفوظة (التعليم اليدوي): خطوط متقطعة بعناوين الملاحظة
+  // مناطق التعليم اليدوي: خطوط متقطعة نقطية بعناوين الملاحظة
   useEffect(() => {
     const series = seriesRef.current;
     if (!series || !ready) return;
     const lines: IPriceLine[] = [];
-    for (const z of zoneList) {
+    for (const z of zoneList.filter(z => z.source !== 'auto')) {
       const title = z.note ? `${z.type}: ${z.note.slice(0, 26)}` : z.type;
       lines.push(series.createPriceLine({
         price: z.price,
@@ -169,6 +171,33 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, onChartClick }
       }
     };
   }, [zoneList, ready]);
+
+  // مناطق الكشف الآلي لنفس الفريم: خطوط متقطعة بشفافية حسب درجة الثقة
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series || !ready) return;
+    const lines: IPriceLine[] = [];
+    if (showAuto) {
+      for (const z of zoneList.filter(z => z.source === 'auto' && (z.timeframe ?? '') === timeframe)) {
+        const alpha = Math.min(0.95, 0.35 + (z.score ?? 50) / 100 * 0.6);
+        const rgb = z.type === 'BSL' ? '242,54,69' : '8,153,129';
+        const title = z.swept ? `${z.type} آلي ${z.score}٪ مُسحوبة` : `${z.type} آلي ${z.score}٪`;
+        lines.push(series.createPriceLine({
+          price: z.price,
+          color: `rgba(${rgb},${alpha.toFixed(2)})`,
+          title,
+          lineWidth: 1,
+          lineStyle: 2, // متقطع — يميز الآلي عن التعليم النقطي
+          axisLabelVisible: true
+        }));
+      }
+    }
+    return () => {
+      for (const l of lines) {
+        try { series.removePriceLine(l); } catch { /* ignore */ }
+      }
+    };
+  }, [zoneList, ready, showAuto, timeframe]);
 
   return (
     <div className="relative">
@@ -338,6 +367,63 @@ function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
   );
 }
 
+/** حوار منطقة آلية: درجة الثقة + الأسباب + تأكيد/رفض (تغذية راجعة تعلّم النظام) */
+function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () => void }) {
+  const pushToast = useStore(s => s.pushToast);
+  const refreshZoneCounts = useStore(s => s.refreshZoneCounts);
+  const [busy, setBusy] = useState(false);
+
+  const send = async (verdict: 'confirm' | 'reject') => {
+    setBusy(true);
+    try {
+      await api.zoneFeedback(zone.id, verdict);
+      await refreshZoneCounts();
+      pushToast(verdict === 'confirm' ? 'أكدت المنطقة — سيتعلم النظام منها' : 'رفضت المنطقة — سيتعلم النظام منها');
+      onClose();
+    } catch (e) {
+      pushToast(`تعذر إرسال التغذية الراجعة: ${String(e)}`, 'alert');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center p-4" style={{ background: 'rgba(4,6,10,0.6)' }} onClick={onClose}>
+      <div
+        className="rounded-xl p-4 w-full max-w-sm space-y-3"
+        style={{ background: 'var(--surface-1)', border: '1px solid var(--border-2)', boxShadow: 'var(--shadow-lg)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>
+            منطقة آلية — {zone.type} على {zone.timeframe}
+          </div>
+          <span className="num text-[12px] font-bold px-2 py-0.5 rounded-full" style={{ background: 'var(--accent)', color: '#fff' }}>
+            {zone.score}٪
+          </span>
+        </div>
+        <div className="num text-[12px]" style={{ color: 'var(--text-2)' }}>
+          السعر: {zone.price.toLocaleString('en', { maximumFractionDigits: 8 })}
+        </div>
+        <div className="text-[11.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
+          <b>لماذا حدد النظام هذه المنطقة؟</b>
+          <ul className="mt-1 space-y-0.5 pr-4" style={{ listStyle: 'disc' }}>
+            {(zone.reasons?.length ? zone.reasons : ['مرساة هيكلية (قمة/قاع سوينغ)']).map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+        <div className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+          تأكيدك أو رفضك يُغذي معايرة النظام — كل رأي يرفع دقة الكشف القادم.
+        </div>
+        <div className="flex gap-2 pt-1">
+          <button className="btn btn-accent flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('confirm')}>تأكيد</button>
+          <button className="btn flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('reject')} style={{ color: ZONE_COLOR.BSL }}>رفض</button>
+          <button className="btn flex-1 !py-1.5 text-[12px]" onClick={onClose}>إغلاق</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** نافذة شارت تحليل كامل: الفريمان الأصغر والأكبر جنباً إلى جنب + تحرير المناطق + وضع التعليم */
 export default function ChartModal() {
   const modal = useStore(s => s.chartModal)!;
@@ -358,14 +444,31 @@ export default function ChartModal() {
   // ---- وضع التعليم ومناطق السيولة ----
   const zoneCounts = useStore(s => s.zoneCounts);
   const [annotate, setAnnotate] = useState(false);
+  const [showAuto, setShowAuto] = useState(true);
   const [zoneList, setZoneList] = useState<LiquidityZone[]>([]);
   const [zoneDialog, setZoneDialog] = useState<null | { price: number; timeframe: string; zone: LiquidityZone | null }>(null);
+  const [autoDialog, setAutoDialog] = useState<null | { zone: LiquidityZone }>(null);
+  const [academyOpen, setAcademyOpen] = useState(false);
+  const [accuracy, setAccuracy] = useState<number | null>(null);
 
   // تحميل المناطق عند الفتح وعند أي تغيير مُبثّ (zoneCounts تتغير عند zones_changed)
   useEffect(() => {
     let disposed = false;
     void api.getZones(modal.symbol)
       .then(({ zones }) => { if (!disposed) setZoneList(zones); })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [modal.symbol, zoneCounts]);
+
+  // تقرير دقة الكشف مقابل مناطق التعليم
+  useEffect(() => {
+    let disposed = false;
+    void api.getAccuracy(modal.symbol)
+      .then(r => {
+        if (disposed) return;
+        const t = r.totals;
+        setAccuracy(t.precision != null ? Math.round(t.precision * 100) : null);
+      })
       .catch(() => undefined);
     return () => { disposed = true; };
   }, [modal.symbol, zoneCounts]);
@@ -391,17 +494,19 @@ export default function ChartModal() {
     else { setTfUpper(tf); patch({ tf_upper: tf }); }
   };
 
-  /** نقرة وضع التعليم: أقرب منطقة محفوظة ضمن 0.4% → تعديل، وإلا منطقة جديدة */
+  /** نقرة وضع التعليم: أقرب منطقة محفوظة ضمن 0.4% → آلية: تغذية راجعة، يدوية: تعديل، وإلا منطقة جديدة */
   const handleChartClick = (price: number, timeframe: string) => {
-    if (zoneDialog) return;
+    if (zoneDialog || autoDialog) return;
     const near = zoneList.find(z => Math.abs(z.price - price) / z.price <= 0.004);
+    if (near && near.source === 'auto') {
+      setAutoDialog({ zone: near });
+      return;
+    }
     if (near) {
       setZoneDialog({ price: near.price, timeframe, zone: near });
       return;
     }
     const suggested = livePrice != null && price < livePrice ? 'SSL' : 'BSL';
-    setZoneDialog({ price, timeframe, zone: null, ...({ suggested } as object) } as never);
-    // الطريقة أعلاه لنقل النوع المقترح معقدة — نستخدم حالة مبسطة بدلها:
     setZoneDialog({ price, timeframe, zone: null } as never);
     suggestedTypeRef.current = suggested;
   };
@@ -440,11 +545,35 @@ export default function ChartModal() {
             >
               {annotate ? 'وضع التعليم: مفعل' : 'وضع التعليم'}
             </button>
+            <button
+              className={`btn !py-1.5 !px-3 text-[11.5px] ${showAuto ? 'btn-accent' : ''}`}
+              style={showAuto ? { background: '#8b5cf6', color: '#fff' } : {}}
+              onClick={() => setShowAuto(v => !v)}
+              title="إظهار/إخفاء مناطق الكشف الآلي"
+            >
+              مناطق آلية: {showAuto ? 'ظاهرة' : 'مخفية'}
+            </button>
+            {accuracy !== null && (
+              <span
+                className="text-[11px] px-2 py-0.5 rounded-full font-semibold num"
+                style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}
+                title="نسبة مناطق الكشف الآلي المطابقة لمناطق تعليمك"
+              >
+                دقة الكشف {accuracy}٪
+              </span>
+            )}
             {zoneCount > 0 && (
               <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold" style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}>
                 {zoneCount} منطقة
               </span>
             )}
+            <button
+              className="btn !py-1.5 !px-3 text-[11.5px]"
+              onClick={() => setAcademyOpen(true)}
+              title="دليل كل أدوات السيولة وعلاقتها بالنظام"
+            >
+              أكاديمية النظام
+            </button>
           </div>
           <button
             onClick={close}
@@ -513,7 +642,7 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} onChartClick={handleChartClick} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} />
             </div>
             <div>
               <div className="flex items-center gap-2.5 mb-2">
@@ -524,7 +653,7 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} onChartClick={handleChartClick} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} />
             </div>
           </div>
         </div>
@@ -540,6 +669,14 @@ export default function ChartModal() {
             />
           </div>
         )}
+
+        {autoDialog && (
+          <div className="absolute inset-0">
+            <AutoZoneDialog zone={autoDialog.zone} onClose={() => setAutoDialog(null)} />
+          </div>
+        )}
+
+        {academyOpen && <AcademyModal onClose={() => setAcademyOpen(false)} />}
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus } from './types';
+import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZonesAccuracy } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -185,6 +185,13 @@ const sbApi = {
   },
   async deleteZone(id: string): Promise<{ ok: boolean }> {
     return this.updateZone(id, { active: false });
+  },
+  async zoneFeedback(id: string, verdict: 'confirm' | 'reject') {
+    // التغذية الراجعة والمعايرة تمر عبر الخادم دائماً (منطق المعايرة موجود فيه)
+    return fetch(`${BASE}/zones/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ verdict }) }).then(j<{ ok: boolean; zone: LiquidityZone }>);
+  },
+  async getAccuracy(symbol?: string) {
+    return fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>);
   }
 };
 
@@ -239,7 +246,11 @@ const restApi = {
   updateZone: (id: string, body: { price?: number; note?: string; type?: 'BSL' | 'SSL'; active?: boolean }) =>
     fetch(`${BASE}/zones/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
   deleteZone: (id: string) =>
-    fetch(`${BASE}/zones/${id}`, { method: 'DELETE' }).then(j<{ ok: boolean }>)
+    fetch(`${BASE}/zones/${id}`, { method: 'DELETE' }).then(j<{ ok: boolean }>),
+  zoneFeedback: (id: string, verdict: 'confirm' | 'reject') =>
+    fetch(`${BASE}/zones/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ verdict }) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
+  getAccuracy: (symbol?: string) =>
+    fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

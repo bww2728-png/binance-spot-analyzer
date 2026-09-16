@@ -77,6 +77,21 @@ export interface LiquidityZone {
   created_at: number;
   expires_at: number | null;
   active: boolean;
+  /* مناطق الكشف الآلي */
+  source?: 'auto' | 'manual';
+  score?: number;
+  reasons?: string[];
+  clusterCount?: number;
+  swept?: boolean;
+  feedback?: 'confirm' | 'reject' | null;
+  updated_at?: number;
+}
+
+/** تقرير مطابقة الكشف الآلي مع مناطق التعليم اليدوي */
+export interface ZonesAccuracy {
+  symbols: { symbol: string; manualCount: number; autoCount: number; matchedManual: number; matchedAuto: number; precision: number | null; recall: number | null }[];
+  totals: { manualCount: number; autoCount: number; matchedManual: number; matchedAuto: number; precision: number | null; recall: number | null };
+  calibration: { minScore: number; eqhTolerancePct: number; matchTolerancePct: number; updated_at: number };
 }
 
 export interface LiquidityZoneEvent {

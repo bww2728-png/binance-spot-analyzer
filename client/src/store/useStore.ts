@@ -175,7 +175,7 @@ export const useStore = create<StoreState>((set, get) => ({
       symbolsChannelStarted = true;
       connectSymbolsSocket((msg) => {
         if (msg.type === 'symbols_updated') void get().refreshSymbols({ silent: false });
-        else if (msg.type === 'zones_changed') void get().refreshZoneCounts();
+        else if (msg.type === 'zones_changed' || msg.type === 'zones_auto_updated') void get().refreshZoneCounts();
         else if (msg.type === 'zone_near' && msg.zone && msg.symbol) {
           get().pushToast(`ⓘ ${msg.symbol}: السعر يقترب من منطقة ${msg.zone.type}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert');
         } else if (msg.type === 'zone_swept' && msg.zone && msg.symbol) {

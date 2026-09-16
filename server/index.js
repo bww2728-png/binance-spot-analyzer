@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
 import { researchSymbol } from './research.mjs';
+import { detectSymbol, planAppends, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
+import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -344,6 +346,54 @@ app.get('/api/zones', handle(async (_req, res) => {
   res.json({ zones: await db.zones.list() });
 }));
 
+app.get('/api/zones/accuracy', handle(async (req, res) => {
+  const all = await db.zones.list();
+  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : null;
+  const scoped = symbol ? all.filter(z => z.symbol === symbol) : all;
+  const manual = scoped.filter(z => z.source !== 'auto');
+  const auto = scoped.filter(z => z.source === 'auto' && !z.feedback);
+  const bySymbol = new Map();
+  for (const z of [...manual, ...auto]) {
+    const list = bySymbol.get(z.symbol) ?? { manual: [], auto: [] };
+    (z.source === 'auto' ? list.auto : list.manual).push(z);
+    bySymbol.set(z.symbol, list);
+  }
+  const details = [];
+  let matchedManual = 0;
+  let manualTotal = 0;
+  let matchedAuto = 0;
+  let autoTotal = 0;
+  for (const [sym, { manual: m, auto: a }] of bySymbol) {
+    const r = matchZones(m, a);
+    matchedManual += r.matchedManual;
+    manualTotal += r.manualCount;
+    matchedAuto += r.matchedAuto;
+    autoTotal += r.autoCount;
+    details.push({ symbol: sym, ...r });
+  }
+  res.json({
+    symbols: details,
+    totals: {
+      manualCount: manualTotal,
+      autoCount: autoTotal,
+      matchedManual,
+      matchedAuto,
+      precision: autoTotal ? matchedAuto / autoTotal : null,
+      recall: manualTotal ? matchedManual / manualTotal : null
+    },
+    calibration: await readCalibration()
+  });
+}));
+
+const readCalibration = async () => {
+  try {
+    const ev = await db.zones.getCalibration();
+    return ev ? latestCalibration([ev]) : { ...DEFAULT_CALIBRATION };
+  } catch {
+    return { ...DEFAULT_CALIBRATION };
+  }
+};
+
 app.get('/api/zones/:symbol', handle(async (req, res) => {
   res.json({ zones: await db.zones.list(req.params.symbol) });
 }));
@@ -396,6 +446,100 @@ app.delete('/api/zones/:id', handle(async (req, res) => {
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
   res.json({ ok: true });
 }));
+
+// ---- الكشف الآلي: تغذية راجعة + المعايرة ----
+app.post('/api/zones/:id/feedback', handle(async (req, res) => {
+  const all = await db.zones.list();
+  const cur = all.find(z => z.id === req.params.id);
+  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
+  const verdict = req.body?.verdict === 'confirm' ? 'confirm' : req.body?.verdict === 'reject' ? 'reject' : null;
+  if (!verdict) return res.status(400).json({ error: 'verdict يجب أن يكون confirm أو reject' });
+  const zone = {
+    ...cur,
+    feedback: verdict,
+    active: verdict === 'reject' ? false : cur.active,
+    updated_at: Date.now()
+  };
+  await db.zones.append(zone);
+  await db.events.create({
+    symbol: zone.symbol,
+    type: 'zone_feedback',
+    message: `${verdict === 'confirm' ? 'تأكيد' : 'رفض'} منطقة آلية عند ${zone.price} (${zone.type})`,
+    meta: JSON.stringify({ zoneId: zone.id, verdict, score: zone.score ?? null, timeframe: zone.timeframe }),
+    ts: Date.now()
+  });
+  broadcast({ type: 'zones_changed', symbol: zone.symbol });
+  res.json({ ok: true, zone });
+}));
+
+// جدولة الكشف الآلي: كل عملات لوحة التحليل × كل الفريمات
+const detectRunBusy = { value: false };
+
+const periodicDetection = async () => {
+  if (detectRunBusy.value) return;
+  detectRunBusy.value = true;
+  try {
+    const analyses = await db.analyses.list();
+    if (!analyses.length) return;
+    const calibration = await readCalibration();
+    const allZones = await db.zones.list();
+    let changed = 0;
+    for (const a of analyses) {
+      try {
+        const { perTf } = await detectSymbol({
+          symbol: a.symbol,
+          timeframes: ALL_TIMEFRAMES,
+          fetchKlines: (sym, tf, limit) => db.binance.klines(sym, tf, limit),
+          calibration
+        });
+        const existingAuto = allZones.filter(z => z.source === 'auto' && z.symbol === a.symbol);
+        const { appends, misses } = planAppends({
+          symbol: a.symbol,
+          perTf,
+          existingAuto,
+          matchTolerancePct: calibration.matchTolerancePct
+        });
+        for (const z of appends) {
+          await db.zones.append(z);
+          changed += 1;
+        }
+        for (const z of misses) {
+          await db.zones.append(z);
+          changed += 1;
+        }
+        if (appends.length || misses.length) {
+          broadcast({ type: 'zones_changed', symbol: a.symbol });
+          broadcast({ type: 'zones_auto_updated', symbol: a.symbol, added: appends.length, removed: misses.length });
+        }
+      } catch (e) {
+        console.error(`[zones] detection failed for ${a.symbol}:`, e.message);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    // المعايرة التكيفية: بعد الجولة — إن وُجدت مناطق يدوية مرجعية
+    try {
+      const fresh = await db.zones.list();
+      const manual = fresh.filter(z => z.source !== 'auto');
+      const auto = fresh.filter(z => z.source === 'auto' && !z.feedback);
+      if (manual.length >= 3) {
+        const report = matchZones(manual, auto);
+        const next = adaptCalibration(calibration, report);
+        if (next.minScore !== calibration.minScore) {
+          await db.zones.appendCalibration(next);
+          console.log(`[zones] calibration adapted: minScore ${calibration.minScore} → ${next.minScore} (precision ${report.precision?.toFixed(2)}, recall ${report.recall?.toFixed(2)})`);
+        }
+      }
+    } catch { /* المعايرة لا تعطل الجولة */ }
+    if (changed) console.log(`[zones] detection cycle: ${changed} zone changes across ${analyses.length} symbols`);
+  } catch (e) {
+    console.error('[zones] detection cycle failed:', e.message);
+  } finally {
+    detectRunBusy.value = false;
+  }
+};
+
+setInterval(() => void periodicDetection(), (Number(process.env.DETECT_MIN) || 5) * 60 * 1000);
+setTimeout(() => void periodicDetection(), 60_000);
 
 // مراقبة المناطق: اقتراب السعر (≤0.2%) وسحب السيولة (عبور السعر للمنطقة)
 const zoneNotify = new Map();
