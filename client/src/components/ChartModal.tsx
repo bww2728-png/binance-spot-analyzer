@@ -467,7 +467,8 @@ export default function ChartModal() {
       .then(r => {
         if (disposed) return;
         const t = r.totals;
-        setAccuracy(t.precision != null ? Math.round(t.precision * 100) : null);
+        // الدقة بلا معنى بلا مرجع يدوي — لا تعرضها
+        setAccuracy(t.manualCount > 0 && t.precision != null ? Math.round(t.precision * 100) : null);
       })
       .catch(() => undefined);
     return () => { disposed = true; };
