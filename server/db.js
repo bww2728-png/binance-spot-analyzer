@@ -43,7 +43,7 @@ async function fetchBinanceJson(path, timeoutMs = 30000) {
   throw lastErr ?? new Error('all Binance hosts failed');
 }
 
-export default {
+const db = {
   binance: {
     exchangeInfo: () => fetchBinanceJson('/api/v3/exchangeInfo', 30000),
     klines: (symbol, interval, limit, startTime, endTime) => {
@@ -61,7 +61,7 @@ export default {
     },
   },
   zones: {
-    /** أحدث حالة لكل منطقة (id) — منطقة محفوظة كحدث نوع liquidity_zone في events_log */
+    /** أحدث حالة لكل منطقة يدوية (id) — منطقة محفوظة كحدث نوع liquidity_zone في events_log */
     list: async (symbol) => {
       const q = new URLSearchParams({ type: 'eq.liquidity_zone', select: '*', order: 'ts.asc', limit: '2000' });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
@@ -70,10 +70,52 @@ export default {
       for (const e of events) {
         try {
           const z = JSON.parse(e.meta || 'null');
-          if (z?.id) latest.set(z.id, z);
+          if (z?.id && z.source !== 'auto') latest.set(z.id, z);
         } catch { /* تجاهل السجلات التالفة */ }
       }
       return [...latest.values()].filter(z => z.active !== false);
+    },
+    /** المناطق الآلية: أحدث لقطة لكل رمز + تغذية راجعة فوقها */
+    listAuto: async (symbol) => {
+      const q = new URLSearchParams({ type: 'eq.auto_zones_snapshot', select: '*', order: 'ts.desc', limit: '60' });
+      if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      const events = await rest(`/events_log?${q}`);
+      const latestPerSymbol = new Map();
+      for (const e of events) {
+        if (latestPerSymbol.has(e.symbol)) continue;
+        try {
+          const snap = JSON.parse(e.meta || 'null');
+          if (snap?.zones) latestPerSymbol.set(e.symbol, snap);
+        } catch { /* تجاهل التالف */ }
+      }
+      if (!latestPerSymbol.size) return [];
+      const feedbackQ = new URLSearchParams({
+        type: 'eq.zone_feedback', select: '*', order: 'ts.desc', limit: '300'
+      });
+      if (symbol) feedbackQ.set('symbol', `eq.${symbol.toUpperCase()}`);
+      let feedback = [];
+      try { feedback = await rest(`/events_log?${feedbackQ}`); } catch { /* بلا تغذية راجعة */ }
+      const byZone = new Map();
+      for (const e of feedback) {
+        try {
+          const f = JSON.parse(e.meta || 'null');
+          if (f?.zoneId && !byZone.has(f.zoneId)) byZone.set(f.zoneId, f.verdict);
+        } catch { /* تجاهل */ }
+      }
+      const out = [];
+      for (const snap of latestPerSymbol.values()) {
+        for (const z of snap.zones) {
+          const fb = byZone.get(z.id) ?? z.feedback ?? null;
+          if (fb === 'reject') continue;
+          out.push({ ...z, feedback: fb });
+        }
+      }
+      return out;
+    },
+    /** يدوي + آلي معاً — للعرض والمراقبة */
+    listAll: async (symbol) => {
+      const [manual, auto] = await Promise.all([db.zones.list(symbol), db.zones.listAuto(symbol)]);
+      return [...manual, ...auto];
     },
     append: (zone) => rest('/events_log?select=*', {
       method: 'POST',
@@ -85,6 +127,44 @@ export default {
         ts: Date.now()
       },
       prefer: 'return=representation'
+    }),
+    appendFeedback: (f) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: String(f.symbol).toUpperCase(),
+        type: 'zone_feedback',
+        message: `${f.verdict === 'confirm' ? 'تأكيد' : 'رفض'} منطقة آلية ${f.zoneId}`,
+        meta: JSON.stringify(f),
+        ts: Date.now()
+      },
+      prefer: 'return=minimal'
+    }),
+    /** أحدث لقطة مناطق آلية — لعملة محددة أو لكل العملات (أحدث لقطة لكل رمز) */
+    getAutoSnapshot: async (symbol) => {
+      const q = new URLSearchParams({ type: 'eq.auto_zones_snapshot', select: '*', order: 'ts.desc', limit: '60' });
+      if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      const events = await rest(`/events_log?${q}`);
+      const seen = new Set();
+      for (const e of events) {
+        if (seen.has(e.symbol)) continue;
+        seen.add(e.symbol);
+        try {
+          const snap = JSON.parse(e.meta || 'null');
+          if (!symbol || snap?.symbol === symbol.toUpperCase()) return snap;
+        } catch { /* تجاهل التالف */ }
+      }
+      return null;
+    },
+    appendAutoSnapshot: (snap) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: String(snap.symbol).toUpperCase(),
+        type: 'auto_zones_snapshot',
+        message: `لقطة مناطق آلية: ${snap.zones.length} منطقة`,
+        meta: JSON.stringify(snap),
+        ts: Date.now()
+      },
+      prefer: 'return=minimal'
     }),
     /** أحدث معايرة محفوظة (حدث zone_calibration — الأحدث يفوز) */
     getCalibration: async () => {
@@ -229,3 +309,5 @@ export default {
     create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' })
   }
 };
+
+export default db;

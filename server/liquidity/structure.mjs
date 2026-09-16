@@ -85,7 +85,8 @@ export function detectFVGs(candles) {
 
 /**
  * مرشحات المناطق من آخر pivotsLimit قمة/قاع:
- * كل قمة سوينغ → BSL مرشحة، كل قاع → SSL، مُثراة بعدد عنقودها وسحبها وتوافق FVG.
+ * كل عنقود متساوٍ → منطقة واحدة (سعر العنقود وعدده)، وكل قمة/قاع منفرد → منطقة مستقلة.
+ * هذا يمنع تكرار المناطق المتلاصقة داخل العنقود الواحد.
  */
 export function candidateZones(candles, {
   strength = 3,
@@ -107,22 +108,32 @@ export function candidateZones(candles, {
   const highs = pivots.filter(p => p.kind === 'high').slice(-pivotsLimit);
   const lows = pivots.filter(p => p.kind === 'low').slice(-pivotsLimit);
 
-  const zones = [];
+  // الدمج: كل عنقود → منطقة واحدة بمفتاح عنقودي حتمي؛ المنفردة بمفتاح pivot
+  const merged = new Map();
   for (const p of [...highs, ...lows]) {
     const cl = clusterOf(p);
-    const sw = sweepOf(p);
-    zones.push({
+    const key = cl ? `${p.kind}:cl:${cl.indexes[0]}` : `${p.kind}:${p.index}`;
+    const zone = merged.get(key) ?? {
       type: p.kind === 'high' ? 'BSL' : 'SSL',
-      price: p.price,
+      price: cl ? cl.price : p.price,
       anchorIndex: p.index,
       anchorTime: p.time,
-      clusterCount: cl ? cl.count : 1,
-      swept: Boolean(sw),
-      sweptAt: sw ? sw.time : null,
-      fvgNear: fvgNear(p.price)
-    });
+      clusterCount: 0,
+      swept: false,
+      sweptAt: null,
+      fvgNear: false
+    };
+    zone.clusterCount = cl ? cl.count : Math.max(zone.clusterCount, 1);
+    if (cl) zone.price = cl.price;
+    const sw = sweepOf(p);
+    if (sw && (!zone.swept || (zone.sweptAt ?? 0) < sw.time)) {
+      zone.swept = true;
+      zone.sweptAt = sw.time;
+    }
+    if (fvgNear(zone.price)) zone.fvgNear = true;
+    merged.set(key, zone);
   }
-  return { zones, pivots, clusters, sweeps, fvgs, computedAt: now };
+  return { zones: [...merged.values()], pivots, clusters, sweeps, fvgs, computedAt: now };
 }
 
 /** المستويات المرجعية: قمة/قاع آخر 24 ساعة (أو النافذة المتاحة) + الأرقام المستديرة */

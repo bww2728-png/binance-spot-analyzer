@@ -8,6 +8,12 @@ import { estimateLiqClusters, fetchDepth, fetchAggTrades, detectIceberg, detectS
 
 export const ALL_TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'];
 
+/** حدود المناطق لكل فريم: الفريمات الصغيرة أكثر ضجيجاً — حد أدنى أرفع وعدد أقل */
+export const TF_LIMITS = {
+  minScoreAdj: { '1m': 15, '3m': 10, '5m': 5, '15m': 0, '30m': 0, '1h': 0, '2h': 0, '4h': 0, '6h': 0, '8h': 0, '12h': 0, '1d': 0, '3d': 0, '1w': 0 },
+  limit: { '1m': 4, '3m': 4, '5m': 6, '15m': 6, '30m': 8, '1h': 8, '2h': 8, '4h': 8, '6h': 8, '8h': 8, '12h': 8, '1d': 8, '3d': 8, '1w': 8 }
+};
+
 export const toCandles = (raw) => raw.map(k => ({
   time: Math.floor(Number(k[0]) / 1000),
   open: parseFloat(String(k[1])),
@@ -73,7 +79,8 @@ export async function detectSymbol({
         ...book,
         liqClusters
       }, {
-        minScore: calibration.minScore,
+        minScore: calibration.minScore + (TF_LIMITS.minScoreAdj[tf] ?? 0),
+        limit: TF_LIMITS.limit[tf] ?? 8,
         refLevels: referenceLevels(candles)
       });
       if (scored.length) perTf[tf] = scored;
@@ -84,10 +91,9 @@ export async function detectSymbol({
 }
 
 /**
- * خطة التخزين الحتمية: مقارنة المناطق المرشحة بالآلي المحفوظ.
- * - مطابقة (نفس النوع + الفريم + ضمن matchTolerancePct) → إعادة استخدام id وتحديث الدرجة إذا تغيرت ≥5 أو تغير السحب.
+ * خطة التحديث الحتمية: مقارنة المناطق المرشحة بالآلي المحفوظ (لقطات سابقة).
+ * - مطابقة (نفس النوع + الفريم + ضمن matchTolerancePct) → إعادة استخدام id مع نقل feedback وتحديث الدرجة إذا تغيرت ≥5 أو تغير السحب.
  * - جديد → إنشاء.
- * - آلي قديم لم يعد يُكتشف → إبطال.
  */
 export function planAppends({ symbol, perTf, existingAuto, now = Date.now(), matchTolerancePct = 0.003 }) {
   const appends = [];
@@ -130,19 +136,46 @@ export function planAppends({ symbol, perTf, existingAuto, now = Date.now(), mat
           source: 'auto',
           created_at: now,
           expires_at: null,
-          active: true
+          active: true,
+          feedback: null
         });
       }
     }
   }
 
-  // مناطق آلية نشطة لم تعد مكتشفة → إبطال
-  const misses = [];
-  for (const e of existingAuto) {
-    if (e.symbol !== symbol || matchedIds.has(e.id)) continue;
-    if (!perTf[(e.timeframe ?? '')]) continue; // الفريم فشل هذه الجولة — لا إبطال
-    misses.push({ ...e, active: false, updated_at: now });
-  }
+  // الفريم الفاشل لا يُبطل شيئاً هنا — اللقطة الجديدة تُبنى فقط من الفريمات الناجحة
+  return { appends };
+}
 
-  return { appends, misses };
+/** بناء لقطة المناطق النشطة لعملة (نقل feedback المطابقات + استبعاد المرفوض) */
+export function buildSnapshot({ symbol, perTf, existingAuto, now = Date.now(), matchTolerancePct = 0.003 }) {
+  const zones = [];
+  for (const [tf, list] of Object.entries(perTf)) {
+    for (const z of list) {
+      const prev = existingAuto.find(e =>
+        e.symbol === symbol && (e.timeframe ?? '') === tf &&
+        e.type === z.type && Math.abs(e.price - z.price) / z.price <= matchTolerancePct);
+      if (prev?.feedback === 'reject') continue; // المستخدم رفضها — لا تعرضها مجدداً
+      zones.push({
+        id: prev?.id ?? `auto-${symbol}-${tf}-${z.type}-${Math.round(z.price * 1e6)}`,
+        symbol,
+        type: z.type,
+        price: z.price,
+        timeframe: tf,
+        note: '',
+        score: z.score,
+        reasons: z.reasons,
+        clusterCount: z.clusterCount,
+        swept: z.swept,
+        sweptAt: z.sweptAt,
+        source: 'auto',
+        created_at: prev?.created_at ?? now,
+        updated_at: now,
+        expires_at: null,
+        active: true,
+        feedback: prev?.feedback ?? null
+      });
+    }
+  }
+  return { symbol, zones, ts: now };
 }

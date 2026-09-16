@@ -10,7 +10,7 @@ import {
 } from '../liquidity/orderbook.mjs';
 import { scoreZones, DEFAULT_WEIGHTS } from '../liquidity/score.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from '../liquidity/calibrate.mjs';
-import { planAppends, toCandles } from '../liquidity/engine.mjs';
+import { planAppends, buildSnapshot, toCandles } from '../liquidity/engine.mjs';
 
 const candle = (time, open, high, low, close) => ({ time, open, high, low, close });
 
@@ -202,42 +202,44 @@ test('latestCalibration: الأحدث يفوز والتالف يُتجاهل', (
   assert.equal(latestCalibration([]).minScore, DEFAULT_CALIBRATION.minScore);
 });
 
-test('planAppends: جديد / تحديث عند تغير الدرجة / لا تغيير / إبطال المفقود', () => {
+test('buildSnapshot: جديد / نقل feedback / استبعاد المرفوض', () => {
   const now = Date.now();
   const zone = (score, price = 100, type = 'BSL') => ({
     type, price, score, anchorTime: 5, clusterCount: 2, swept: false, sweptAt: null, reasons: ['x']
   });
 
   // جديد
-  let r = planAppends({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: [], now });
-  assert.equal(r.appends.length, 1);
-  assert.ok(r.appends[0].id.startsWith('auto-BTCUSDT-5m-BSL'));
-  assert.equal(r.appends[0].source, 'auto');
+  let snap = buildSnapshot({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: [], now });
+  assert.equal(snap.symbol, 'BTCUSDT');
+  assert.equal(snap.zones.length, 1);
+  assert.ok(snap.zones[0].id.startsWith('auto-BTCUSDT-5m-BSL'));
+  assert.equal(snap.zones[0].source, 'auto');
 
-  // تحديث: نفس المنطقة بدرجة أعلى بـ10
+  // نقل feedback: نفس المنطقة بدرجة أعلى تحتفظ بالتأكيد
   const existing = [{
     id: 'auto-1', symbol: 'BTCUSDT', type: 'BSL', price: 100, timeframe: '5m',
-    score: 50, reasons: [], swept: false, active: true, source: 'auto'
+    score: 50, reasons: [], swept: false, active: true, source: 'auto', feedback: 'confirm'
   }];
-  r = planAppends({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: existing, now });
-  assert.equal(r.appends.length, 1);
-  assert.equal(r.appends[0].id, 'auto-1');
-  assert.equal(r.appends[0].score, 60);
+  snap = buildSnapshot({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: existing, now });
+  assert.equal(snap.zones.length, 1);
+  assert.equal(snap.zones[0].id, 'auto-1');
+  assert.equal(snap.zones[0].feedback, 'confirm');
+  assert.equal(snap.zones[0].score, 60);
 
-  // لا تغيير: نفس الدرجة
-  r = planAppends({ symbol: 'BTCUSDT', perTf: { '5m': [zone(50)] }, existingAuto: existing, now });
-  assert.equal(r.appends.length, 0);
+  // استبعاد المرفوض
+  const rejected = [{ ...existing[0], feedback: 'reject' }];
+  snap = buildSnapshot({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: rejected, now });
+  assert.equal(snap.zones.length, 0);
+});
 
-  // إبطال: آلي موجود والفريم ناجح لكن المنطقة لم تعد مكتشفة
-  r = planAppends({ symbol: 'BTCUSDT', perTf: { '5m': [zone(50, 150)] }, existingAuto: existing, now });
-  assert.equal(r.misses.length, 1);
-  assert.equal(r.misses[0].active, false);
-
-  // فريم فاشل (غير موجود في perTf) → لا إبطال، لكن منطقة الـ15m الجديدة تُنشأ
-  r = planAppends({ symbol: 'BTCUSDT', perTf: { '15m': [zone(50, 150)] }, existingAuto: existing, now });
-  assert.equal(r.misses.length, 0);
-  assert.equal(r.appends.length, 1);
-  assert.ok(r.appends[0].id.includes('15m'));
+test('candidateZones: العنقود الواحد → منطقة واحدة لا تكرار', () => {
+  // 3 قمم متساوية عند 12 → منطقة BSL واحدة بclusterCount 3
+  const zig = [10, 11, 12, 11, 10, 11, 12.01, 11, 10, 11, 12.02, 11, 10.5];
+  const cs = zig.map((p, i) => candle(i * 60000, p, p, p, p));
+  const out = candidateZones(cs, { strength: 1, pivotsLimit: 10 });
+  const bsl = out.zones.filter(z => z.type === 'BSL');
+  assert.equal(bsl.length, 1);
+  assert.equal(bsl[0].clusterCount, 3);
 });
 
 test('toCandles: تحويل خام بينانس إلى شموع', () => {

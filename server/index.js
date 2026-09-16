@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
 import { researchSymbol } from './research.mjs';
-import { detectSymbol, planAppends, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
+import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -343,11 +343,11 @@ app.get('/api/shariah-research/status', handle(async (_req, res) => {
 
 // ---- مناطق السيولة: CRUD + بث + مراقبة الاقتراب والسحب ----
 app.get('/api/zones', handle(async (_req, res) => {
-  res.json({ zones: await db.zones.list() });
+  res.json({ zones: await db.zones.listAll() });
 }));
 
 app.get('/api/zones/accuracy', handle(async (req, res) => {
-  const all = await db.zones.list();
+  const all = await db.zones.listAll();
   const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : null;
   const scoped = symbol ? all.filter(z => z.symbol === symbol) : all;
   const manual = scoped.filter(z => z.source !== 'auto');
@@ -395,7 +395,7 @@ const readCalibration = async () => {
 };
 
 app.get('/api/zones/:symbol', handle(async (req, res) => {
-  res.json({ zones: await db.zones.list(req.params.symbol) });
+  res.json({ zones: await db.zones.listAll(req.params.symbol) });
 }));
 
 app.post('/api/zones', handle(async (req, res) => {
@@ -422,9 +422,9 @@ app.post('/api/zones', handle(async (req, res) => {
 }));
 
 app.patch('/api/zones/:id', handle(async (req, res) => {
-  const all = await db.zones.list();
-  const cur = all.find(z => z.id === req.params.id);
-  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
+  const all = await db.zones.listAll();
+  const cur = all.find(z => z.id === req.params.id && z.source !== 'auto');
+  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة أو ليست يدوية' });
   const b = req.body ?? {};
   const zone = {
     ...cur,
@@ -439,9 +439,9 @@ app.patch('/api/zones/:id', handle(async (req, res) => {
 }));
 
 app.delete('/api/zones/:id', handle(async (req, res) => {
-  const all = await db.zones.list();
-  const cur = all.find(z => z.id === req.params.id);
-  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
+  const all = await db.zones.listAll();
+  const cur = all.find(z => z.id === req.params.id && z.source !== 'auto');
+  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة أو ليست يدوية — استخدم التغذية الراجعة للمناطق الآلية' });
   await db.zones.append({ ...cur, active: false });
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
   res.json({ ok: true });
@@ -449,27 +449,21 @@ app.delete('/api/zones/:id', handle(async (req, res) => {
 
 // ---- الكشف الآلي: تغذية راجعة + المعايرة ----
 app.post('/api/zones/:id/feedback', handle(async (req, res) => {
-  const all = await db.zones.list();
+  const all = await db.zones.listAll(req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined);
   const cur = all.find(z => z.id === req.params.id);
   if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
   const verdict = req.body?.verdict === 'confirm' ? 'confirm' : req.body?.verdict === 'reject' ? 'reject' : null;
   if (!verdict) return res.status(400).json({ error: 'verdict يجب أن يكون confirm أو reject' });
-  const zone = {
-    ...cur,
-    feedback: verdict,
-    active: verdict === 'reject' ? false : cur.active,
-    updated_at: Date.now()
-  };
-  await db.zones.append(zone);
-  await db.events.create({
-    symbol: zone.symbol,
-    type: 'zone_feedback',
-    message: `${verdict === 'confirm' ? 'تأكيد' : 'رفض'} منطقة آلية عند ${zone.price} (${zone.type})`,
-    meta: JSON.stringify({ zoneId: zone.id, verdict, score: zone.score ?? null, timeframe: zone.timeframe }),
+  await db.zones.appendFeedback({
+    zoneId: cur.id,
+    verdict,
+    score: cur.score ?? null,
+    timeframe: cur.timeframe,
+    symbol: cur.symbol,
     ts: Date.now()
   });
-  broadcast({ type: 'zones_changed', symbol: zone.symbol });
-  res.json({ ok: true, zone });
+  broadcast({ type: 'zones_changed', symbol: cur.symbol });
+  res.json({ ok: true, zone: { ...cur, feedback: verdict } });
 }));
 
 // جدولة الكشف الآلي: كل عملات لوحة التحليل × كل الفريمات
@@ -482,8 +476,7 @@ const periodicDetection = async () => {
     const analyses = await db.analyses.list();
     if (!analyses.length) return;
     const calibration = await readCalibration();
-    const allZones = await db.zones.list();
-    let changed = 0;
+    const allZones = await db.zones.listAll();
     for (const a of analyses) {
       try {
         const { perTf } = await detectSymbol({
@@ -493,23 +486,24 @@ const periodicDetection = async () => {
           calibration
         });
         const existingAuto = allZones.filter(z => z.source === 'auto' && z.symbol === a.symbol);
-        const { appends, misses } = planAppends({
+        // لقطة واحدة لكل رمز: تحل محل مئات الإلحاقات الفردية وتحمي سجل الأحداث من الغرق
+        const snap = buildSnapshot({
           symbol: a.symbol,
           perTf,
           existingAuto,
           matchTolerancePct: calibration.matchTolerancePct
         });
-        for (const z of appends) {
-          await db.zones.append(z);
-          changed += 1;
-        }
-        for (const z of misses) {
-          await db.zones.append(z);
-          changed += 1;
-        }
-        if (appends.length || misses.length) {
+        const prevSnap = allZones.filter(z => z.source === 'auto' && z.symbol === a.symbol);
+        const changed = snap.zones.length !== prevSnap.length ||
+          snap.zones.some(z => {
+            const p = prevSnap.find(e => e.id === z.id);
+            return !p || p.score !== z.score || Boolean(p.swept) !== Boolean(z.swept);
+          });
+        if (snap.zones.length || prevSnap.length) {
+          await db.zones.appendAutoSnapshot(snap);
           broadcast({ type: 'zones_changed', symbol: a.symbol });
-          broadcast({ type: 'zones_auto_updated', symbol: a.symbol, added: appends.length, removed: misses.length });
+          broadcast({ type: 'zones_auto_updated', symbol: a.symbol, added: snap.zones.length, removed: Math.max(0, prevSnap.length - snap.zones.length) });
+          void changed;
         }
       } catch (e) {
         console.error(`[zones] detection failed for ${a.symbol}:`, e.message);
@@ -518,7 +512,7 @@ const periodicDetection = async () => {
     }
     // المعايرة التكيفية: بعد الجولة — إن وُجدت مناطق يدوية مرجعية
     try {
-      const fresh = await db.zones.list();
+      const fresh = await db.zones.listAll();
       const manual = fresh.filter(z => z.source !== 'auto');
       const auto = fresh.filter(z => z.source === 'auto' && !z.feedback);
       if (manual.length >= 3) {
@@ -530,7 +524,6 @@ const periodicDetection = async () => {
         }
       }
     } catch { /* المعايرة لا تعطل الجولة */ }
-    if (changed) console.log(`[zones] detection cycle: ${changed} zone changes across ${analyses.length} symbols`);
   } catch (e) {
     console.error('[zones] detection cycle failed:', e.message);
   } finally {
@@ -546,7 +539,7 @@ const zoneNotify = new Map();
 setInterval(() => {
   void (async () => {
     try {
-      const zones = await db.zones.list();
+      const zones = await db.zones.listAll();
       const now = Date.now();
       const live = zones.filter(z => z.active && (!z.expires_at || z.expires_at > now));
       if (!live.length) return;
