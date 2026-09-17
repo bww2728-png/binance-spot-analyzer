@@ -86,6 +86,9 @@ const assertSymbol = (raw, res) => {
   return s;
 };
 
+// تنقية النصوص الحرة المركزية: إزالة أقواس HTML من أي نص مخزَّن (ملاحظات/ملاحظات آلي/ملاحظات يدوي)
+const sanitizeText = (raw, max = 500) => String(raw ?? '').replace(/[<>]/g, '').slice(0, max);
+
 const serializeAnalysis = (a) => ({
   ...a,
   ssl_price: a.ssl_price === null || a.ssl_price === undefined ? null : Number(a.ssl_price),
@@ -461,7 +464,7 @@ app.patch('/api/zones/:id', handle(async (req, res) => {
   const zone = {
     ...cur,
     price: b.price != null && Number(b.price) > 0 ? Number(b.price) : cur.price,
-    note: b.note != null ? String(b.note).slice(0, 500) : cur.note,
+    note: b.note != null ? sanitizeText(b.note) : cur.note,
     type: b.type === 'BSL' || b.type === 'SSL' ? b.type : cur.type,
     active: typeof b.active === 'boolean' ? b.active : cur.active
   };
@@ -488,7 +491,7 @@ app.post('/api/zones/:id/feedback', handle(async (req, res) => {
   if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
   const verdict = VERDICTS.includes(req.body?.verdict) ? req.body.verdict : null;
   if (!verdict) return res.status(400).json({ error: 'verdict يجب أن يكون confirm أو reject أو clear' });
-  const note = req.body?.note != null ? String(req.body.note).slice(0, 500) : undefined;
+  const note = req.body?.note != null ? sanitizeText(req.body.note) : undefined;
   await db.zones.appendFeedback({
     zoneId: cur.id,
     verdict,
@@ -510,7 +513,7 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
   const all = await db.zones.listAll(req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined);
   const cur = all.find(z => z.id === req.params.id);
   if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
-  const note = String(req.body?.note ?? '').slice(0, 500);
+  const note = sanitizeText(req.body?.note);
   await db.zones.appendFeedback({
     zoneId: cur.id,
     verdict: null,
