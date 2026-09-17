@@ -176,11 +176,12 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       if (hoverRaf != null) cancelAnimationFrame(hoverRaf);
       ro.disconnect();
       unsub();
-      chart.remove();
+      // الترتيب حرج: أطفئ refs قبل remove حتى لا تستدعيها callbacks قائمة بين remove() والتعيين → "Object is disposed"
       chartRef.current = null;
       seriesRef.current = null;
       markersRef.current = null;
       aliveRef.current = false;
+      try { chart.remove(); } catch { /* سباق تفكيك — تُهمل بصمت */ }
       setReady(false);
       setCanLoadMore(false);
       canLoadMoreRef.current = false;
@@ -219,13 +220,14 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   useEffect(() => {
     const markers = markersRef.current;
     if (!markers || !ready) return;
-    if (!showAutoMarkers) { markers.setMarkers([]); return; }
+    if (!showAutoMarkers) { try { markers.setMarkers([]); } catch { /* تفكيك */ } return; }
     const top = visibleZones
       .filter(z => z.source === 'auto' && z.anchorTime != null && z.feedback !== 'confirm') // المؤكدة تصبح Band دائماً
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, 5)
       .sort((a, b) => (a.anchorTime ?? 0) - (b.anchorTime ?? 0)); // المكتبة تتطلب ترتيباً زمنياً تصاعدياً
-    markers.setMarkers(top.map(z => {
+    try {
+      markers.setMarkers(top.map(z => {
       const highlighted = highlightId === z.id;
       return {
         id: z.id,
@@ -239,6 +241,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
         textColor: '#fff'
       };
     }));
+    } catch { /* سباق تفكيك — تُهمل بصمت */ }
   }, [visibleZones, ready, showAutoMarkers, highlightId]);
 
   // نقل الشارت إلى شمعة الاكتشاف عند اختيار منطقة من القائمة الجانبية
@@ -247,7 +250,8 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     if (!chart || !ready || !scrollTarget?.nonce) return;
     const sec = TF_SECONDS[timeframe] ?? 900;
     const t = scrollTarget.time;
-    chart.timeScale().setVisibleRange({ from: (t - sec * 45) as UTCTimestamp, to: (t + sec * 45) as UTCTimestamp });
+    // حماية سباق التفكيك: remove() قد يسبق الاستدعاء
+    try { chart.timeScale().setVisibleRange({ from: (t - sec * 45) as UTCTimestamp, to: (t + sec * 45) as UTCTimestamp }); } catch { /* تُهمل بصمت */ }
   }, [scrollTarget, ready, timeframe]);
 
   const getPriceCoord = useCallback((price: number) => {
