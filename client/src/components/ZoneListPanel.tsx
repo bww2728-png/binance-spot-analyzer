@@ -88,6 +88,11 @@ export default function ZoneListPanel({
                 <span className="text-[10.5px] truncate flex-1" style={{ color: 'var(--text-3)' }}>
                   {z.timeframe}{z.reasons?.[0] ? ` · ${z.reasons[0]}` : ''}
                 </span>
+                {z.source === 'auto' && z.anchorTime != null && (
+                  <span className="num text-[10px]" style={{ color: 'var(--text-3)' }} title="زمن شمعة الاكتشاف — النقر ينقل الشارت إليها">
+                    {new Date(z.anchorTime * 1000).toLocaleDateString('en', { month: 'short', day: 'numeric' })}
+                  </span>
+                )}
               </button>
             );
           })}

@@ -208,12 +208,14 @@ test('buildSnapshot: جديد / نقل feedback / استبعاد المرفوض'
     type, price, score, anchorTime: 5, clusterCount: 2, swept: false, sweptAt: null, reasons: ['x']
   });
 
-  // جديد
+  // جديد — anchorTime يجب أن يُنقل للقطة (تثبيت العلامة على شمعة الاكتشاف)
   let snap = buildSnapshot({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: [], now });
   assert.equal(snap.symbol, 'BTCUSDT');
   assert.equal(snap.zones.length, 1);
   assert.ok(snap.zones[0].id.startsWith('auto-BTCUSDT-5m-BSL'));
   assert.equal(snap.zones[0].source, 'auto');
+  assert.equal(snap.zones[0].anchorTime, 5);
+  assert.ok(snap.zones[0].bandPct > 0);
 
   // نقل feedback: نفس المنطقة بدرجة أعلى تحتفظ بالتأكيد
   const existing = [{

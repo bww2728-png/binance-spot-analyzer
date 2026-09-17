@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { fetchKlines, fetchOlderKlines } from '../lib/binance';
 import type { Candle, LiquidityZone, Timeframe } from '../lib/types';
 import { TIMEFRAMES } from '../lib/types';
-import { createChart, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp } from 'lightweight-charts';
+import { createChart, createSeriesMarkers, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp, type ISeriesMarkersPluginApi, type Time } from 'lightweight-charts';
 import { CHART_COLORS } from './MiniChart';
 import Toggle from './ui/Toggle';
 import AcademyModal from './AcademyModal';
@@ -18,7 +18,14 @@ const toBar = (c: Candle) => ({
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
 
-function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId }: {
+/** ثواني الشمعة لكل فريم — لحساب نافذة النقل عند اختيار منطقة */
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600,
+  '2h': 7200, '4h': 14400, '6h': 21600, '8h': 28800, '12h': 43200,
+  '1d': 86400, '3d': 259200, '1w': 604800
+};
+
+function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
@@ -27,6 +34,9 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   showAuto: boolean;
   onChartClick: (price: number, timeframe: string) => void;
   highlightId: string | null;
+  scrollTarget: { time: number; nonce: number } | null;
+  height: number;
+  showAutoMarkers?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -35,6 +45,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   const [loading, setLoading] = useState(true);
   const [canLoadMore, setCanLoadMore] = useState(false);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const canLoadMoreRef = useRef(false);
   // مراجع وضع التعليم — لتجنّب إعادة تسجيل مستمع النقر عند كل تغيير حالة
@@ -88,7 +99,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     const el = containerRef.current;
     if (!el) return;
     const chart = createChart(el, {
-      height: 340,
+      height: el.clientHeight || height,
       layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text },
       grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
       timeScale: { timeVisible: true, secondsVisible: false },
@@ -100,6 +111,8 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       wickUpColor: CHART_COLORS.up, wickDownColor: CHART_COLORS.down
     });
     seriesRef.current = s;
+    // مُدير العلامات الأصلية — كل علامة مثبتة على (زمن الاكتشاف، سعر السيولة) وتتحرك مع التكبير
+    markersRef.current = createSeriesMarkers(s, []);
     // التقاط النقر في وضع التعليم: تحويل إحداثي Y إلى سعر
     chart.subscribeClick(param => {
       if (!annotateRef.current || !param.point) return;
@@ -118,7 +131,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       if (k.time >= lastTime) { s.update(toBar(k)); lastTime = k.time; }
     });
 
-    const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }));
+    const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }));
     ro.observe(el);
     return () => {
       disposed = true;
@@ -127,6 +140,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
+      markersRef.current = null;
       setReady(false);
       setCanLoadMore(false);
       canLoadMoreRef.current = false;
@@ -161,6 +175,41 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     return list.filter(z => z.source !== 'auto' || (z.timeframe ?? '') === timeframe);
   }, [zoneList, showAuto, timeframe]);
 
+  // علامات أصلية مثبتة: (زمن الاكتشاف، سعر السيولة) — تتحرك مع التكبير والتحريك بشكل مثالي
+  useEffect(() => {
+    const markers = markersRef.current;
+    if (!markers || !ready) return;
+    if (!showAutoMarkers) { markers.setMarkers([]); return; }
+    const top = visibleZones
+      .filter(z => z.source === 'auto' && z.anchorTime != null)
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, 5)
+      .sort((a, b) => (a.anchorTime ?? 0) - (b.anchorTime ?? 0)); // المكتبة تتطلب ترتيباً زمنياً تصاعدياً
+    markers.setMarkers(top.map(z => {
+      const highlighted = highlightId === z.id;
+      return {
+        id: z.id,
+        time: z.anchorTime as UTCTimestamp,
+        price: z.price,
+        position: z.type === 'BSL' ? 'atPriceTop' as const : 'atPriceBottom' as const,
+        shape: 'circle' as const,
+        color: ZONE_COLOR[z.type],
+        size: highlighted ? 2 : 1,
+        text: `${z.type} ${z.score}٪${z.swept ? ' مُسحوبة' : ''}`,
+        textColor: '#fff'
+      };
+    }));
+  }, [visibleZones, ready, showAutoMarkers, highlightId]);
+
+  // نقل الشارت إلى شمعة الاكتشاف عند اختيار منطقة من القائمة الجانبية
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !ready || !scrollTarget?.nonce) return;
+    const sec = TF_SECONDS[timeframe] ?? 900;
+    const t = scrollTarget.time;
+    chart.timeScale().setVisibleRange({ from: (t - sec * 45) as UTCTimestamp, to: (t + sec * 45) as UTCTimestamp });
+  }, [scrollTarget, ready, timeframe]);
+
   const getPriceCoord = useCallback((price: number) => {
     const s = seriesRef.current;
     if (!s) return null;
@@ -173,7 +222,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     <div className="relative">
       <div
         ref={containerRef}
-        style={{ height: 340, cursor: annotate ? 'crosshair' : 'default' }}
+        style={{ height, cursor: annotate ? 'crosshair' : 'default' }}
         className="rounded overflow-hidden"
       />
       <canvas
@@ -427,6 +476,8 @@ export default function ChartModal() {
   const [accuracy, setAccuracy] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [scrollTarget, setScrollTarget] = useState<{ time: number; nonce: number } | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
 
   /** وميض المنطقة على الشارتين لثانيتين */
   const flashZone = (id: string) => {
@@ -435,9 +486,10 @@ export default function ChartModal() {
     highlightTimer.current = setTimeout(() => setHighlightId(null), 2000);
   };
 
-  /** اختيار من القائمة الجانبية: وميض + فتح حوار التفاصيل */
+  /** اختيار من القائمة الجانبية: وميض + نقل الشارت لشمعة الاكتشاف + فتح حوار التفاصيل */
   const pickFromPanel = (z: LiquidityZone) => {
     flashZone(z.id);
+    if (z.anchorTime != null) setScrollTarget({ time: z.anchorTime, nonce: Date.now() });
     if (z.source === 'auto') setAutoDialog({ zone: z });
     else setZoneDialog({ price: z.price, timeframe: z.timeframe, zone: z });
   };
@@ -450,6 +502,19 @@ export default function ChartModal() {
       .catch(() => undefined);
     return () => { disposed = true; };
   }, [modal.symbol, zoneCounts]);
+
+  // Esc يخرج من ملء الشاشة أولاً قبل إغلاق النافذة
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [fullscreen]);
 
   // تقرير دقة الكشف مقابل مناطق التعليم
   useEffect(() => {
@@ -508,15 +573,17 @@ export default function ChartModal() {
   const suggestedTypeRef = useRef<'BSL' | 'SSL'>('BSL');
 
   const zoneCount = zoneCounts?.[modal.symbol] ?? 0;
+  // ارتفاع الشارت: عادي 340px / ملء الشاشة يستفيد من ارتفاع الشاشة
+  const chartHeight = fullscreen ? Math.max(380, Math.round(window.innerHeight * 0.42)) : 340;
 
   return (
     <div
-      className="anim-overlay fixed inset-0 z-40 flex items-center justify-center p-4"
+      className={`anim-overlay fixed inset-0 z-40 flex items-center justify-center ${fullscreen ? 'p-0' : 'p-4'}`}
       style={{ background: 'rgba(4, 6, 10, 0.82)', backdropFilter: 'blur(4px)' }}
       onClick={close}
     >
       <div
-        className="anim-modal rounded-2xl w-full max-w-6xl max-h-full overflow-auto"
+        className={`anim-modal w-full overflow-auto ${fullscreen ? 'max-w-none h-full rounded-none' : 'rounded-2xl max-w-6xl max-h-full'}`}
         style={{ background: 'var(--surface-0)', border: '1px solid var(--border-2)', boxShadow: 'var(--shadow-lg)' }}
         onClick={e => e.stopPropagation()}
       >
@@ -562,6 +629,13 @@ export default function ChartModal() {
                 {zoneCount} منطقة
               </span>
             )}
+            <button
+              className="btn !py-1.5 !px-3 text-[11.5px]"
+              onClick={() => setFullscreen(v => !v)}
+              title="ملء الشاشة (Esc للخروج)"
+            >
+              {fullscreen ? 'إنهاء ملء الشاشة' : 'ملء الشاشة ⛶'}
+            </button>
             <button
               className="btn !py-1.5 !px-3 text-[11.5px]"
               onClick={() => setAcademyOpen(true)}
@@ -627,7 +701,7 @@ export default function ChartModal() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div className={`grid grid-cols-1 ${fullscreen ? 'lg:grid-cols-2' : 'lg:grid-cols-2'} gap-5`}>
             <div>
               <div className="flex items-center gap-2.5 mb-2">
                 <span className="text-[13px] font-bold" style={{ color: 'var(--up)' }}>الفريم الأصغر</span>
@@ -637,7 +711,7 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={chartHeight} />
             </div>
             <div>
               <div className="flex items-center gap-2.5 mb-2">
@@ -648,7 +722,7 @@ export default function ChartModal() {
                   ))}
                 </div>
               </div>
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={chartHeight} />
             </div>
           </div>
 

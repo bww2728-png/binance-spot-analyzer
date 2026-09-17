@@ -94,61 +94,22 @@ export function useZoneBands(
         drawLabel(60, yTop + bandH / 2, label, rgb, 0.8, false);
       }
 
-      // ---- الآلي: أقوى 5 علامات نقطية عند شمعة الاكتشاف ----
-      const auto = zonesRef.current
-        .filter(z => z.source === 'auto')
-        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-        .slice(0, MAX_AUTO_BANDS);
-
-      for (const z of auto) {
-        const y = getPriceCoord(z.price);
-        if (y == null || !Number.isFinite(y) || y < 0 || y > h) continue;
-        const highlighted = highlightRef.current === z.id;
-        const rgb = BAND_COLORS[z.type].rgb;
-        const alpha = 0.55 + Math.min(1, (z.score ?? 50) / 100) * 0.4;
-
-        // موضع شمعة الاكتشاف — خارج النطاق المرئي → التصق بحافة السعر (يمين=الأحدث)
-        let x: number | null = z.anchorTime
-          ? timeScale.timeToCoordinate(z.anchorTime as UTCTimestamp)
-          : null;
-        if (x == null || !Number.isFinite(x) || z.anchorTime == null) {
-          const visRange = timeScale.getVisibleRange();
-          const at = z.anchorTime ?? 0;
-          const before = visRange ? at < Number(visRange.from) : false;
-          x = before ? 14 : w - 14;
-        } else {
-          x = Math.min(Math.max(x, 14), w - 14);
+      // حلقة الوميض حول العلامة الأصلية للمنطقة الآلية المختارة
+      // (العلامات نفسها تُرسم عبر createSeriesMarkers الأصلية — مثبتة على زمن+سعر)
+      if (highlightRef.current) {
+        const hz = zonesRef.current.find(z => z.id === highlightRef.current && z.source === 'auto' && z.anchorTime != null);
+        if (hz) {
+          const y = getPriceCoord(hz.price);
+          let x: number | null = timeScale.timeToCoordinate(hz.anchorTime as UTCTimestamp);
+          if (y != null && Number.isFinite(y) && x != null && Number.isFinite(x)) {
+            const rgb = BAND_COLORS[hz.type].rgb;
+            ctx.beginPath();
+            ctx.arc(x, y, 13, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(${rgb},0.95)`;
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+          }
         }
-
-        // النقطة
-        ctx.beginPath();
-        ctx.arc(x, y, highlighted ? 7 : 5, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${rgb},${Math.min(0.95, alpha).toFixed(2)})`;
-        ctx.fill();
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-        ctx.stroke();
-
-        // حلقة الوميض للمنطقة المختارة
-        if (highlighted) {
-          ctx.beginPath();
-          ctx.arc(x, y, 11, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(${rgb},0.95)`;
-          ctx.lineWidth = 2.5;
-          ctx.stroke();
-        }
-
-        // العلامة السهمية: مثلث صغير يشير للسعر من جهة النقطة
-        const dir = z.type === 'BSL' ? 1 : -1; // BSL فوق → مثلث ينزل للسعر
-        ctx.beginPath();
-        ctx.moveTo(x, y + dir * 9);
-        ctx.lineTo(x - 4, y + dir * 16);
-        ctx.lineTo(x + 4, y + dir * 16);
-        ctx.closePath();
-        ctx.fillStyle = `rgba(${rgb},0.9)`;
-        ctx.fill();
-
-        drawLabel(x, y - dir * 20, `${z.type} ${z.score}٪${z.swept ? ' مُسحوبة' : ''}`, rgb, Math.min(0.9, alpha), z.type === 'SSL');
       }
     };
 
