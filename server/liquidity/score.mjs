@@ -140,7 +140,8 @@ export function scoreZones(candidates, signals, {
         clusterCount: c.clusterCount,
         swept: c.swept,
         sweptAt: c.sweptAt,
-        anchorTime: c.anchorTime
+        anchorTime: c.anchorTime,
+        bandPct: c.bandPct
       });
     }
   }

@@ -166,6 +166,15 @@ test('scoreZones: حد الدني يفلتر الضعيف', () => {
   assert.equal(zones.length, 0);
 });
 
+test('scoreZones: ينقل bandPct (عرض الفجوة الحقيقي ATR) — لا سقوط في buildSnapshot', () => {
+  const zones = scoreZones(
+    [{ type: 'BSL', price: 100, anchorTime: 2, clusterCount: 2, swept: false, sweptAt: null, fvgNear: false, bandPct: 0.0045 }],
+    {}, { refLevels: { high: 100.2, low: 90 } }
+  );
+  assert.equal(zones.length, 1);
+  assert.equal(zones[0].bandPct, 0.0045);
+});
+
 test('isRoundNumber: 100 صحيح و101.5 خطأ', () => {
   assert.ok(isRoundNumber(100));
   assert.ok(isRoundNumber(0.001));
