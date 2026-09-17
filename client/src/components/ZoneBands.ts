@@ -76,22 +76,42 @@ export function useZoneBands(
       };
 
       // ---- اليدوي: منطقة زرقاء مظللة بعرض الشارت (كما اعتمد المستخدم) ----
-      for (const z of zonesRef.current.filter(z => z.source !== 'auto')) {
-        const yTop = getPriceCoord(z.price * (1 + (z.bandPct ?? 0.003) / 2));
-        const yBottom = getPriceCoord(z.price * (1 - (z.bandPct ?? 0.003) / 2));
-        if (yTop == null || yBottom == null) continue;
+      const drawBand = (z: LiquidityZone, rgb: string, label: string, baseAlpha = 0.26) => {
+        const { low, high } = zoneRange(z);
+        const yTop = getPriceCoord(high);
+        const yBottom = getPriceCoord(low);
+        if (yTop == null || yBottom == null) return;
         const bandH = Math.max(3, Math.abs(yBottom - yTop));
         const highlighted = highlightRef.current === z.id;
-        const rgb = BAND_COLORS.MANUAL.rgb;
-        ctx.fillStyle = `rgba(${rgb},${highlighted ? 0.5 : 0.26})`;
+        ctx.fillStyle = `rgba(${rgb},${highlighted ? Math.min(baseAlpha + 0.24, 0.5) : baseAlpha})`;
         ctx.fillRect(0, yTop, w, bandH);
         if (highlighted) {
           ctx.strokeStyle = `rgba(${rgb},0.95)`;
           ctx.lineWidth = 2;
           ctx.strokeRect(0, yTop, w, bandH);
         }
-        const label = z.note ? `تعليمك: ${z.note.slice(0, 20)}` : z.type;
         drawLabel(60, yTop + bandH / 2, label, rgb, 0.8, false);
+      };
+
+      for (const z of zonesRef.current.filter(z => z.source !== 'auto')) {
+        drawBand(z, BAND_COLORS.MANUAL.rgb, z.note ? `تعليمك: ${z.note.slice(0, 20)}` : z.type);
+      }
+
+      // ---- الآلي المؤكد: Band دائم بلون نوعه (ترقية إلى مستوى اليدوي بقرار المستخدم) ----
+      for (const z of zonesRef.current.filter(z => z.source === 'auto' && z.feedback === 'confirm')) {
+        drawBand(
+          z,
+          BAND_COLORS[z.type].rgb,
+          z.note ? `مؤكدة: ${z.note.slice(0, 20)}` : `${z.type} مؤكدة`,
+          0.22
+        );
+      }
+
+      // ---- المنطقة المختارة (آلية غير مؤكدة): Band مؤقت يظهر نطاقها أثناء التمييز ----
+      if (highlightRef.current) {
+        const hz = zonesRef.current.find(z =>
+          z.id === highlightRef.current && z.source === 'auto' && z.feedback !== 'confirm');
+        if (hz) drawBand(hz, BAND_COLORS[hz.type].rgb, hz.note ? `ملاحظتك: ${hz.note.slice(0, 20)}` : hz.type, 0.3);
       }
 
       // حلقة الوميض حول العلامة الأصلية للمنطقة الآلية المختارة

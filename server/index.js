@@ -447,23 +447,49 @@ app.delete('/api/zones/:id', handle(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// ---- الكشف الآلي: تغذية راجعة + المعايرة ----
+// ---- الكشف الآلي: تغذية راجعة + ملاحظات + المعايرة ----
+const VERDICTS = ['confirm', 'reject', 'clear'];
+
 app.post('/api/zones/:id/feedback', handle(async (req, res) => {
   const all = await db.zones.listAll(req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined);
   const cur = all.find(z => z.id === req.params.id);
   if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
-  const verdict = req.body?.verdict === 'confirm' ? 'confirm' : req.body?.verdict === 'reject' ? 'reject' : null;
-  if (!verdict) return res.status(400).json({ error: 'verdict يجب أن يكون confirm أو reject' });
+  const verdict = VERDICTS.includes(req.body?.verdict) ? req.body.verdict : null;
+  if (!verdict) return res.status(400).json({ error: 'verdict يجب أن يكون confirm أو reject أو clear' });
+  const note = req.body?.note != null ? String(req.body.note).slice(0, 500) : undefined;
   await db.zones.appendFeedback({
     zoneId: cur.id,
     verdict,
+    note,
     score: cur.score ?? null,
     timeframe: cur.timeframe,
     symbol: cur.symbol,
     ts: Date.now()
   });
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
-  res.json({ ok: true, zone: { ...cur, feedback: verdict } });
+  res.json({
+    ok: true,
+    zone: { ...cur, feedback: verdict === 'clear' ? null : verdict, note: note ?? cur.note }
+  });
+}));
+
+// ملاحظة على منطقة آلية دون تغيير التغذية الراجعة
+app.post('/api/zones/:id/note', handle(async (req, res) => {
+  const all = await db.zones.listAll(req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined);
+  const cur = all.find(z => z.id === req.params.id);
+  if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة' });
+  const note = String(req.body?.note ?? '').slice(0, 500);
+  await db.zones.appendFeedback({
+    zoneId: cur.id,
+    verdict: null,
+    note,
+    score: cur.score ?? null,
+    timeframe: cur.timeframe,
+    symbol: cur.symbol,
+    ts: Date.now()
+  });
+  broadcast({ type: 'zones_changed', symbol: cur.symbol });
+  res.json({ ok: true, zone: { ...cur, note } });
 }));
 
 // جدولة الكشف الآلي: كل عملات لوحة التحليل × كل الفريمات
@@ -493,7 +519,7 @@ const periodicDetection = async () => {
           existingAuto,
           matchTolerancePct: calibration.matchTolerancePct
         });
-        const prevSnap = allZones.filter(z => z.source === 'auto' && z.symbol === a.symbol);
+        const prevSnap = allZones.filter(z => z.source === 'auto' && z.symbol === a.symbol && z.feedback !== 'reject');
         const changed = snap.zones.length !== prevSnap.length ||
           snap.zones.some(z => {
             const p = prevSnap.find(e => e.id === z.id);
@@ -541,7 +567,7 @@ setInterval(() => {
     try {
       const zones = await db.zones.listAll();
       const now = Date.now();
-      const live = zones.filter(z => z.active && (!z.expires_at || z.expires_at > now));
+      const live = zones.filter(z => z.active && z.feedback !== 'reject' && (!z.expires_at || z.expires_at > now));
       if (!live.length) return;
       const symbols = [...new Set(live.map(z => z.symbol))];
       const prices = await db.binance.tickerPrices(symbols);

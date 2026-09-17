@@ -10,7 +10,7 @@ import {
 } from '../liquidity/orderbook.mjs';
 import { scoreZones, DEFAULT_WEIGHTS } from '../liquidity/score.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from '../liquidity/calibrate.mjs';
-import { planAppends, buildSnapshot, toCandles } from '../liquidity/engine.mjs';
+import { planAppends, buildSnapshot, applyFeedback, toCandles } from '../liquidity/engine.mjs';
 
 const candle = (time, open, high, low, close) => ({ time, open, high, low, close });
 
@@ -232,6 +232,63 @@ test('buildSnapshot: جديد / نقل feedback / استبعاد المرفوض'
   const rejected = [{ ...existing[0], feedback: 'reject' }];
   snap = buildSnapshot({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: rejected, now });
   assert.equal(snap.zones.length, 0);
+
+  // نقل الملاحظة مع اللقطة الجديدة
+  const noted = [{ ...existing[0], note: 'سيولة قوية' }];
+  snap = buildSnapshot({ symbol: 'BTCUSDT', perTf: { '5m': [zone(60)] }, existingAuto: noted, now });
+  assert.equal(snap.zones[0].note, 'سيولة قوية');
+});
+
+test('applyFeedback: دمج مستقل لكل حقل — الأحدث يفوز', () => {
+  const zones = [
+    { id: 'z1', type: 'BSL', price: 100, timeframe: '5m', note: '', feedback: null },
+    { id: 'z2', type: 'SSL', price: 90, timeframe: '5m', note: '', feedback: null },
+    { id: 'z3', type: 'BSL', price: 110, timeframe: '15m', note: 'قديمة', feedback: null }
+  ];
+
+  // تأكيد + ملاحظة في حدث واحد
+  let out = applyFeedback(zones, [
+    { zoneId: 'z1', verdict: 'confirm', note: 'عنقود قمم متساوية' }
+  ]);
+  assert.equal(out[0].feedback, 'confirm');
+  assert.equal(out[0].note, 'عنقود قمم متساوية');
+  assert.equal(out[1].feedback, null); // بلا أحداث — لا تغيير
+
+  // ملاحظة فقط لا تلمس verdict، وverdict لا يطمس الملاحظة (دمج مستقل)
+  out = applyFeedback(zones, [
+    { zoneId: 'z2', verdict: 'confirm' },
+    { zoneId: 'z2', note: 'راقب السحب' }
+  ]);
+  assert.equal(out[1].feedback, 'confirm');
+  assert.equal(out[1].note, 'راقب السحب');
+
+  // الأحدث يفوز: رفض بعد تأكيد، ثم استعادة (clear) → null
+  out = applyFeedback(zones, [
+    { zoneId: 'z3', verdict: 'confirm' },
+    { zoneId: 'z3', verdict: 'reject' }
+  ]);
+  assert.equal(out[2].feedback, 'reject');
+  assert.equal(out[2].note, 'قديمة'); // الملاحظة الأصلية باقية
+  out = applyFeedback(zones, [
+    { zoneId: 'z3', verdict: 'reject' },
+    { zoneId: 'z3', verdict: 'clear' }
+  ]);
+  assert.equal(out[2].feedback, null);
+
+  // تفريغ الملاحظة صراحة ('') بينما verdict باقٍ
+  out = applyFeedback(zones, [
+    { zoneId: 'z1', verdict: 'confirm', note: 'مؤقتة' },
+    { zoneId: 'z1', note: '' }
+  ]);
+  assert.equal(out[0].feedback, 'confirm');
+  assert.equal(out[0].note, '');
+
+  // أحداث JSON نصية (كما تخرج من events_log) + تالفة تُتجاهل
+  out = applyFeedback(zones, [
+    JSON.stringify({ zoneId: 'z1', verdict: 'reject' }),
+    '{تالف'
+  ]);
+  assert.equal(out[0].feedback, 'reject');
 });
 
 test('candidateZones: العنقود الواحد → منطقة واحدة لا تكرار', () => {

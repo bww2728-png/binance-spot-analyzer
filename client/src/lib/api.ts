@@ -186,9 +186,12 @@ const sbApi = {
   async deleteZone(id: string): Promise<{ ok: boolean }> {
     return this.updateZone(id, { active: false });
   },
-  async zoneFeedback(id: string, verdict: 'confirm' | 'reject') {
+  async zoneFeedback(id: string, verdict: 'confirm' | 'reject' | 'clear', note?: string) {
     // التغذية الراجعة والمعايرة تمر عبر الخادم دائماً (منطق المعايرة موجود فيه)
-    return fetch(`${BASE}/zones/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ verdict }) }).then(j<{ ok: boolean; zone: LiquidityZone }>);
+    return fetch(`${BASE}/zones/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(note !== undefined ? { verdict, note } : { verdict }) }).then(j<{ ok: boolean; zone: LiquidityZone }>);
+  },
+  async zoneNote(id: string, note: string) {
+    return fetch(`${BASE}/zones/${id}/note`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) }).then(j<{ ok: boolean; zone: LiquidityZone }>);
   },
   async getAccuracy(symbol?: string) {
     return fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>);
@@ -247,8 +250,10 @@ const restApi = {
     fetch(`${BASE}/zones/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
   deleteZone: (id: string) =>
     fetch(`${BASE}/zones/${id}`, { method: 'DELETE' }).then(j<{ ok: boolean }>),
-  zoneFeedback: (id: string, verdict: 'confirm' | 'reject') =>
-    fetch(`${BASE}/zones/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ verdict }) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
+  zoneFeedback: (id: string, verdict: 'confirm' | 'reject' | 'clear', note?: string) =>
+    fetch(`${BASE}/zones/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(note !== undefined ? { verdict, note } : { verdict }) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
+  zoneNote: (id: string, note: string) =>
+    fetch(`${BASE}/zones/${id}/note`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
   getAccuracy: (symbol?: string) =>
     fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>)
 };

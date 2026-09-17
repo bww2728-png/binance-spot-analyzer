@@ -1,3 +1,5 @@
+import { applyFeedback } from './liquidity/engine.mjs';
+
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://supabase-api-prod.verdent.ai/p/pfb660a6a9d32c0417a38';
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoyMTA0Njg2NzkxLCJpYXQiOjE3ODkwNjc1OTEsImlzcyI6InN1cGFiYXNlIiwicHJvamVjdF9yZWYiOiJwZmI2NjBhNmE5ZDMyYzA0MTdhMzgiLCJyb2xlIjoiYW5vbiJ9.alrTK9tAI5EqmkVr05n2ClNFwuufhCB5_bEEMAe48l4';
 
@@ -75,7 +77,7 @@ const db = {
       }
       return [...latest.values()].filter(z => z.active !== false);
     },
-    /** المناطق الآلية: أحدث لقطة لكل رمز + تغذية راجعة فوقها */
+    /** المناطق الآلية: أحدث لقطة لكل رمز + تغذية راجعة وملاحظات فوقها (تشمل المرفوضة) */
     listAuto: async (symbol) => {
       const q = new URLSearchParams({ type: 'eq.auto_zones_snapshot', select: '*', order: 'ts.desc', limit: '60' });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
@@ -90,27 +92,23 @@ const db = {
       }
       if (!latestPerSymbol.size) return [];
       const feedbackQ = new URLSearchParams({
-        type: 'eq.zone_feedback', select: '*', order: 'ts.desc', limit: '300'
+        type: 'eq.zone_feedback', select: '*', order: 'ts.asc', limit: '1000'
       });
       if (symbol) feedbackQ.set('symbol', `eq.${symbol.toUpperCase()}`);
-      let feedback = [];
-      try { feedback = await rest(`/events_log?${feedbackQ}`); } catch { /* بلا تغذية راجعة */ }
-      const byZone = new Map();
-      for (const e of feedback) {
-        try {
-          const f = JSON.parse(e.meta || 'null');
-          if (f?.zoneId && !byZone.has(f.zoneId)) byZone.set(f.zoneId, f.verdict);
-        } catch { /* تجاهل */ }
-      }
-      const out = [];
+      let feedbackEvents = [];
+      try { feedbackEvents = await rest(`/events_log?${feedbackQ}`); } catch { /* بلا تغذية راجعة */ }
+      const all = [];
       for (const snap of latestPerSymbol.values()) {
         for (const z of snap.zones) {
-          const fb = byZone.get(z.id) ?? z.feedback ?? null;
-          if (fb === 'reject') continue;
-          out.push({ ...z, feedback: fb });
+          all.push({ ...z, feedback: z.feedback ?? null, note: z.note ?? '' });
         }
       }
-      return out;
+      // ترتيب زمني تصاعدي: الأحدث يفوز في الدمج المستقل لكل حقل
+      const chronological = feedbackEvents
+        .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
+        .map(e => { try { return JSON.parse(e.meta || 'null'); } catch { return null; } })
+        .filter(Boolean);
+      return applyFeedback(all, chronological);
     },
     /** يدوي + آلي معاً — للعرض والمراقبة */
     listAll: async (symbol) => {
@@ -133,7 +131,7 @@ const db = {
       body: {
         symbol: String(f.symbol).toUpperCase(),
         type: 'zone_feedback',
-        message: `${f.verdict === 'confirm' ? 'تأكيد' : 'رفض'} منطقة آلية ${f.zoneId}`,
+        message: `${f.verdict === 'confirm' ? 'تأكيد' : f.verdict === 'clear' ? 'استعادة' : f.verdict ? 'رفض' : 'ملاحظة على'} منطقة آلية ${f.zoneId}`,
         meta: JSON.stringify(f),
         ts: Date.now()
       },

@@ -147,7 +147,37 @@ export function planAppends({ symbol, perTf, existingAuto, now = Date.now(), mat
   return { appends };
 }
 
-/** بناء لقطة المناطق النشطة لعملة (نقل feedback المطابقات + استبعاد المرفوض) */
+/**
+ * دمج التغذية الراجعة والملاحظات فوق المناطق الآلية — حتمي وقابل للاختبار.
+ * - الأحداث تُعالج ترتيباً زمنياً (الأقدم أولاً) وكل حقل يُدمج مستقلاً: الأحدث يفوز.
+ * - verdict ∈ {confirm, reject, clear} — clear يعني إلغاء التصنيف (feedback: null).
+ * - note: وجود الحقل (حتى ''للتفريغ) يطبق؛ غيابه لا يطمس الملاحظة الحالية.
+ */
+export function applyFeedback(zones, feedbackEvents) {
+  const merged = new Map(); // zoneId -> { verdict?, note? }
+  for (const e of feedbackEvents) {
+    let f = e;
+    if (typeof e === 'string') {
+      try { f = JSON.parse(e); } catch { continue; }
+    }
+    if (!f?.zoneId) continue;
+    const cur = { ...(merged.get(f.zoneId) ?? {}) };
+    if (f.verdict != null) cur.verdict = f.verdict;
+    if (f.note != null) cur.note = f.note;
+    merged.set(f.zoneId, cur);
+  }
+  return zones.map(z => {
+    const f = merged.get(z.id);
+    if (!f) return z;
+    return {
+      ...z,
+      feedback: f.verdict === 'clear' ? null : (f.verdict ?? z.feedback ?? null),
+      note: f.note ?? z.note ?? ''
+    };
+  });
+}
+
+/** بناء لقطة المناطق النشطة لعملة (نقل feedback والملاحظة للمطابقات + استبعاد المرفوض) */
 export function buildSnapshot({ symbol, perTf, existingAuto, now = Date.now(), matchTolerancePct = 0.003 }) {
   const zones = [];
   for (const [tf, list] of Object.entries(perTf)) {
@@ -162,7 +192,7 @@ export function buildSnapshot({ symbol, perTf, existingAuto, now = Date.now(), m
         type: z.type,
         price: z.price,
         timeframe: tf,
-        note: '',
+        note: prev?.note ?? '',
         score: z.score,
         reasons: z.reasons,
         clusterCount: z.clusterCount,

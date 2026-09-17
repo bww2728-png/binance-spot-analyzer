@@ -181,7 +181,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     if (!markers || !ready) return;
     if (!showAutoMarkers) { markers.setMarkers([]); return; }
     const top = visibleZones
-      .filter(z => z.source === 'auto' && z.anchorTime != null)
+      .filter(z => z.source === 'auto' && z.anchorTime != null && z.feedback !== 'confirm') // المؤكدة تصبح Band دائماً
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, 5)
       .sort((a, b) => (a.anchorTime ?? 0) - (b.anchorTime ?? 0)); // المكتبة تتطلب ترتيباً زمنياً تصاعدياً
@@ -391,18 +391,23 @@ function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
   );
 }
 
-/** حوار منطقة آلية: درجة الثقة + الأسباب + تأكيد/رفض (تغذية راجعة تعلّم النظام) */
+/** حوار منطقة آلية: درجة الثقة + الأسباب + ملاحظتك + تأكيد/رفض/استعادة (تغذية راجعة تعلّم النظام) */
 function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () => void }) {
   const pushToast = useStore(s => s.pushToast);
   const refreshZoneCounts = useStore(s => s.refreshZoneCounts);
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(zone.note ?? '');
 
-  const send = async (verdict: 'confirm' | 'reject') => {
+  const send = async (verdict: 'confirm' | 'reject' | 'clear') => {
     setBusy(true);
     try {
       await api.zoneFeedback(zone.id, verdict);
       await refreshZoneCounts();
-      pushToast(verdict === 'confirm' ? 'أكدت المنطقة — سيتعلم النظام منها' : 'رفضت المنطقة — سيتعلم النظام منها');
+      pushToast(
+        verdict === 'confirm' ? 'أكدت المنطقة — أصبحت Band دائماً على الشارت ويتعلم النظام منها'
+        : verdict === 'reject' ? 'رفضت المنطقة — نُقلت إلى «المرفوضة» ويتعلم النظام منها'
+        : 'استُعيدت المنطقة إلى غير مصنفة'
+      );
       onClose();
     } catch (e) {
       pushToast(`تعذر إرسال التغذية الراجعة: ${String(e)}`, 'alert');
@@ -411,6 +416,21 @@ function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () =>
     }
   };
 
+  const saveNote = async () => {
+    setBusy(true);
+    try {
+      await api.zoneNote(zone.id, note);
+      await refreshZoneCounts();
+      pushToast('حُفظت ملاحظتك على المنطقة');
+      onClose();
+    } catch (e) {
+      pushToast(`تعذر حفظ الملاحظة: ${String(e)}`, 'alert');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const { low, high } = zoneRange(zone);
   return (
     <div className="absolute inset-0 z-20 flex items-center justify-center p-4" style={{ background: 'rgba(4,6,10,0.6)' }} onClick={onClose}>
       <div
@@ -429,18 +449,36 @@ function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () =>
         <div className="num text-[12px]" style={{ color: 'var(--text-2)' }}>
           السعر: {zone.price.toLocaleString('en', { maximumFractionDigits: 8 })}
         </div>
+        <div className="num text-[11px]" style={{ color: 'var(--text-3)' }}>
+          النطاق: {low.toLocaleString('en', { maximumFractionDigits: 6 })} – {high.toLocaleString('en', { maximumFractionDigits: 6 })}
+          {zone.anchorTime != null && (
+            <> · اكتُشفت: {new Date(zone.anchorTime * 1000).toLocaleString('en', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</>
+          )}
+          {zone.swept ? ' · مُسحوبة' : ''}
+        </div>
         <div className="text-[11.5px] leading-relaxed" style={{ color: 'var(--text-2)' }}>
           <b>لماذا حدد النظام هذه المنطقة؟</b>
           <ul className="mt-1 space-y-0.5 pr-4" style={{ listStyle: 'disc' }}>
             {(zone.reasons?.length ? zone.reasons : ['مرساة هيكلية (قمة/قاع سوينغ)']).map((r, i) => <li key={i}>{r}</li>)}
           </ul>
         </div>
+        <label className="block text-[12px]" style={{ color: 'var(--text-2)' }}>
+          ملاحظتك على هذه المنطقة
+          <textarea className="w-full mt-1" rows={2} value={note} placeholder="مثال: سيولة قوية — راقب السحب هنا" onChange={e => setNote(e.target.value)} />
+        </label>
         <div className="text-[11px]" style={{ color: 'var(--text-3)' }}>
-          تأكيدك أو رفضك يُغذي معايرة النظام — كل رأي يرفع دقة الكشف القادم.
+          تأكيدك يُرقّيها إلى Band دائم على الشارت، ورفضك ينقلها إلى «المرفوضة» — النظام يتعلم من كليهما.
         </div>
         <div className="flex gap-2 pt-1">
-          <button className="btn btn-accent flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('confirm')}>تأكيد</button>
-          <button className="btn flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('reject')} style={{ color: ZONE_COLOR.BSL }}>رفض</button>
+          {zone.feedback ? (
+            <button className="btn flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('clear')}>استعادة</button>
+          ) : (
+            <button className="btn btn-accent flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('confirm')}>تأكيد</button>
+          )}
+          {zone.feedback !== 'reject' && (
+            <button className="btn flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void send('reject')} style={{ color: ZONE_COLOR.BSL }}>رفض</button>
+          )}
+          <button className="btn flex-1 !py-1.5 text-[12px]" disabled={busy} onClick={() => void saveNote()}>حفظ الملاحظة</button>
           <button className="btn flex-1 !py-1.5 text-[12px]" onClick={onClose}>إغلاق</button>
         </div>
       </div>
