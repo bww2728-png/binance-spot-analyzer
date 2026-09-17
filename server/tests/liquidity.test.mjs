@@ -205,7 +205,7 @@ test('latestCalibration: الأحدث يفوز والتالف يُتجاهل', (
 test('buildSnapshot: جديد / نقل feedback / استبعاد المرفوض', () => {
   const now = Date.now();
   const zone = (score, price = 100, type = 'BSL') => ({
-    type, price, score, anchorTime: 5, clusterCount: 2, swept: false, sweptAt: null, reasons: ['x']
+    type, price, score, anchorTime: 5, clusterCount: 2, swept: false, sweptAt: null, reasons: ['x'], bandPct: 0.002
   });
 
   // جديد — anchorTime يجب أن يُنقل للقطة (تثبيت العلامة على شمعة الاكتشاف)
