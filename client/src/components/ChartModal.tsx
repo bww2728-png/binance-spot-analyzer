@@ -117,7 +117,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text },
       grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
       timeScale: { timeVisible: true, secondsVisible: false },
-      crosshair: { mode: 0, vertLines: { color: CHART_COLORS.crosshair, style: 3 }, horzLines: { color: CHART_COLORS.crosshair, style: 3 }, labelBackgroundColor: '#334155' }
+      crosshair: { mode: 0, vertLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' }, horzLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' } }
     });
     chartRef.current = chart;
     const s = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });

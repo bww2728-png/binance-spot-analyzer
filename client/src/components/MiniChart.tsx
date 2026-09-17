@@ -59,7 +59,7 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
       handleScroll: false,
       handleScale: false,
-      crosshair: { mode: 0, vertLines: { color: CHART_COLORS.crosshair, style: 3 }, horzLines: { color: CHART_COLORS.crosshair, style: 3 }, labelBackgroundColor: '#334155' }
+      crosshair: { mode: 0, vertLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' }, horzLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' } }
     });
     const series = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });
     chartRef.current = chart;
