@@ -9,14 +9,26 @@ const toBar = (c: Candle) => ({
   open: c.open, high: c.high, low: c.low, close: c.close
 });
 
-/* ألوان الشموع والشبكة وفق هوية TradingView */
+/* ألوان الشموع والشبكة — خلفية بيضاء دائمة على كل شارت (قرار المستخدم) */
 export const CHART_COLORS = {
   up: '#089981',
   down: '#f23645',
-  bg: '#0f1522',
-  text: '#94a3b8',
-  grid: '#1c2940'
+  bg: '#ffffff',
+  text: '#334155',
+  grid: '#e5e7eb',
+  crosshair: '#9ca3af'
 };
+
+/* شموع جوفاء (Hollow Candles): الصاعدة شفافة بحد أخضر، الهابطة صلبة حمراء — نمط TradingView */
+export const HOLLOW_CANDLES = {
+  upColor: 'rgba(0,0,0,0)',
+  downColor: '#f23645',
+  borderVisible: true,
+  borderUpColor: '#089981',
+  borderDownColor: '#f23645',
+  wickUpColor: '#089981',
+  wickDownColor: '#f23645'
+} as const;
 
 interface Props {
   symbol: string;
@@ -47,12 +59,9 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
       handleScroll: false,
       handleScale: false,
-      crosshair: { mode: 0 }
+      crosshair: { mode: 0, vertLines: { color: CHART_COLORS.crosshair, style: 3 }, horzLines: { color: CHART_COLORS.crosshair, style: 3 }, labelBackgroundColor: '#334155' }
     });
-    const series = chart.addSeries(CandlestickSeries, {
-      upColor: CHART_COLORS.up, downColor: CHART_COLORS.down,
-      borderVisible: false, wickUpColor: CHART_COLORS.up, wickDownColor: CHART_COLORS.down
-    });
+    const series = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });
     chartRef.current = chart;
     seriesRef.current = series;
     setReady(true);

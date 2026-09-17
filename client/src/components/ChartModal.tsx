@@ -5,7 +5,7 @@ import { fetchKlines, fetchOlderKlines, fmtPrice } from '../lib/binance';
 import type { Candle, LiquidityZone, Timeframe } from '../lib/types';
 import { TIMEFRAMES } from '../lib/types';
 import { createChart, createSeriesMarkers, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp, type ISeriesMarkersPluginApi, type Time, type CandlestickData } from 'lightweight-charts';
-import { CHART_COLORS } from './MiniChart';
+import { CHART_COLORS, HOLLOW_CANDLES } from './MiniChart';
 import Toggle from './ui/Toggle';
 import AcademyModal from './AcademyModal';
 import { useZoneBands, zoneRange } from './ZoneBands';
@@ -117,13 +117,10 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text },
       grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
       timeScale: { timeVisible: true, secondsVisible: false },
-      crosshair: { mode: 0 }
+      crosshair: { mode: 0, vertLines: { color: CHART_COLORS.crosshair, style: 3 }, horzLines: { color: CHART_COLORS.crosshair, style: 3 }, labelBackgroundColor: '#334155' }
     });
     chartRef.current = chart;
-    const s = chart.addSeries(CandlestickSeries, {
-      upColor: CHART_COLORS.up, downColor: CHART_COLORS.down, borderVisible: false,
-      wickUpColor: CHART_COLORS.up, wickDownColor: CHART_COLORS.down
-    });
+    const s = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });
     seriesRef.current = s;
     // مُدير العلامات الأصلية — كل علامة مثبتة على (زمن الاكتشاف، سعر السيولة) وتتحرك مع التكبير
     markersRef.current = createSeriesMarkers(s, []);
@@ -238,7 +235,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
         color: ZONE_COLOR[z.type],
         size: highlighted ? 2 : 1,
         text: `${z.type} ${z.score}٪${z.swept ? ' مُسحوبة' : ''}`,
-        textColor: '#fff'
+        textColor: '#334155'
       };
     }));
     } catch { /* سباق تفكيك — تُهمل بصمت */ }
