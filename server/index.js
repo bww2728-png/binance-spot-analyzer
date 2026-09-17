@@ -40,6 +40,9 @@ const normalizeAnalysis = (body, { forCreate = false } = {}) => {
     } else if (['ssl_price', 'bsl_price'].includes(f)) {
       out[f] = v === null || v === undefined || v === '' ? null : Number(v);
       if (Number.isNaN(out[f])) out[f] = null;
+    } else if (typeof v === 'string') {
+      // تنقية النصوص الحرة: إزالة أقواس HTML لمنع أي XSS مخزَّن (React يحمي العرض، وهنا ننظف المصدر)
+      out[f] = v.replace(/[<>]/g, '');
     } else {
       out[f] = v === undefined ? null : v;
     }
@@ -53,6 +56,17 @@ const normalizeAnalysis = (body, { forCreate = false } = {}) => {
     if (out.notes === null || out.notes === undefined) out.notes = '';
   }
   return out;
+};
+
+// التحقق من صيغة الرمز: أحرف كبيرة وأرقام فقط (1-20) — يحجب أي حقن عبر حقل symbol
+const SYMBOL_RE = /^[A-Z0-9]{1,20}$/;
+const assertSymbol = (raw, res) => {
+  const s = String(raw || '').toUpperCase();
+  if (!SYMBOL_RE.test(s)) {
+    res.status(400).json({ error: 'صيغة الرمز غير صالحة — أحرف كبيرة وأرقام فقط (مثال: BTCUSDT)' });
+    return null;
+  }
+  return s;
 };
 
 const serializeAnalysis = (a) => ({
@@ -109,11 +123,11 @@ app.get('/api/analyses', handle(async (_req, res) => {
 }));
 
 app.post('/api/analyses', handle(async (req, res) => {
-  const { symbol } = req.body;
-  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+  const symbol = assertSymbol(req.body?.symbol, res);
+  if (!symbol) return;
   const a = normalizeAnalysis(req.body, { forCreate: true });
   const now = Date.now();
-  const rows = await db.analyses.create({ symbol: symbol.toUpperCase(), ...a, created_at: now, updated_at: now });
+  const rows = await db.analyses.create({ symbol, ...a, created_at: now, updated_at: now });
   res.json(serializeAnalysis(rows[0]));
 }));
 
@@ -192,7 +206,8 @@ app.get('/api/barcode-scans/:symbol', handle(async (req, res) => {
 }));
 
 app.post('/api/barcode-scans/:symbol/scan', handle(async (req, res) => {
-  const symbol = req.params.symbol.toUpperCase();
+  const symbol = assertSymbol(req.params.symbol, res);
+  if (!symbol) return;
   let row;
   try {
     const result = await scanBarcode(symbol);
@@ -400,7 +415,7 @@ app.get('/api/zones/:symbol', handle(async (req, res) => {
 
 app.post('/api/zones', handle(async (req, res) => {
   const b = req.body ?? {};
-  const symbol = String(b.symbol ?? '').toUpperCase();
+  const symbol = assertSymbol(b.symbol, res);
   const price = Number(b.price);
   if (!symbol || !Number.isFinite(price) || price <= 0) {
     return res.status(400).json({ error: 'بيانات منطقة غير صالحة' });
@@ -727,13 +742,29 @@ app.post('/api/symbols/sync', handle(async (_req, res) => {
 app.get('/api/klines', handle(async (req, res) => {
   const { symbol, interval, limit, startTime, endTime } = req.query;
   if (!symbol || !interval) return res.status(400).json({ error: 'symbol and interval required' });
-  const raw = await db.binance.klines(
-    symbol,
-    interval,
-    Math.min(Number(limit) || 200, 1000),
-    startTime ? Number(startTime) : undefined,
-    endTime ? Number(endTime) : undefined
-  );
+  const s = String(symbol).toUpperCase();
+  if (!SYMBOL_RE.test(s)) return res.status(400).json({ error: 'صيغة الرمز غير صالحة' });
+  if (!/^(\d+)(m|h|d|w|M)$/.test(String(interval))) return res.status(400).json({ error: 'فريم غير مدعوم' });
+  let raw;
+  try {
+    raw = await db.binance.klines(
+      s,
+      interval,
+      Math.min(Number(limit) || 200, 1000),
+      startTime ? Number(startTime) : undefined,
+      endTime ? Number(endTime) : undefined
+    );
+  } catch (error) {
+    // الرمز غير متاح/مغلق أو الفريم غير صالح — رسالة نظيفة بدل خطأ upstream المربك
+    const upstream = String(error?.message || '');
+    if (/HTTP (400|404|451)/.test(upstream)) {
+      return res.status(404).json({ error: 'الرمز غير متاح في بينانس — قد يكون مغلقاً أو غير موجود' });
+    }
+    throw error;
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return res.status(404).json({ error: 'لا شموع متاحة لهذا الرمز والفريم' });
+  }
   const candles = raw.map(k => ({
     time: Math.floor(Number(k[0]) / 1000),
     open: parseFloat(String(k[1])),
@@ -746,7 +777,28 @@ app.get('/api/klines', handle(async (req, res) => {
 
 // في الإنتاج: خدمة الواجهة المبنية (client/dist) من نفس العملية
 const distDir = path.join(__dirname, '..', 'client', 'dist');
-app.use(express.static(distDir));
+// ترويسات أمنية أساسية — بدون CSP صارم يكسر CDN، وSAMEORIGIN يحفظ الإطارات الداخلية
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
+// الأصول الثابتة بأسماء Vite المبقعة → تخزين مؤقت طويل، وindex.html دائماً حديث
+app.use(express.static(distDir, { index: false, setHeaders: (res, filePath) => {
+  if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+} }));
+// الحlive API لا يُخزَّن أبداً في المتصفح أو الوسطاء
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api')) {
     res.sendFile('index.html', { root: distDir });
