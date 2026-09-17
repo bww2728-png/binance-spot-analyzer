@@ -32,6 +32,25 @@ export async function syncSymbols(): Promise<{ total: number; saved: number }> {
 }
 
 const klinesCache = new Map<string, Candle[]>();
+const KLINE_CACHE_MAX = 40; // LRU — منع نمو الذاكرة غير المحدود طوال الجلسة
+
+function cacheGet(key: string) {
+  const v = klinesCache.get(key);
+  if (v != null) {
+    klinesCache.delete(key);
+    klinesCache.set(key, v);
+  }
+  return v;
+}
+
+function cacheSet(key: string, v: Candle[]) {
+  klinesCache.delete(key);
+  klinesCache.set(key, v);
+  if (klinesCache.size > KLINE_CACHE_MAX) {
+    const oldest = klinesCache.keys().next().value;
+    if (oldest != null) klinesCache.delete(oldest);
+  }
+}
 
 function cacheKey(symbol: string, interval: string) {
   return `${symbol}:${interval}`;
@@ -64,8 +83,8 @@ export async function fetchKlines(
   const res = await fetch(`${API}/klines?${params.toString()}`);
   if (!res.ok) throw new Error(`klines HTTP ${res.status}`);
   const incoming: Candle[] = await res.json();
-  const merged = mergeCandles(klinesCache.get(key), incoming);
-  klinesCache.set(key, merged);
+  const merged = mergeCandles(cacheGet(key), incoming);
+  cacheSet(key, merged);
   return merged;
 }
 
@@ -82,6 +101,14 @@ export async function fetchOlderKlines(
 }
 
 type StreamHandler = (data: unknown) => void;
+
+/** تنسيق سعر مرن: أقل من 0.001 → أرقام معنوية (لا قصب)، وأكبر → كسور حتى 8 كما في السابق */
+export function fmtPrice(p: number | null | undefined): string {
+  if (p == null || !Number.isFinite(p)) return '—';
+  const a = Math.abs(p);
+  if (a > 0 && a < 0.001) return p.toLocaleString('en', { maximumSignificantDigits: 6 });
+  return p.toLocaleString('en', { maximumFractionDigits: 8 });
+}
 
 interface Conn {
   ws: WebSocket;

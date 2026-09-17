@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
-import { fetchKlines, fetchOlderKlines } from '../lib/binance';
+import { fetchKlines, fetchOlderKlines, fmtPrice } from '../lib/binance';
 import type { Candle, LiquidityZone, Timeframe } from '../lib/types';
 import { TIMEFRAMES } from '../lib/types';
-import { createChart, createSeriesMarkers, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp, type ISeriesMarkersPluginApi, type Time } from 'lightweight-charts';
+import { createChart, createSeriesMarkers, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp, type ISeriesMarkersPluginApi, type Time, type CandlestickData } from 'lightweight-charts';
 import { CHART_COLORS } from './MiniChart';
 import Toggle from './ui/Toggle';
 import AcademyModal from './AcademyModal';
@@ -48,6 +48,14 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const canLoadMoreRef = useRef(false);
+  // مراجع الحماية من السباق: fetch متأخر أو شمعة بعد التفكيك لا تلمس series الجديد
+  const aliveRef = useRef(true);
+  const symbolRef = useRef(symbol);
+  const tfRef = useRef(timeframe);
+  symbolRef.current = symbol;
+  tfRef.current = timeframe;
+  // legend OHLC — الشمعة تحت المؤشر
+  const [hoverBar, setHoverBar] = useState<null | { time: number; open: number; high: number; low: number; close: number }>(null);
   // مراجع وضع التعليم — لتجنّب إعادة تسجيل مستمع النقر عند كل تغيير حالة
   const annotateRef = useRef(annotate);
   const clickHandlerRef = useRef(onChartClick);
@@ -55,12 +63,16 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   clickHandlerRef.current = onChartClick;
 
   const load = async (loadOlder = false) => {
+    const mySymbol = symbol;
+    const myTf = timeframe;
+    const isCurrent = () => aliveRef.current && symbolRef.current === mySymbol && tfRef.current === myTf;
     setLoading(true);
     try {
       let candles: Candle[];
       if (loadOlder && candlesRef.current.length) {
         const oldest = candlesRef.current[0].time;
         const older = await fetchOlderKlines(symbol, timeframe, oldest);
+        if (!isCurrent()) return;
         if (older.length === 0) {
           setCanLoadMore(false);
           canLoadMoreRef.current = false;
@@ -70,6 +82,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
         candles = [...older, ...candlesRef.current].sort((a, b) => a.time - b.time);
       } else {
         candles = await fetchKlines(symbol, timeframe, 1000);
+        if (!isCurrent()) return;
       }
       candlesRef.current = candles;
       if (!candles.length) {
@@ -91,13 +104,14 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     } catch (e) {
       console.error('[chart] load failed', e);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    aliveRef.current = true;
     const chart = createChart(el, {
       height: el.clientHeight || height,
       layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text },
@@ -122,25 +136,51 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     });
     setReady(true);
     candlesRef.current = [];
+    setHoverBar(null);
     void load(false);
 
     let disposed = false;
     let lastTime = 0;
     const unsub = subscribeKline(symbol, timeframe, (k: Candle) => {
       if (disposed) return;
-      if (k.time >= lastTime) { s.update(toBar(k)); lastTime = k.time; }
+      if (k.time >= lastTime) {
+        try { s.update(toBar(k)); lastTime = k.time; } catch { /* سباق التفكيك — تُهمل بصمت */ }
+      }
     });
 
-    const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }));
+    // legend OHLC حي — الشمعة تحت المؤشر (rAF-throttle بلا إغراق React)
+    let hoverRaf: number | null = null;
+    let pendingBar: null | { time: number; open: number; high: number; low: number; close: number } = null;
+    chart.subscribeCrosshairMove(param => {
+      const bar = param.seriesData.get(s) as CandlestickData<Time> | undefined;
+      pendingBar = bar
+        ? { time: Number(bar.time), open: Number(bar.open), high: Number(bar.high), low: Number(bar.low), close: Number(bar.close) }
+        : null;
+      if (hoverRaf == null) {
+        hoverRaf = requestAnimationFrame(() => {
+          hoverRaf = null;
+          setHoverBar(pendingBar);
+        });
+      }
+    });
+
+    const ro = new ResizeObserver(() => {
+      // تجاهل إخفاء الشارت (display:none) — الأبعاد الصفرية تفسد المقياس
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+      }
+    });
     ro.observe(el);
     return () => {
       disposed = true;
+      if (hoverRaf != null) cancelAnimationFrame(hoverRaf);
       ro.disconnect();
       unsub();
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
       markersRef.current = null;
+      aliveRef.current = false;
       setReady(false);
       setCanLoadMore(false);
       canLoadMoreRef.current = false;
@@ -233,6 +273,23 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       {loading && (
         <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(15,21,34,0.45)' }}>
           <span className="text-[12px] font-semibold" style={{ color: 'var(--text-2)' }}>جاري تحميل الشموع…</span>
+        </div>
+      )}
+      {!loading && candlesRef.current.length === 0 && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+          <span className="text-[12px] font-semibold" style={{ color: 'var(--text-3)' }}>لا بيانات متاحة لهذا الفريم</span>
+        </div>
+      )}
+      {hoverBar && (
+        <div
+          className="num absolute z-10 text-[10.5px] px-2 py-1 rounded-lg pointer-events-none whitespace-nowrap"
+          style={{ top: annotate ? 36 : 8, left: 8, background: 'rgba(10,14,22,0.8)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+        >
+          <span style={{ color: 'var(--text-3)' }}>O </span>{fmtPrice(hoverBar.open)}
+          <span style={{ color: 'var(--text-3)' }}> H </span>{fmtPrice(hoverBar.high)}
+          <span style={{ color: 'var(--text-3)' }}> L </span>{fmtPrice(hoverBar.low)}
+          <span style={{ color: 'var(--text-3)' }}> C </span>
+          <span style={{ color: hoverBar.close >= hoverBar.open ? CHART_COLORS.up : CHART_COLORS.down }}>{fmtPrice(hoverBar.close)}</span>
         </div>
       )}
       {canLoadMore && !loading && (
@@ -447,10 +504,10 @@ function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () =>
           </span>
         </div>
         <div className="num text-[12px]" style={{ color: 'var(--text-2)' }}>
-          السعر: {zone.price.toLocaleString('en', { maximumFractionDigits: 8 })}
+          السعر: {fmtPrice(zone.price)}
         </div>
         <div className="num text-[11px]" style={{ color: 'var(--text-3)' }}>
-          النطاق: {low.toLocaleString('en', { maximumFractionDigits: 6 })} – {high.toLocaleString('en', { maximumFractionDigits: 6 })}
+          النطاق: {fmtPrice(low)} – {fmtPrice(high)}
           {zone.anchorTime != null && (
             <> · اكتُشفت: {new Date(zone.anchorTime * 1000).toLocaleString('en', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</>
           )}
@@ -515,7 +572,7 @@ export default function ChartModal() {
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scrollTarget, setScrollTarget] = useState<{ time: number; nonce: number } | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
+  const [fullscreen, setFullscreen] = useState<null | 'lower' | 'upper'>(null);
 
   /** وميض المنطقة على الشارتين لثانيتين */
   const flashZone = (id: string) => {
@@ -547,7 +604,7 @@ export default function ChartModal() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        setFullscreen(false);
+        setFullscreen(null);
       }
     };
     window.addEventListener('keydown', onKey, true);
@@ -611,8 +668,39 @@ export default function ChartModal() {
   const suggestedTypeRef = useRef<'BSL' | 'SSL'>('BSL');
 
   const zoneCount = zoneCounts?.[modal.symbol] ?? 0;
-  // ارتفاع الشارت: عادي 340px / ملء الشاشة يستفيد من ارتفاع الشاشة
-  const chartHeight = fullscreen ? Math.max(380, Math.round(window.innerHeight * 0.42)) : 340;
+  // ارتفاع الشارت: عادي 340px / الملء داخل ملء الشاشة يملأ ارتفاع الشاشة بالكامل
+  const fullscreenChartHeight = window.innerHeight;
+
+  /** شريط التحكم العائم داخل ملء الشاشة: صف الفريمات + تبديل الاصغر/الأكبر + إنهاء */
+  const fullscreenBar = (which: 'lower' | 'upper') => {
+    const isLower = which === 'lower';
+    const current = isLower ? tfLower : tfUpper;
+    return (
+      <div
+        className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 flex-wrap justify-center px-3 py-2 rounded-xl anim-overlay"
+        style={{ background: 'rgba(10,14,22,0.78)', backdropFilter: 'blur(8px)', border: '1px solid var(--border-1)' }}
+      >
+        <span className="text-[12px] font-bold" style={{ color: isLower ? 'var(--up)' : 'var(--warn)' }}>
+          {isLower ? 'الفريم الأصغر' : 'الفريم الأكبر'}
+        </span>
+        <div className="flex gap-1 flex-wrap">
+          {TIMEFRAMES.map(tf => (
+            <TfPill key={`fb${which}${tf}`} active={current === tf} label={tf} onClick={() => changeTf(which, tf)} />
+          ))}
+        </div>
+        <button
+          className="btn !py-1.5 !px-3 text-[11.5px]"
+          onClick={() => setFullscreen(which)}
+          title="التبديل بين الفريمين — بلا إعادة جلب الشموع"
+        >
+          التبديل إلى {isLower ? 'الأكبر' : 'الاصغر'} ⇄
+        </button>
+        <button className="btn btn-accent !py-1.5 !px-3 text-[11.5px]" onClick={() => setFullscreen(null)} title="Esc يخرج أيضاً">
+          إنهاء الملء ✕
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div
@@ -634,7 +722,7 @@ export default function ChartModal() {
             <h2 className="text-lg font-bold" style={{ color: 'var(--text-1)' }}>{modal.symbol}</h2>
             {livePrice !== undefined && (
               <span className="num text-sm px-2.5 py-1 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>
-                {livePrice.toLocaleString('en', { maximumFractionDigits: 8 })}
+                {fmtPrice(livePrice)}
               </span>
             )}
             <button
@@ -667,13 +755,6 @@ export default function ChartModal() {
                 {zoneCount} منطقة
               </span>
             )}
-            <button
-              className="btn !py-1.5 !px-3 text-[11.5px]"
-              onClick={() => setFullscreen(v => !v)}
-              title="ملء الشاشة (Esc للخروج)"
-            >
-              {fullscreen ? 'إنهاء ملء الشاشة' : 'ملء الشاشة ⛶'}
-            </button>
             <button
               className="btn !py-1.5 !px-3 text-[11.5px]"
               onClick={() => setAcademyOpen(true)}
@@ -739,28 +820,45 @@ export default function ChartModal() {
             </div>
           )}
 
-          <div className={`grid grid-cols-1 ${fullscreen ? 'lg:grid-cols-2' : 'lg:grid-cols-2'} gap-5`}>
-            <div>
-              <div className="flex items-center gap-2.5 mb-2">
-                <span className="text-[13px] font-bold" style={{ color: 'var(--up)' }}>الفريم الأصغر</span>
-                <div className="flex gap-1 flex-wrap">
-                  {TIMEFRAMES.map(tf => (
-                    <TfPill key={`l${tf}`} active={tfLower === tf} label={tf} onClick={() => changeTf('lower', tf)} />
-                  ))}
+          {/* شارت تحليل: عادي شبكة جنباً إلى جنب، أو فريم واحد يملأ العرض بالكامل */}
+          <div className={fullscreen ? '' : 'grid grid-cols-1 lg:grid-cols-2 gap-5'}>
+            <div
+              className={fullscreen === 'lower' ? 'fixed inset-0 z-[60]' : fullscreen ? 'hidden' : ''}
+              style={fullscreen === 'lower' ? { background: 'var(--surface-0)' } : undefined}
+            >
+              {fullscreen === 'lower' ? fullscreenBar('lower') : (
+                <div className="flex items-center gap-2.5 mb-2">
+                  <span className="text-[13px] font-bold" style={{ color: 'var(--up)' }}>الفريم الأصغر</span>
+                  <div className="flex gap-1 flex-wrap">
+                    {TIMEFRAMES.map(tf => (
+                      <TfPill key={`l${tf}`} active={tfLower === tf} label={tf} onClick={() => changeTf('lower', tf)} />
+                    ))}
+                  </div>
+                  <button className="btn !py-1 !px-2.5 text-[10.5px]" onClick={() => setFullscreen('lower')} title="ملء الشاشة — هذا الفريم فقط">
+                    ملء الشاشة ⛶
+                  </button>
                 </div>
-              </div>
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={chartHeight} />
+              )}
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} />
             </div>
-            <div>
-              <div className="flex items-center gap-2.5 mb-2">
-                <span className="text-[13px] font-bold" style={{ color: 'var(--warn)' }}>الفريم الأكبر</span>
-                <div className="flex gap-1 flex-wrap">
-                  {TIMEFRAMES.map(tf => (
-                    <TfPill key={`u${tf}`} active={tfUpper === tf} label={tf} onClick={() => changeTf('upper', tf)} />
-                  ))}
+            <div
+              className={fullscreen === 'upper' ? 'fixed inset-0 z-[60]' : fullscreen ? 'hidden' : ''}
+              style={fullscreen === 'upper' ? { background: 'var(--surface-0)' } : undefined}
+            >
+              {fullscreen === 'upper' ? fullscreenBar('upper') : (
+                <div className="flex items-center gap-2.5 mb-2">
+                  <span className="text-[13px] font-bold" style={{ color: 'var(--warn)' }}>الفريم الأكبر</span>
+                  <div className="flex gap-1 flex-wrap">
+                    {TIMEFRAMES.map(tf => (
+                      <TfPill key={`u${tf}`} active={tfUpper === tf} label={tf} onClick={() => changeTf('upper', tf)} />
+                    ))}
+                  </div>
+                  <button className="btn !py-1 !px-2.5 text-[10.5px]" onClick={() => setFullscreen('upper')} title="ملء الشاشة — هذا الفريم فقط">
+                    ملء الشاشة ⛶
+                  </button>
                 </div>
-              </div>
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={chartHeight} />
+              )}
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} />
             </div>
           </div>
 
