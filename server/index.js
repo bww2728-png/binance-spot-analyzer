@@ -12,6 +12,23 @@ import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+// ترتيب Express حرج: هذه الوسائط قبل أي مسار وإلا لا تُنفّذ عليه (المسارات المسجلة أولاً تتجاوز المسجلة لاحقاً)
+// ترويسات أمنية أساسية — بدون CSP صارم يكسر CDN، وSAMEORIGIN يحفظ الإطارات الداخلية
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
+// الحlive API لا يُخزَّن أبداً في المتصفح أو الوسطاء
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 app.use(express.json());
 
 const PORT = process.env.PORT || 8787;
@@ -777,28 +794,12 @@ app.get('/api/klines', handle(async (req, res) => {
 
 // في الإنتاج: خدمة الواجهة المبنية (client/dist) من نفس العملية
 const distDir = path.join(__dirname, '..', 'client', 'dist');
-// ترويسات أمنية أساسية — بدون CSP صارم يكسر CDN، وSAMEORIGIN يحفظ الإطارات الداخلية
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  }
-  next();
-});
 // الأصول الثابتة بأسماء Vite المبقعة → تخزين مؤقت طويل، وindex.html دائماً حديث
 app.use(express.static(distDir, { index: false, setHeaders: (res, filePath) => {
   if (filePath.includes(`${path.sep}assets${path.sep}`)) {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   }
 } }));
-// الحlive API لا يُخزَّن أبداً في المتصفح أو الوسطاء
-app.use('/api', (req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store');
-  next();
-});
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api')) {
     res.sendFile('index.html', { root: distDir });
