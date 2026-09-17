@@ -690,7 +690,7 @@ export default function ChartModal() {
         </div>
         <button
           className="btn !py-1.5 !px-3 text-[11.5px]"
-          onClick={() => setFullscreen(which)}
+          onClick={() => setFullscreen(which === 'lower' ? 'upper' : 'lower')}
           title="التبديل بين الفريمين — بلا إعادة جلب الشموع"
         >
           التبديل إلى {isLower ? 'الأكبر' : 'الاصغر'} ⇄
