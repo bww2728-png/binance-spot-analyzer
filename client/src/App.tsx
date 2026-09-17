@@ -36,6 +36,7 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--surface-0)' }}>
+      <h1 className="sr-only">محلل العملات — Binance Spot Strategy Board</h1>
       <header
         className="flex items-center gap-1 px-3 sm:px-5 pt-2.5 sticky top-0 z-30"
         style={{ background: 'var(--surface-glass)', backdropFilter: 'blur(10px)', borderBottom: '1px solid var(--border-1)' }}
