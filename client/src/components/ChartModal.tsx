@@ -598,18 +598,18 @@ export default function ChartModal() {
     return () => { disposed = true; };
   }, [modal.symbol, zoneCounts]);
 
-  // Esc يخرج من ملء الشاشة أولاً قبل إغلاق النافذة
+  // Esc: يخرج من ملء الشاشة أولاً، وإن لم يكن ملءًا يغلق النافذة كاملة
   useEffect(() => {
-    if (!fullscreen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        setFullscreen(null);
+        if (fullscreen) setFullscreen(null);
+        else close();
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [fullscreen]);
+  }, [fullscreen, close]);
 
   // تقرير دقة الكشف مقابل مناطق التعليم
   useEffect(() => {
