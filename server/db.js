@@ -115,6 +115,18 @@ const db = {
       const [manual, auto] = await Promise.all([db.zones.list(symbol), db.zones.listAuto(symbol)]);
       return [...manual, ...auto];
     },
+    /** كل نسخ المناطق اليدوية (إنشاء/تعديل/حذف) من سجل الأحداث — بلا إخفاء المحذوف */
+    history: async ({ symbol, limit, offset } = {}) => {
+      const q = new URLSearchParams({
+        type: 'eq.liquidity_zone',
+        select: '*',
+        order: 'ts.asc,id.asc',
+        limit: String(Math.min(Number(limit) || 2000, 5000))
+      });
+      if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      if (offset) q.set('offset', String(Number(offset)));
+      return rest(`/events_log?${q}`);
+    },
     append: (zone) => rest('/events_log?select=*', {
       method: 'POST',
       body: {
@@ -295,13 +307,29 @@ const db = {
     create: (row) => rest('/settings?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
     update: (row) => rest('/settings?id=eq.1&select=*', { method: 'PATCH', body: row, prefer: 'return=representation' })
   },
+  cases: {
+    save: (row) => rest('/cases?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
+    list: async ({ symbol, limit } = {}) => {
+      const q = new URLSearchParams({ select: '*', order: 'decided_at.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
+      if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      return rest(`/cases?${q}`);
+    },
+    get: async (id) => {
+      const rows = await rest(`/cases?id=eq.${Number(id)}&select=*`);
+      return rows.length ? rows[0] : null;
+    },
+    imagesSave: (rows) => rest('/case_images?select=*', { method: 'POST', body: rows, prefer: 'return=representation' }),
+    imagesList: (caseId) => rest(`/case_images?case_id=eq.${Number(caseId)}&select=*&order=captured_at.asc,id.asc`)
+  },
   events: {
-    list: ({ symbol, from, limit }) => {
+    list: ({ symbol, from, limit, offset, type }) => {
       const q = new URLSearchParams({ select: '*' });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      if (type) q.set('type', `eq.${type}`);
       if (from) q.set('ts', `gte.${Number(from)}`);
       q.set('order', 'ts.desc,id.desc');
       q.set('limit', String(Math.min(Number(limit) || 500, 2000)));
+      if (offset) q.set('offset', String(Number(offset)));
       return rest(`/events_log?${q}`);
     },
     create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' })

@@ -6,3 +6,5 @@ dist/
 *.db-wal
 *.db-shm
 client/dist/
+opencode.json
+scripts/

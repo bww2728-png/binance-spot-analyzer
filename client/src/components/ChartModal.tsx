@@ -10,6 +10,9 @@ import Toggle from './ui/Toggle';
 import AcademyModal from './AcademyModal';
 import { useZoneBands, zoneRange } from './ZoneBands';
 import ZoneListPanel from './ZoneListPanel';
+import { registerChart } from '../lib/cases/chartViews';
+import { shipZoneCase } from '../lib/cases/collect';
+import { captureChartPng } from '../lib/cases/png';
 
 const toBar = (c: Candle) => ({
   time: c.time as UTCTimestamp,
@@ -36,7 +39,7 @@ const TF_SECONDS: Record<string, number> = {
   '1d': 86400, '3d': 259200, '1w': 604800
 };
 
-function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true }: {
+function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true, containerCb }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
@@ -48,6 +51,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   scrollTarget: { time: number; nonce: number } | null;
   height: number;
   showAutoMarkers?: boolean;
+  containerCb?: (el: HTMLDivElement | null) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -148,6 +152,13 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     setHoverBar(null);
     void load(false);
 
+    const unregisterChartView = registerChart(
+      symbol,
+      timeframe,
+      TF_SECONDS[timeframe] ?? 900,
+      seriesRef
+    );
+
     let disposed = false;
     let lastTime = 0;
     const unsub = subscribeKline(symbol, timeframe, (k: Candle) => {
@@ -190,6 +201,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       seriesRef.current = null;
       markersRef.current = null;
       aliveRef.current = false;
+      unregisterChartView();
       try { chart.remove(); } catch { /* سباق تفكيك — تُهمل بصمت */ }
       setReady(false);
       setCanLoadMore(false);
@@ -271,6 +283,10 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
 
   const bandsCanvasRef = useZoneBands(containerRef, chartRef, getPriceCoord, visibleZones, highlightId);
 
+  useEffect(() => {
+    containerCb?.(containerRef.current);
+  }, [containerCb]);
+
   return (
     <div className="relative">
       <div
@@ -348,12 +364,13 @@ function TfPill({ active, label, onClick }: { active: boolean; label: string; on
 }
 
 /** حوار إضافة/تعديل منطقة سيولة */
-function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
+function ZoneDialog({ symbol, timeframe, price, zone, onClose, onCaptured }: {
   symbol: string;
   timeframe: string;
   price: number;
   zone: LiquidityZone | null;
   onClose: () => void;
+  onCaptured?: (actor: 'zone_create' | 'zone_edit' | 'zone_delete', note: string, zone: LiquidityZone) => void;
 }) {
   const pushToast = useStore(s => s.pushToast);
   const refreshZoneCounts = useStore(s => s.refreshZoneCounts);
@@ -371,12 +388,15 @@ function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
     setSaving(true);
     try {
       const expiresAt = Number(expiry) > 0 ? Date.now() + Number(expiry) * 3600000 : null;
+      let savedZone: LiquidityZone;
       if (zone) {
-        await api.updateZone(zone.id, { price: p, note, type, active: true });
+        savedZone = (await api.updateZone(zone.id, { price: p, note, type, active: true })).zone;
         pushToast('تم تحديث المنطقة');
+        onCaptured?.('zone_edit', note, savedZone);
       } else {
-        await api.createZone({ symbol, timeframe, type, price: p, note, expires_at: expiresAt });
+        savedZone = (await api.createZone({ symbol, timeframe, type, price: p, note, expires_at: expiresAt })).zone;
         pushToast(`حُفظت منطقة ${type} على ${symbol}`);
+        onCaptured?.('zone_create', note, savedZone);
       }
       await refreshZoneCounts();
       onClose();
@@ -392,6 +412,7 @@ function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
     setSaving(true);
     try {
       await api.deleteZone(zone.id);
+      onCaptured?.('zone_delete', note, zone);
       await refreshZoneCounts();
       pushToast('حُذفت المنطقة');
       onClose();
@@ -462,7 +483,10 @@ function ZoneDialog({ symbol, timeframe, price, zone, onClose }: {
 }
 
 /** حوار منطقة آلية: درجة الثقة + الأسباب + ملاحظتك + تأكيد/رفض/استعادة (تغذية راجعة تعلّم النظام) */
-function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () => void }) {
+function AutoZoneDialog({ zone, onClose, onCaptured }: {
+  zone: LiquidityZone; onClose: () => void;
+  onCaptured?: (actor: 'zone_auto_feedback' | 'zone_auto_note', note: string, zone: LiquidityZone) => void;
+}) {
   const pushToast = useStore(s => s.pushToast);
   const refreshZoneCounts = useStore(s => s.refreshZoneCounts);
   const [busy, setBusy] = useState(false);
@@ -473,6 +497,7 @@ function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () =>
     try {
       await api.zoneFeedback(zone.id, verdict);
       await refreshZoneCounts();
+      onCaptured?.('zone_auto_feedback', note, zone);
       pushToast(
         verdict === 'confirm' ? 'أكدت المنطقة — أصبحت Band دائماً على الشارت ويتعلم النظام منها'
         : verdict === 'reject' ? 'رفضت المنطقة — نُقلت إلى «المرفوضة» ويتعلم النظام منها'
@@ -490,6 +515,7 @@ function AutoZoneDialog({ zone, onClose }: { zone: LiquidityZone; onClose: () =>
     setBusy(true);
     try {
       await api.zoneNote(zone.id, note);
+      onCaptured?.('zone_auto_note', note, zone);
       await refreshZoneCounts();
       pushToast('حُفظت ملاحظتك على المنطقة');
       onClose();
@@ -582,6 +608,34 @@ export default function ChartModal() {
   const [academyOpen, setAcademyOpen] = useState(false);
   const [accuracy, setAccuracy] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+
+  // ---- سجل القرارات: التقاط صورة القرار (مناطق/تغذية راجعة) ---- 
+  const lowerChartRef = useRef<HTMLDivElement | null>(null);
+  const upperChartRef = useRef<HTMLDivElement | null>(null);
+  const captureZone = useCallback((
+    actor: 'zone_create' | 'zone_edit' | 'zone_delete' | 'zone_auto_feedback' | 'zone_auto_note',
+    note: string,
+    zone: LiquidityZone
+  ) => {
+    const st = useStore.getState();
+    const current = st.analyses.find(a => a.symbol === modal.symbol) ?? null;
+    const shots: { tf: string; dataUrl: string }[] = [];
+    for (const [el, tf] of [[upperChartRef.current, tfUpper], [lowerChartRef.current, tfLower]] as const) {
+      const url = captureChartPng(el);
+      if (url) shots.push({ tf, dataUrl: url });
+    }
+    shipZoneCase({
+      symbol: modal.symbol,
+      actor,
+      note: note || null,
+      zone,
+      zones: zoneList,
+      before: current,
+      after: current,
+      screenshots: shots
+    });
+  }, [modal.symbol, zoneList, tfUpper, tfLower]);
+  const openLedger = useStore(s => s.openCaseLedger);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scrollTarget, setScrollTarget] = useState<{ time: number; nonce: number } | null>(null);
   const [fullscreen, setFullscreen] = useState<null | 'lower' | 'upper'>(null);
@@ -735,6 +789,13 @@ export default function ChartModal() {
             <h2 className="text-lg font-bold" style={{ color: 'var(--text-1)' }}>{modal.symbol}</h2>
             <LiveBadge symbol={modal.symbol} />
             <button
+              className="btn !py-1.5 !px-3 text-[11.5px]"
+              onClick={() => openLedger(modal.symbol)}
+              title="أرشيف هذه العملة — كل قرار ومنطقة وخُطة تحليل سابقة بلقطتها لحظة القرار"
+            >
+              الأرشيف
+            </button>
+            <button
               className={`btn !py-1.5 !px-3 text-[11.5px] ${annotate ? 'btn-accent' : ''}`}
               style={annotate ? { background: '#3b82f6', color: '#fff' } : {}}
               onClick={() => setAnnotate(v => !v)}
@@ -848,7 +909,7 @@ export default function ChartModal() {
                   </button>
                 </div>
               )}
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} containerCb={el => { lowerChartRef.current = el; }} />
             </div>
             <div
               className={fullscreen === 'upper' ? 'fixed inset-0 z-[60]' : fullscreen ? 'hidden' : ''}
@@ -867,7 +928,7 @@ export default function ChartModal() {
                   </button>
                 </div>
               )}
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} containerCb={el => { upperChartRef.current = el; }} />
             </div>
           </div>
 
@@ -885,13 +946,14 @@ export default function ChartModal() {
               price={zoneDialog.price}
               zone={zoneDialog.zone}
               onClose={() => setZoneDialog(null)}
+              onCaptured={captureZone}
             />
           </div>
         )}
 
         {autoDialog && (
           <div className="absolute inset-0">
-            <AutoZoneDialog zone={autoDialog.zone} onClose={() => setAutoDialog(null)} />
+            <AutoZoneDialog zone={autoDialog.zone} onClose={() => setAutoDialog(null)} onCaptured={captureZone} />
           </div>
         )}
 

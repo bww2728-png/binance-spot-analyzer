@@ -25,10 +25,10 @@ export const toCandles = (raw) => raw.map(k => ({
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /** إشارات الدفتر: لقطتان بفاصل زمني + صفقات */
-export async function bookSignals(symbol) {
+export async function bookSignals(symbol, gapMs = 4000) {
   try {
     const [b1, trades] = await Promise.all([fetchDepth(symbol), fetchAggTrades(symbol)]);
-    await sleep(4000);
+    await sleep(gapMs);
     const b2 = await fetchDepth(symbol);
     const tradedQtyAtPrice = (price) =>
       trades.filter(t => Math.abs(t.price - price) / price <= 0.0001).reduce((a, t) => a + t.qty, 0);

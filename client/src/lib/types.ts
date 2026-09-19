@@ -142,10 +142,91 @@ export interface EventLog {
   meta: string | null;
 }
 
+export interface CaseImage {
+  id: number;
+  case_id: number;
+  tf: string;
+  data_url: string;
+  captured_at: number;
+}
+
+export interface ZoneHistoryVersion {
+  eventId: number;
+  ts: number;
+  action: 'create' | 'edit' | 'delete';
+  zone: LiquidityZone;
+}
+
+export interface ZoneHistoryGroup {
+  zoneId: string;
+  symbol: string;
+  versions: ZoneHistoryVersion[];
+  deleted: boolean;
+  lastVersion: ZoneHistoryVersion;
+}
+
 export interface Candle {
   time: number; // seconds
   open: number;
   high: number;
   low: number;
   close: number;
+}
+
+/* ================= سجل القرارات (Case Ledger) ================= */
+
+export type CaseActor =
+  | 'zone_create' | 'zone_edit' | 'zone_delete'
+  | 'zone_auto_feedback' | 'zone_auto_note'
+  | 'analysis_edit' | 'coin_add' | 'coin_remove';
+
+export interface CaseChartView {
+  tf: string;
+  tfSec: number;
+  decidedAtSec: number;
+  candles: Candle[];
+  stats: {
+    closedCount: number;
+    lastClose: number | null;
+    stats: {
+      zones: { type: string; price: number; clusterCount: number; swept: boolean; fvgNear: boolean; bandPct: number }[];
+      eqh: { price: number; count: number }[];
+      eql: { price: number; count: number }[];
+      fvgs: { time: number; top: number; bottom: number; dir: string }[];
+      refHigh: number | null;
+      refLow: number | null;
+      pivots: { time: number; price: number; kind: string }[];
+    } | null;
+  };
+}
+
+export interface CaseThermal {
+  funding: { last: number; markPrice: number } | null;
+  oi: { changePct: number; latest: number } | null;
+  longShort: { last: number } | null;
+  cvd: { recentSum: number; buyRatioPct: number | null; window: number } | null;
+  book: { book: number | null; icebergs: { price: number; hits: number; totalQty: number; sizeConsistency: number }[]; spoofs: { price: number; qty: number; traded: number }[] } | null;
+  liqClusters: { side: string; lev: number; price: number; magnitude: number }[] | null;
+  fearGreed: { available: boolean; value?: number; classification?: string | null; ts?: number | null } | null;
+  stables: { available: boolean; totalMcapUsd?: number; pegged?: { symbol: string; mcapUsd: number }[] } | null;
+  decidedAt?: number;
+}
+
+export interface CasePayload {
+  meta: { symbol: string; actor: CaseActor; decided_at: number; livePrice: number | null };
+  chart: Record<string, CaseChartView>;
+  zones: LiquidityZone[];
+  analysisBefore: Analysis | null;
+  analysisAfter: Analysis | null;
+  note: string | null;
+  zone: LiquidityZone | null;
+  thermal: CaseThermal;
+}
+
+export interface CaseRow {
+  id: number;
+  symbol: string;
+  actor: CaseActor;
+  decided_at: number;
+  payload: CasePayload;
 }

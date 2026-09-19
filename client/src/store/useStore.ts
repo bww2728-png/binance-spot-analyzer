@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import type { Analysis, BarcodeScan, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
+import type { Analysis, BarcodeScan, CaseRow, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
@@ -11,8 +11,9 @@ const API = '/api';
 
 const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
-export type Screen = 'board' | 'dashboard' | 'settings';
+export type Screen = 'board' | 'dashboard' | 'cases' | 'settings';
 export type Theme = 'dark' | 'light';
+export type ArchiveSection = 'cases' | 'zones' | 'events';
 
 function initialTheme(): Theme {
   const t = document.documentElement.dataset.theme;
@@ -38,12 +39,20 @@ interface StoreState {
   syncing: boolean;
   lastSync: number;
   theme: Theme;
+  cases: CaseRow[];
+  casesLoaded: boolean;
+  caseFilter: string | null;
+  archiveSection: ArchiveSection;
 
   init: () => Promise<void>;
   syncSymbols: () => Promise<void>;
   setScreen: (s: Screen) => void;
   openChart: (symbol: string, tfLower: string | null, tfUpper: string | null) => void;
   closeChart: () => void;
+  openCaseLedger: (symbol?: string) => void;
+  setCaseFilter: (f: string | null) => void;
+  setArchiveSection: (s: ArchiveSection) => void;
+  refreshCases: () => Promise<void>;
   addAnalysis: (symbol: string, extras?: Partial<Analysis>) => Promise<void>;
   updateAnalysis: (id: number, patch: Partial<Analysis>) => Promise<void>;
   deleteAnalysis: (id: number) => Promise<void>;
@@ -102,6 +111,10 @@ export const useStore = create<StoreState>((set, get) => ({
   syncing: false,
   lastSync: 0,
   theme: initialTheme(),
+  cases: [],
+  casesLoaded: false,
+  caseFilter: null,
+  archiveSection: 'cases',
 
   init: async () => {
     if (!streams) {
@@ -247,16 +260,43 @@ export const useStore = create<StoreState>((set, get) => ({
   openChart: (symbol, tfLower, tfUpper) => set({ chartModal: { symbol, tfLower, tfUpper } }),
   closeChart: () => set({ chartModal: null }),
 
+  /** فتح شاشة الأرشيف — مع تصفية لعملة محددة إن وُجدت (يُغلق الشارت أولاً) */
+  openCaseLedger: (symbol) => {
+    set({ chartModal: null, screen: 'cases', caseFilter: symbol?.toUpperCase() ?? null, archiveSection: 'cases' });
+    void get().refreshCases();
+  },
+
+  setCaseFilter: (f) => {
+    set({ caseFilter: f?.toUpperCase() ?? null });
+    void get().refreshCases();
+  },
+
+  setArchiveSection: (s) => set({ archiveSection: s }),
+
+  refreshCases: async () => {
+    try {
+      const symbol = get().caseFilter ?? undefined;
+      const rows = await api.getCases(symbol);
+      set({ cases: rows, casesLoaded: true });
+    } catch { /* لا يُفشل التنقل */ }
+  },
+
   addAnalysis: async (symbol, extras) => {
     const row = await api.createAnalysis({ symbol: symbol.toUpperCase(), ...(extras ?? {}) });
     set((st) => ({ analyses: [row, ...st.analyses] }));
     get().subscribePrice(row.symbol);
+    void import('../lib/cases/collect').then(m => m.shipCoinEvent(row.symbol, 'coin_add', null, row));
   },
 
   updateAnalysis: async (id, patch) => {
+    const before = get().analyses.find(a => a.id === id) ?? null;
     set((st) => ({
       analyses: st.analyses.map(a => a.id === id ? { ...a, ...patch } : a)
     }));
+    const after = get().analyses.find(a => a.id === id) ?? null;
+    if (before && after) {
+      void import('../lib/cases/collect').then(m => m.shipAnalysisEdit(before.symbol, before, after));
+    }
     try {
       const row = await api.updateAnalysis(id, patch);
       set((st) => ({ analyses: st.analyses.map(a => a.id === id ? row : a) }));
@@ -270,7 +310,10 @@ export const useStore = create<StoreState>((set, get) => ({
   deleteAnalysis: async (id) => {
     const a = get().analyses.find(x => x.id === id);
     set((st) => ({ analyses: st.analyses.filter(x => x.id !== id) }));
-    if (a) get().unsubscribePrice(a.symbol);
+    if (a) {
+      get().unsubscribePrice(a.symbol);
+      void import('../lib/cases/collect').then(m => m.shipCoinEvent(a.symbol, 'coin_remove', a, null));
+    }
     await api.deleteAnalysis(id);
   },
 

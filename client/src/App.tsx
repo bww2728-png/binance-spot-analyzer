@@ -4,6 +4,7 @@ import AnalysisBoard from './components/AnalysisBoard';
 import Dashboard from './components/Dashboard';
 import SettingsPanel from './components/SettingsPanel';
 import ChartModal from './components/ChartModal';
+import CaseLedger from './components/CaseLedger';
 import Toasts from './components/Toasts';
 
 export default function App() {
@@ -11,6 +12,8 @@ export default function App() {
   const setScreen = useStore(s => s.setScreen);
   const chartModal = useStore(s => s.chartModal);
   const analyses = useStore(s => s.analyses);
+  const cases = useStore(s => s.cases);
+  const refreshCases = useStore(s => s.refreshCases);
 
   // حالة اتصال السوق الحية: هل وصل أي سعر خلال آخر 10 ثوانٍ؟
   const prices = useStore(s => s.prices);
@@ -30,6 +33,7 @@ export default function App() {
 
   const tabs = [
     { id: 'board', label: 'لوحة التحليل', shortLabel: 'اللوحة', count: analyses.length },
+    { id: 'cases', label: 'الأرشيف الكامل', shortLabel: 'الأرشيف', count: cases.length },
     { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
     { id: 'settings', label: 'الإعدادات والفلاتر', shortLabel: 'الإعدادات', count: null }
   ] as const;
@@ -62,7 +66,7 @@ export default function App() {
             return (
               <button
                 key={t.id}
-                onClick={() => setScreen(t.id)}
+                onClick={() => { setScreen(t.id); if (t.id === 'cases') void refreshCases(); }}
                 className="relative px-2.5 sm:px-4 py-2.5 text-[12px] sm:text-[13px] font-semibold whitespace-nowrap flex-shrink-0"
                 style={{ color: active ? 'var(--accent)' : 'var(--text-2)', transition: 'color var(--transition)' }}
                 onMouseEnter={e => { if (!active) (e.currentTarget as HTMLElement).style.color = 'var(--text-1)'; }}
@@ -106,6 +110,7 @@ export default function App() {
 
       <main className="flex-1 overflow-auto">
         {screen === 'board' && <AnalysisBoard />}
+        {screen === 'cases' && <CaseLedger />}
         {screen === 'dashboard' && <Dashboard />}
         {screen === 'settings' && <SettingsPanel />}
       </main>

@@ -80,7 +80,7 @@ git push -u origin main
 ## 6) قاعدة البيانات (Supabase)
 
 المخطط الكامل موجود في `server/migrations/` و`.verdent/supabase/migrations/`:
-جداول: `analyses`, `symbols`, `coin_flags`, `coin_shariah`, `settings`, `events_log` (RLS مفعّل).
+جداول: `analyses`, `symbols`, `coin_flags`, `coin_shariah`, `settings`, `events_log`, `cases`, `case_images` (RLS مفعّل).
 
 ## 7) التحقق بعد النشر
 

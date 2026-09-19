@@ -8,10 +8,15 @@ import db from './db.js';
 import { researchSymbol } from './research.mjs';
 import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
+import { assembleCase, DECISION_ACTORS } from './cases.mjs';
+import { groupZoneHistory } from './archive.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+
+// نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
+app.get('/healthz', (req, res) => res.json({ ok: true, up: Date.now() }));
 // ترتيب Express حرج: هذه الوسائط قبل أي مسار وإلا لا تُنفّذ عليه (المسارات المسجلة أولاً تتجاوز المسجلة لاحقاً)
 // ترويسات أمنية أساسية — بدون CSP صارم يكسر CDN، وSAMEORIGIN يحفظ الإطارات الداخلية
 app.use((req, res, next) => {
@@ -664,6 +669,60 @@ const periodicResearch = async () => {
   }
 };
 
+// ---- سجل القرارات (Case Ledger): لقطة مصنّفة لكل قرار تحليل ----
+app.get('/api/cases', handle(async (req, res) => {
+  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+  const rows = await db.cases.list({ symbol });
+  res.json(rows.map(r => ({ ...r, payload: r.payload ? JSON.parse(r.payload) : {} })));
+}));
+
+app.get('/api/cases/:id', handle(async (req, res) => {
+  const row = await db.cases.get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'القرار غير موجود' });
+  const images = await db.cases.imagesList(row.id);
+  res.json({ ...row, payload: row.payload ? JSON.parse(row.payload) : {}, images });
+}));
+
+app.post('/api/cases', handle(async (req, res) => {
+  const symbol = assertSymbol(req.body?.symbol, res);
+  if (!symbol) return;
+  const actor = DECISION_ACTORS.includes(req.body?.actor) ? req.body.actor : null;
+  if (!actor) return res.status(400).json({ error: 'actor يجب أن يكون من أنواع القرار المعروفة' });
+  const decidedAt = Number.isFinite(Number(req.body?.decided_at)) && Number(req.body.decided_at) > 0
+    ? Number(req.body.decided_at)
+    : Date.now();
+  const payload = await assembleCase({ symbol, actor, decidedAt, snapshot: req.body?.snapshot ?? {}, db });
+  const rows = await db.cases.save({ symbol, actor, decided_at: decidedAt, payload: JSON.stringify(payload) });
+  const id = rows?.[0]?.id ?? null;
+  // صور الشارت لحظة القرار — منفصلة عن payload، فشلها لا يفشل حفظ القرار
+  if (id) {
+    try {
+      const images = (req.body?.snapshot?.screenshots ?? [])
+        .slice(0, 4)
+        .filter(s => typeof s?.dataUrl === 'string' && s.dataUrl.startsWith('data:image/'))
+        .map(s => ({
+          case_id: id,
+          tf: String(s.tf ?? '').slice(0, 16),
+          data_url: s.dataUrl.slice(0, 1_000_000),
+          captured_at: decidedAt
+        }));
+      if (images.length) await db.cases.imagesSave(images);
+    } catch (e) {
+      console.error('[cases] screenshot persist failed:', e?.message ?? e);
+    }
+  }
+  res.json({ ok: true, id });
+}));
+
+// ---- أرشيف المناطق: كل نسخ التحديد اليدوي (شاملة المحذوف) ----
+app.get('/api/zones/history', handle(async (req, res) => {
+  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+  const limit = Math.min(Number(req.query.limit) || 2000, 5000);
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const raw = await db.zones.history({ symbol, limit, offset });
+  res.json({ events: raw, groups: groupZoneHistory(raw), total: raw.length, limit, offset });
+}));
+
 // ---- settings ----
 const ensureSettings = async () => {
   let rows = await db.settings.get();
@@ -805,6 +864,7 @@ app.use(express.static(distDir, { index: false, setHeaders: (res, filePath) => {
 } }));
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile('index.html', { root: distDir });
   } else {
     next();

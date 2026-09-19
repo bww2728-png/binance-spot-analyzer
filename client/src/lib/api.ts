@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, BarcodeScan, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZonesAccuracy } from './types';
+import type { Analysis, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -23,7 +23,9 @@ const SB = {
   analyses: 'analyses' as const,
   coin_shariah: 'coin_shariah' as const,
   settings: 'settings' as const,
-  events_log: 'events_log' as const
+  events_log: 'events_log' as const,
+  cases: 'cases' as const,
+  case_images: 'case_images' as const
 };
 
 // حقول boolean في Postgres تُمثَّل 0/1 في الواجهة، وnumeric يعود كنص
@@ -124,11 +126,13 @@ const sbApi = {
     if (error) throw pgErr(error);
     return fromDb<Settings>(data as AnyRow);
   },
-  async getEvents(opts: { symbol?: string; from?: number; limit?: number } = {}): Promise<EventLog[]> {
+  async getEvents(opts: { symbol?: string; from?: number; limit?: number; type?: string; offset?: number } = {}): Promise<EventLog[]> {
     let q = supabase.from(SB.events_log).select('*').order('ts', { ascending: false })
       .limit(Math.min(opts.limit ?? 500, 2000));
     if (opts.symbol) q = q.eq('symbol', opts.symbol.toUpperCase());
+    if (opts.type) q = q.eq('type', opts.type);
     if (opts.from) q = q.gte('ts', opts.from);
+    if (opts.offset) q = q.range(opts.offset, opts.offset + (opts.limit ?? 500) - 1);
     const { data, error } = await q;
     if (error) throw pgErr(error);
     return data as EventLog[];
@@ -195,6 +199,34 @@ const sbApi = {
   },
   async getAccuracy(symbol?: string) {
     return fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>);
+  },
+  async getCases(symbol?: string): Promise<CaseRow[]> {
+    return fetch(`${BASE}/cases${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<CaseRow[]>);
+  },
+  async createCase(body: { symbol: string; actor: CaseActor; decided_at: number; snapshot: unknown }): Promise<{ ok: boolean; id: number | null }> {
+    return fetch(`${BASE}/cases`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; id: number | null }>);
+  },
+  async getCase(id: number): Promise<CaseRow & { images: CaseImage[] }> {
+    const { data, error } = await supabase.from(SB.cases).select('*').eq('id', id).single();
+    if (error || !data) throw pgErr(error ?? { message: 'القرار غير موجود' });
+    const { data: imgs, error: err2 } = await supabase.from(SB.case_images).select('*').eq('case_id', id).order('captured_at', { ascending: true });
+    if (err2) throw pgErr(err2);
+    return {
+      ...(data as AnyRow),
+      payload: JSON.parse(String((data as AnyRow).payload ?? '{}')),
+      images: (imgs ?? []) as CaseImage[]
+    } as CaseRow & { images: CaseImage[] };
+  },
+  async getZonesHistory(opts: { symbol?: string; limit?: number; offset?: number } = {}): Promise<{ events: EventLog[]; groups: ZoneHistoryGroup[]; total: number; limit: number; offset: number }> {
+    let q = supabase.from(SB.events_log).select('*').eq('type', 'liquidity_zone')
+      .order('ts', { ascending: true }).limit(Math.min(opts.limit ?? 2000, 5000));
+    if (opts.symbol) q = q.eq('symbol', opts.symbol.toUpperCase());
+    if (opts.offset) q = q.range(opts.offset, opts.offset + Math.min(opts.limit ?? 2000, 5000) - 1);
+    const { data, error } = await q;
+    if (error) throw pgErr(error);
+    const events = data as EventLog[];
+    const { groupZoneHistory } = await import('./zonesHistory');
+    return { events, groups: groupZoneHistory(events), total: events.length, limit: opts.limit ?? 2000, offset: opts.offset ?? 0 };
   }
 };
 
@@ -233,11 +265,13 @@ const restApi = {
   getSettings: () => fetch(`${BASE}/settings`).then(j<Settings>),
   updateSettings: (body: Partial<Settings>) =>
     fetch(`${BASE}/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<Settings>),
-  getEvents: (opts: { symbol?: string; from?: number; limit?: number } = {}) => {
+  getEvents: (opts: { symbol?: string; from?: number; limit?: number; type?: string; offset?: number } = {}) => {
     const q = new URLSearchParams();
     if (opts.symbol) q.set('symbol', opts.symbol);
     if (opts.from) q.set('from', String(opts.from));
     if (opts.limit) q.set('limit', String(opts.limit));
+    if (opts.type) q.set('type', opts.type);
+    if (opts.offset) q.set('offset', String(opts.offset));
     return fetch(`${BASE}/events?${q}`).then(j<EventLog[]>);
   },
   postEvent: (symbol: string, type: string, message: string, meta?: unknown) =>
@@ -255,7 +289,20 @@ const restApi = {
   zoneNote: (id: string, note: string) =>
     fetch(`${BASE}/zones/${id}/note`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) }).then(j<{ ok: boolean; zone: LiquidityZone }>),
   getAccuracy: (symbol?: string) =>
-    fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>)
+    fetch(`${BASE}/zones/accuracy${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<ZonesAccuracy>),
+  getCases: (symbol?: string) =>
+    fetch(`${BASE}/cases${symbol ? '?symbol=' + encodeURIComponent(symbol) : ''}`).then(j<CaseRow[]>),
+  createCase: (body: { symbol: string; actor: CaseActor; decided_at: number; snapshot: unknown }) =>
+    fetch(`${BASE}/cases`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; id: number | null }>),
+  getCase: (id: number) =>
+    fetch(`${BASE}/cases/${id}`).then(j<CaseRow & { images: CaseImage[] }>),
+  getZonesHistory: (opts: { symbol?: string; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.limit) q.set('limit', String(opts.limit));
+    if (opts.offset) q.set('offset', String(opts.offset));
+    return fetch(`${BASE}/zones/history?${q}`).then(j<{ events: EventLog[]; groups: ZoneHistoryGroup[]; total: number; limit: number; offset: number }>);
+  }
 };
 
 export const api = useSupabase ? sbApi : restApi;
