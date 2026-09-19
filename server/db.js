@@ -65,14 +65,17 @@ const db = {
   zones: {
     /** أحدث حالة لكل منطقة يدوية (id) — منطقة محفوظة كحدث نوع liquidity_zone في events_log */
     list: async (symbol) => {
-      const q = new URLSearchParams({ type: 'eq.liquidity_zone', select: '*', order: 'ts.asc', limit: '2000' });
+      // ترتيب زمني تنازلي مع حدٍّ أصلي: asc+limit تُسقط الأحداث الأحدث عندما يتجاوز
+      // السجلُّ الحدَّ (5046+ حدثاً فعلياً) فتُفقد أحدث المناطق اليدوية من القراءة.
+      const q = new URLSearchParams({ type: 'eq.liquidity_zone', select: '*', order: 'ts.desc', limit: '5000' });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
       const events = await rest(`/events_log?${q}`);
       const latest = new Map();
       for (const e of events) {
         try {
           const z = JSON.parse(e.meta || 'null');
-          if (z?.id && z.source !== 'auto') latest.set(z.id, z);
+          // desc = الأحدث أولاً → النسخة الأولى لكل id هي الأحدث، فلا نستبدلها
+          if (z?.id && z.source !== 'auto' && !latest.has(z.id)) latest.set(z.id, z);
         } catch { /* تجاهل السجلات التالفة */ }
       }
       return [...latest.values()].filter(z => z.active !== false);
