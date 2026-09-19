@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
 import { fetchKlines, fetchOlderKlines, fmtPrice } from '../lib/binance';
@@ -17,6 +17,17 @@ const toBar = (c: Candle) => ({
 });
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
+
+/** شارة السعر الحي معزولة كي لا تُعاد رسم نافذة الشارت عند كل تحديث سعر */
+const LiveBadge = memo(function LiveBadge({ symbol }: { symbol: string }) {
+  const price = useStore(s => s.prices[symbol]);
+  if (price === undefined) return null;
+  return (
+    <span className="num text-sm px-2.5 py-1 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>
+      {fmtPrice(price)}
+    </span>
+  );
+});
 
 /** ثواني الشمعة لكل فريم — لحساب نافذة النقل عند اختيار منطقة */
 const TF_SECONDS: Record<string, number> = {
@@ -117,7 +128,8 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text },
       grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
       timeScale: { timeVisible: true, secondsVisible: false },
-      crosshair: { mode: 0, vertLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' }, horzLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' } }
+      crosshair: { mode: 0, vertLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' }, horzLine: { color: CHART_COLORS.crosshair, style: 3, labelBackgroundColor: '#334155' } },
+      kineticScroll: { mouse: true, touch: true }
     });
     chartRef.current = chart;
     const s = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });
@@ -552,7 +564,6 @@ export default function ChartModal() {
   const update = useStore(s => s.updateAnalysis);
   const scanBarcode = useStore(s => s.scanBarcode);
   const analysis = analyses.find(a => a.symbol === modal.symbol);
-  const livePrice = useStore(s => s.prices[modal.symbol]);
   const barcodeScan = useStore(s => s.barcodeScans[modal.symbol]);
   const isBarcode = barcodeScan?.status === 'success' && barcodeScan.is_barcode;
   const [barcodeAck, setBarcodeAck] = useState(false);
@@ -662,7 +673,8 @@ export default function ChartModal() {
       setZoneDialog({ price: near.price, timeframe, zone: near });
       return;
     }
-    const suggested = livePrice != null && price < livePrice ? 'SSL' : 'BSL';
+    const cur = useStore.getState().prices[modal.symbol];
+    const suggested = cur != null && price < cur ? 'SSL' : 'BSL';
     setZoneDialog({ price, timeframe, zone: null } as never);
     suggestedTypeRef.current = suggested;
   };
@@ -679,7 +691,7 @@ export default function ChartModal() {
     return (
       <div
         className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 flex-wrap justify-center px-3 py-2 rounded-xl anim-overlay"
-        style={{ background: 'rgba(10,14,22,0.78)', backdropFilter: 'blur(8px)', border: '1px solid var(--border-1)' }}
+        style={{ background: 'rgba(10,14,22,0.92)', border: '1px solid var(--border-1)' }}
       >
         <span className="text-[12px] font-bold" style={{ color: isLower ? 'var(--up)' : 'var(--warn)' }}>
           {isLower ? 'الفريم الأصغر' : 'الفريم الأكبر'}
@@ -706,7 +718,7 @@ export default function ChartModal() {
   return (
     <div
       className={`anim-overlay fixed inset-0 z-40 flex items-center justify-center ${fullscreen ? 'p-0' : 'p-4'}`}
-      style={{ background: 'rgba(4, 6, 10, 0.82)', backdropFilter: 'blur(4px)' }}
+      style={{ background: 'rgba(4, 6, 10, 0.85)' }}
       onClick={close}
     >
       <div
@@ -717,15 +729,11 @@ export default function ChartModal() {
         {/* الترويسة */}
         <div
           className="flex items-center justify-between px-5 py-3.5 sticky top-0 z-10"
-          style={{ background: 'var(--surface-glass)', backdropFilter: 'blur(10px)', borderBottom: '1px solid var(--border-1)' }}
+          style={{ background: 'var(--surface-glass)', borderBottom: '1px solid var(--border-1)' }}
         >
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-bold" style={{ color: 'var(--text-1)' }}>{modal.symbol}</h2>
-            {livePrice !== undefined && (
-              <span className="num text-sm px-2.5 py-1 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>
-                {fmtPrice(livePrice)}
-              </span>
-            )}
+            <LiveBadge symbol={modal.symbol} />
             <button
               className={`btn !py-1.5 !px-3 text-[11.5px] ${annotate ? 'btn-accent' : ''}`}
               style={annotate ? { background: '#3b82f6', color: '#fff' } : {}}

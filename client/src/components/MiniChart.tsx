@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { fetchKlines } from '../lib/binance';
 import type { Candle } from '../lib/types';
@@ -38,7 +38,7 @@ interface Props {
 }
 
 /** شارت شموع مصغر حي مع خطوط المناطق */
-export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Props) {
+const MiniChart = memo(function MiniChart({ symbol, timeframe, zones, height = 120 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -138,4 +138,6 @@ export default function MiniChart({ symbol, timeframe, zones, height = 120 }: Pr
       )}
     </div>
   );
-}
+});
+
+export default MiniChart;

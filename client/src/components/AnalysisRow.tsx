@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import { useStore } from '../store/useStore';
 import { classify, isUptrend } from '../lib/sorting';
 import { TIMEFRAMES } from '../lib/types';
@@ -81,10 +81,10 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
   const dist = row.distancePct;
   const gs = GROUP_STYLE[group];
 
-  const zones = [
+  const zones = useMemo(() => [
     ...(a.ssl_price != null ? [{ price: a.ssl_price, color: '#089981', title: 'SSL' }] : []),
     ...(a.bsl_price != null ? [{ price: a.bsl_price, color: '#f23645', title: 'BSL' }] : [])
-  ];
+  ], [a.ssl_price, a.bsl_price]);
   const tfLower = a.tf_lower ?? '15m';
 
   const patch = (p: Partial<Analysis>) => void update(a.id, p);
