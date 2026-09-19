@@ -11,10 +11,10 @@ FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY server/package.json server/package-lock.json ./server/
-RUN cd server && npm ci --omit=dev
-COPY server/index.js server/db.js server/research.mjs server/researchCore.mjs server/barcodeCore.mjs ./server/
-COPY server/liquidity ./server/liquidity/
+# نسخ كامل مجلد الخادم (index/db/research/cases/archive/liquidity/...)
+# مهم: أي ملف جديد يضاف إلى server/ يُلتقط تلقائياً — القوائم الجزئية كانت تُسقط ملفات وتُسقط العقدة
+COPY server/ /app/server/
+RUN cd /app/server && npm ci --omit=dev
 COPY --from=client-build /app/client/dist ./client/dist
 
 EXPOSE 8080
