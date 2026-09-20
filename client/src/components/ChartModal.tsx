@@ -312,7 +312,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
       {hoverBar && (
         <div
           className="num absolute z-10 text-[10.5px] px-2 py-1 rounded-lg pointer-events-none whitespace-nowrap"
-          style={{ top: annotate ? 36 : 8, left: 8, background: 'rgba(10,14,22,0.8)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+          style={{ top: annotate ? 36 : 8, left: 8, background: 'rgba(10,14,22,0.8)', border: '1px solid var(--border-1)', color: '#e2e8f0' }}
         >
           <span style={{ color: 'var(--text-3)' }}>O </span>{fmtPrice(hoverBar.open)}
           <span style={{ color: 'var(--text-3)' }}> H </span>{fmtPrice(hoverBar.high)}

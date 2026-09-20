@@ -131,7 +131,7 @@ const MiniChart = memo(function MiniChart({ symbol, timeframe, zones, height = 1
       {livePrice !== undefined && (
         <div
           className="num absolute top-1 left-1 z-10 text-[10px] rounded px-1.5 py-0.5"
-          style={{ background: 'rgba(10, 14, 22, 0.75)', color: 'var(--text-1)', border: '1px solid var(--border-1)' }}
+          style={{ background: 'rgba(10, 14, 22, 0.75)', color: '#e2e8f0', border: '1px solid var(--border-1)' }}
         >
           {livePrice}
         </div>
