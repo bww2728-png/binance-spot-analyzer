@@ -126,14 +126,11 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
 
   return (
     <div
-      className="group flex items-stretch min-w-max"
+      className="group flex items-stretch min-w-max board-row row-hover"
       style={{
         borderBottom: '1px solid var(--border-1)',
-        borderInlineStart: `3px solid ${gs.color}`,
-        transition: 'background var(--transition)'
+        borderInlineStart: `3px solid ${gs.color}`
       }}
-      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--surface-1)'; }}
-      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
     >
       {cell(COLS[0], 'sym', (
         <div className="text-center py-1 space-y-1">
@@ -179,11 +176,9 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
       {cell(COLS[15], 'chart', (
         <div
           onClick={() => openChart(a.symbol, a.tf_lower, a.tf_upper)}
-          className="cursor-pointer rounded-lg overflow-hidden self-center relative"
-          style={{ border: '1px solid var(--border-1)', transition: 'border-color var(--transition), box-shadow var(--transition)' }}
+          className="cursor-pointer rounded-lg overflow-hidden self-center relative chip-hover"
+          style={{ border: '1px solid var(--border-1)' }}
           title="افتح الشارت الكامل"
-          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--accent)'; (e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-md)'; }}
-          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-1)'; (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}
         >
           {price !== undefined
             ? <MiniChart symbol={a.symbol} timeframe={tfLower} zones={zones} height={88} />
@@ -221,10 +216,8 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
           onClick={() => void remove(a.id)}
           aria-label={`حذف ${a.symbol}`}
           title="حذف"
-          className="opacity-0 group-hover:opacity-100 w-7 h-7 rounded-md flex items-center justify-center text-base"
-          style={{ color: 'var(--down)', transition: 'opacity var(--transition), background var(--transition)' }}
-          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--down-soft)'; }}
-          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+          className="opacity-0 group-hover:opacity-100 w-7 h-7 rounded-md flex items-center justify-center text-base del-hover"
+          style={{ color: 'var(--down)' }}
         >
           ×
         </button>
@@ -233,5 +226,13 @@ function AnalysisRowInner({ row }: { row: SortResultRow }) {
   );
 }
 
-const AnalysisRow = memo(AnalysisRowInner);
+/* مقارنة مخصصة: الصف يعاد رسمه فقط إذا تغير التحليل (مرجع) أو مشتقاته الحية
+ * (group/distancePct محسوبان من السعر الحي) — بدل إعادة رسم كل الصفوف عند كل دفعة أسعار */
+const AnalysisRow = memo(
+  AnalysisRowInner,
+  (prev, next) =>
+    prev.row.analysis === next.row.analysis &&
+    prev.row.group === next.row.group &&
+    prev.row.distancePct === next.row.distancePct
+);
 export default AnalysisRow;

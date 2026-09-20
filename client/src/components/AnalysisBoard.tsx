@@ -58,7 +58,7 @@ export default function AnalysisBoard() {
           </div>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto scroll-contain">
           <div className="min-w-max">
             {/* الترويسة الثابتة */}
             <div

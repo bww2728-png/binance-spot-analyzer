@@ -134,7 +134,7 @@ export default function AutoHistory() {
         )}
 
         {/* الجدول */}
-        <div className="card overflow-auto max-h-[65vh]">
+        <div className="card overflow-auto max-h-[65vh] scroll-contain">
           {loading && rows.length === 0 ? (
             <div className="p-4 space-y-2">
               {Array.from({ length: 5 }, (_, i) => <Skeleton key={i} height={32} />)}
@@ -164,9 +164,8 @@ export default function AutoHistory() {
                     <tr
                       key={rowId}
                       onClick={() => setExpanded(isOpen ? null : rowId)}
-                      style={{ borderTop: '1px solid var(--border-1)', cursor: 'pointer', transition: 'background var(--transition)' }}
-                      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)'; }}
-                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                      className="row-hover-soft"
+                      style={{ borderTop: '1px solid var(--border-1)', cursor: 'pointer' }}
                     >
                       <td className="num p-2.5 text-[11px]" style={{ color: 'var(--text-3)' }}>{fmtTime(r.snapshotTs)}</td>
                       <td className="p-2.5 font-bold" style={{ color: 'var(--text-1)' }}>{r.symbol.replace('USDT', '')}</td>

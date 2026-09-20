@@ -336,3 +336,27 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 @media (hover: none) {
   .group:hover > * { opacity: 1; }
 }
+
+/* ============================================================
+   الأداء — سلاسة اللمس والتمرير والتصفح
+   ============================================================ */
+
+/* تخفي أصلي للصفوف بعيدة عن الشاشة — المتصفح يتخطى رسمها كلياً
+ * (محاكاة virtualization بدون مكتبات) — 97px = ارتفاع الصف + حدّه */
+.board-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 97px;
+}
+
+/* هوف مجاني بـ CSS بدل معالجات JS المضمنة — صفر JS أثناء التمرير */
+.row-hover:hover { background: var(--surface-1); }
+.row-hover-soft:hover { background: var(--surface-2); }
+.chip-hover { transition: border-color var(--transition), box-shadow var(--transition); }
+.chip-hover:hover { border-color: var(--accent) !important; box-shadow: var(--shadow-md); }
+.del-hover { transition: opacity var(--transition), background var(--transition); }
+.del-hover:hover { background: var(--down-soft); }
+
+/* اللمس: إلغاء تأخير النقر (300ms) وإبراز النقر الكاذب والارتداد الزائد */
+button, select, input, a, [role="button"] { touch-action: manipulation; }
+html { -webkit-tap-highlight-color: transparent; }
+.scroll-contain { overscroll-behavior: contain; }

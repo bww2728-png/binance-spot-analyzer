@@ -81,6 +81,10 @@ let streams: BinanceStreams | null = null;
 let toastId = 0;
 let symbolsChannelStarted = false;
 const priceUnsubs = new Map<string, () => void>();
+/* تجميع نبضات الأسعار: الكتابة إلى خريطة مؤقتة ودفعة set() واحدة كل 600ms
+ * بدل كتابة كاملة للمخزن عند كل رسالة miniTicker — يخفض إعادة رسم اللوحة من N/ثانية إلى دفعتين */
+const pendingPrices = new Map<string, number>();
+let priceFlushTimer: ReturnType<typeof setInterval> | null = null;
 const haramAlerted = new Set<string>();
 
 /** تنبيه تحوّل حكم عملة متابَعة إلى «حرام» — مع اقتراح إزالة بضغطة واحدة (القرار للمستخدم) */
@@ -386,11 +390,19 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!s) return;
     const name = priceStreamName(symbol);
     if (priceUnsubs.has(name)) return;
+    if (!priceFlushTimer) {
+      priceFlushTimer = setInterval(() => {
+        if (pendingPrices.size === 0) return;
+        const batch = Object.fromEntries(pendingPrices);
+        pendingPrices.clear();
+        set((st) => ({ prices: { ...st.prices, ...batch } }));
+      }, 600);
+    }
     const unsub = s.subscribe(name, (data) => {
       const d = data as MiniTicker;
       const price = parseFloat(d.c);
       if (Number.isFinite(price)) {
-        set((st) => ({ prices: { ...st.prices, [d.s]: price } }));
+        pendingPrices.set(d.s, price);
       }
     });
     priceUnsubs.set(name, unsub);

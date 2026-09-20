@@ -37,20 +37,31 @@ interface Props {
   height?: number;
 }
 
-/** شارت شموع مصغر حي مع خطوط المناطق */
+/** شارت شموع مصغر حي مع خطوط المناطق — لا يُنشأ إطلاقاً حتى يقترب الصف من الشاشة
+ * (IntersectionObserver بrootMargin 200px) ويُفكّك عند الابتعاد —
+ * العدد الفعلي لمحركات الشارت النشطة = الصفوف المرئية فقط */
 const MiniChart = memo(function MiniChart({ symbol, timeframe, zones, height = 120 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const [ready, setReady] = useState(false);
+  const [visible, setVisible] = useState(false);
   const subscribeKline = useStore(s => s.subscribeKline);
   const livePrice = useStore(s => s.prices[symbol]);
   const barcodeScan = useStore(s => s.barcodeScans[symbol]);
   const isBarcode = barcodeScan?.status === 'success' && barcodeScan.is_barcode;
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => setVisible(e.isIntersecting), { rootMargin: '200px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible || !containerRef.current) return;
     const chart = createChart(containerRef.current, {
       height,
       layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text, fontSize: 9 },
@@ -98,7 +109,7 @@ const MiniChart = memo(function MiniChart({ symbol, timeframe, zones, height = 1
       priceLinesRef.current = [];
       setReady(false);
     };
-  }, [symbol, timeframe, height, subscribeKline]);
+  }, [symbol, timeframe, height, subscribeKline, visible]);
 
   // خطوط المناطق
   useEffect(() => {
