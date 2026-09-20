@@ -276,3 +276,68 @@ export interface AutoZoneScreenshot {
   capturedAt: number;
   ts?: number;
 }
+
+// ==================== الباك تيست ====================
+export interface BacktestTrade {
+  symbol: string;
+  timeframe: string;
+  zoneType: 'BSL' | 'SSL';
+  zoneId?: string;
+  zonePrice: number;
+  score: number;
+  reasons: string[];
+  clusterCount?: number;
+  swept?: boolean;
+  bandPct?: number;
+  ts: number | null;
+  detectTime?: number;
+  entry: number;
+  protectedPrice: number;
+  win: 0 | 1 | undefined;
+  exit: number;
+  bars: number;
+  undecided?: boolean;
+  rr: number;
+  kelly: number;
+  fF: number;
+  units: number;
+}
+
+export interface BacktestPair {
+  symbol: string;
+  timeframe: string;
+  trades: BacktestTrade[];
+  reason?: string;
+}
+
+export interface BacktestLearn {
+  enough: boolean;
+  message?: string;
+  trainCount?: number;
+  validationCount?: number;
+  rules?: { minScore: number; allowSwept: boolean; requireCluster: boolean; requireBubble: boolean; kept: number; winRate: number } | null;
+  weights?: Record<string, number>;
+  evalBefore?: { kept: number; winRate: number | null; avgRR: number | null };
+  evalAfter?: { kept: number; winRate: number | null; avgRR: number | null };
+  winRate?: number;
+}
+
+export interface BacktestResults {
+  exists: boolean;
+  message?: string;
+  startedAt?: number;
+  lastRunAt?: number;
+  results: BacktestPair[];
+  learn: BacktestLearn | null;
+}
+
+export interface BacktestStatus {
+  busy: boolean;
+  startedAt: number | null;
+  lastRunAt: number | null;
+  pairsDone: number;
+  pairsTotal: number;
+  targetsCount: number;
+  targets: string[];
+  error: string | null;
+}

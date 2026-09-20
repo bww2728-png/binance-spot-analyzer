@@ -8,6 +8,9 @@ import db from './db.js';
 import { researchSymbol } from './research.mjs';
 import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
+import { runPairBacktest, learnOnTrades, loadKlinesPaginated } from './backtest/engine.mjs';
+import { regimeGate } from './backtest/regime.mjs';
+import { buildPlan, checkPlan, kellyF, fractionalKelly, positionUnits } from './backtest/risk.mjs';
 import { assembleCase, DECISION_ACTORS } from './cases.mjs';
 import { groupZoneHistory } from './archive.mjs';
 
@@ -547,6 +550,100 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
   invalidateZonesCache();
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
   res.json({ ok: true, zone: { ...cur, note } });
+}));
+
+// ==================== الباك تيست + الفرص الحية (walk-forward + حلقة تعلم مستمرة) ====================
+
+// قائمة المستهدفة: الحلال + غير الباركود فقط (coin_shariah + coin_flags) — مؤكدة بأجوبتك
+const resolveTargets = async (limit = 40) => {
+  const [sh, flags] = await Promise.all([
+    db.coinShariah.list().catch(() => []),
+    db.coinFlags.list().catch(() => [])
+  ]);
+  const barcode = new Set((flags || []).filter(f => f.is_barcode).map(f => f.symbol));
+  const halal = (sh || []).filter(r => r.is_halal !== false).map(r => r.symbol);
+  const seen = new Set();
+  return halal.filter(s => {
+    if (seen.has(s) || barcode.has(s)) return false;
+    seen.add(s);
+    return true;
+  }).slice(0, limit);
+};
+
+// حالة الباك تيست في الذاكرة (النمط نفسه: حالة خادم بسيطة)
+const backtestState = { busy: false, startedAt: null, lastRunAt: null, pairsDone: 0, pairsTotal: 0, lastRun: null, error: null };
+
+app.get('/api/backtest/status', handle(async (_req, res) => {
+  const targets = await resolveTargets();
+  res.json({
+    busy: backtestState.busy,
+    startedAt: backtestState.startedAt,
+    lastRunAt: backtestState.lastRunAt,
+    pairsDone: backtestState.pairsDone,
+    pairsTotal: backtestState.pairsTotal,
+    targetsCount: targets.length,
+    targets: targets.slice(0, 20),
+    error: backtestState.error
+  });
+}));
+
+app.get('/api/backtest/results', handle(async (req, res) => {
+  const run = backtestState.lastRun;
+  if (!run) return res.json({ exists: false, message: 'لم تُجرَ جولة بعد — اضغط "إطلاق الجولة"' });
+  let rows = run.results ?? [];
+  const coin = req.query.coin ? String(req.query.coin).toUpperCase() : undefined;
+  const timeframe = req.query.timeframe ? String(req.query.timeframe) : undefined;
+  if (coin) rows = rows.filter(r => r.symbol === coin);
+  if (timeframe) rows = rows.filter(r => r.timeframe === timeframe);
+  res.json({ exists: true, startedAt: run.startedAt, lastRunAt: run.lastRunAt, results: rows, learn: run.learn ?? null });
+}));
+
+app.post('/api/backtest/run', handle(async (_req, res) => {
+  if (backtestState.busy) return res.status(409).json({ error: 'جولة قيد التنفيذ بالفعل' });
+  const targets = await resolveTargets();
+  if (!targets.length) return res.status(400).json({ error: 'لا مستهدفات (لاحلال/لا غير-باركود)' });
+  backtestState.busy = true;
+  backtestState.startedAt = Date.now();
+  backtestState.pairsDone = 0;
+  backtestState.pairsTotal = targets.length;
+  backtestState.error = null;
+  res.json({ ok: true, started: true, pairsTotal: targets.length });
+  // مجدول تدريجي (لا يُخنق الـ API): زوج → زوج — والجولة تجري في الخلفية
+  void (async () => {
+    const results = [];
+    try {
+      const calibration = await readCalibration();
+      const timeframes = ['1h', '4h', '1d'];
+      for (const symbol of targets) {
+        for (const tf of timeframes) {
+          try {
+            results.push(await runPairBacktest(db, { symbol, timeframe: tf, calibration, capital: 10000 }));
+          } catch (e) {
+            results.push({ symbol, timeframe: tf, trades: [], reason: e.message });
+          }
+          await new Promise(r => setTimeout(r, 1500));
+        }
+        backtestState.pairsDone += 1;
+        await new Promise(r => setTimeout(r, 800));
+      }
+      // حلقة التعلم المستمرة: على جولة كاملة
+      let learn = null;
+      try {
+        learn = learnOnTrades(results, { targetWinRate: 0.7 });
+      } catch (e) {
+        console.error('[backtest] learning failed:', e.message);
+      }
+      backtestState.lastRun = { startedAt: backtestState.startedAt, lastRunAt: Date.now(), results, learn };
+      backtestState.lastRunAt = Date.now();
+      console.log(`[backtest] run done: pairs ${backtestState.pairsDone}/${backtestState.pairsTotal} | learn: ${learn?.enough ? `winRate ${learn.winRate}` : 'غير كافية'}`);
+      broadcast({ type: 'backtest_done' });
+    } catch (e) {
+      backtestState.error = e.message;
+      console.error('[backtest] cycle failed:', e.message);
+    } finally {
+      backtestState.busy = false;
+    }
+  })();
 }));
 
 // جدولة الكشف الآلي: كل عملات لوحة التحليل × كل الفريمات

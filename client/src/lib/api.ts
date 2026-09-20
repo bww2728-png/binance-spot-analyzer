@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -253,6 +253,19 @@ const sbApi = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ shots })
     }).then(j<{ ok: boolean; saved: number }>);
+  },
+  // ==================== الباك تيست (sb — نفس REST) ====================
+  getBacktestStatus(signal?: AbortSignal): Promise<BacktestStatus> {
+    return fetch(`${BASE}/backtest/status`, { signal }).then(j<BacktestStatus>);
+  },
+  getBacktestResults(opts: { coin?: string; timeframe?: string } = {}, signal?: AbortSignal): Promise<BacktestResults> {
+    const q = new URLSearchParams();
+    if (opts.coin) q.set('coin', opts.coin);
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    return fetch(`${BASE}/backtest/results?${q}`, { signal }).then(j<BacktestResults>);
+  },
+  runBacktest(): Promise<{ ok: boolean; started: boolean; pairsTotal: number }> {
+    return fetch(`${BASE}/backtest/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean; pairsTotal: number }>);
   }
 };
 
@@ -353,7 +366,19 @@ const restApi = {
     fetch(`${BASE}/auto-history/screenshots`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ shots })
-    }).then(j<{ ok: boolean; saved: number }>)
+    }).then(j<{ ok: boolean; saved: number }>),
+
+  // ==================== الباك تيست ====================
+  getBacktestStatus: (signal?: AbortSignal) =>
+    fetch(`${BASE}/backtest/status`, { signal }).then(j<BacktestStatus>),
+  getBacktestResults: (opts: { coin?: string; timeframe?: string } = {}, signal?: AbortSignal) => {
+    const q = new URLSearchParams();
+    if (opts.coin) q.set('coin', opts.coin);
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    return fetch(`${BASE}/backtest/results?${q}`, { signal }).then(j<BacktestResults>);
+  },
+  runBacktest: () =>
+    fetch(`${BASE}/backtest/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean; pairsTotal: number }>)
 };
 
 export const api = useSupabase ? sbApi : restApi;
