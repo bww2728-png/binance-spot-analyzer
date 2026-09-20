@@ -259,6 +259,7 @@ export interface AutoHistoryRow {
 
 export interface AutoHistoryResponse {
   rows: AutoHistoryRow[];
+  total: number;
   limit: number;
   offset: number;
   fabioOnly: boolean;

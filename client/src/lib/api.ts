@@ -229,7 +229,7 @@ const sbApi = {
     return { events, groups: groupZoneHistory(events), total: events.length, limit: opts.limit ?? 2000, offset: opts.offset ?? 0 };
   },
   // السجل التاريخي للتحديد الآلي — يمر عبر الخادم دائماً (التفكيك والفلاتر منطق خادم)
-  getAutoHistory(opts: { symbol?: string; timeframe?: string; type?: 'BSL' | 'SSL'; minScore?: number; from?: number; to?: number; fabioOnly?: boolean; limit?: number; offset?: number } = {}): Promise<AutoHistoryResponse> {
+  getAutoHistory(opts: { symbol?: string; timeframe?: string; type?: 'BSL' | 'SSL'; minScore?: number; from?: number; to?: number; fabioOnly?: boolean; limit?: number; offset?: number } = {}, signal?: AbortSignal): Promise<AutoHistoryResponse> {
     const q = new URLSearchParams();
     if (opts.symbol) q.set('symbol', opts.symbol);
     if (opts.timeframe) q.set('timeframe', opts.timeframe);
@@ -240,13 +240,13 @@ const sbApi = {
     if (opts.fabioOnly === false) q.set('fabioOnly', 'false');
     if (opts.limit != null) q.set('limit', String(opts.limit));
     if (opts.offset != null) q.set('offset', String(opts.offset));
-    return fetch(`${BASE}/auto-history?${q}`).then(j<AutoHistoryResponse>);
+    return fetch(`${BASE}/auto-history?${q}`, { signal }).then(j<AutoHistoryResponse>);
   },
-  getAutoScreenshots(opts: { symbol?: string; from?: number } = {}): Promise<{ screenshots: AutoZoneScreenshot[] }> {
+  getAutoScreenshots(opts: { symbol?: string; from?: number } = {}, signal?: AbortSignal): Promise<{ screenshots: AutoZoneScreenshot[] }> {
     const q = new URLSearchParams();
     if (opts.symbol) q.set('symbol', opts.symbol);
     if (opts.from != null) q.set('from', String(opts.from));
-    return fetch(`${BASE}/auto-history/screenshots?${q}`).then(j<{ screenshots: AutoZoneScreenshot[] }>);
+    return fetch(`${BASE}/auto-history/screenshots?${q}`, { signal }).then(j<{ screenshots: AutoZoneScreenshot[] }>);
   },
   postAutoScreenshots(shots: AutoZoneScreenshot[]): Promise<{ ok: boolean; saved: number }> {
     return fetch(`${BASE}/auto-history/screenshots`, {
@@ -330,7 +330,7 @@ const restApi = {
     return fetch(`${BASE}/zones/history?${q}`).then(j<{ events: EventLog[]; groups: ZoneHistoryGroup[]; total: number; limit: number; offset: number }>);
   },
   // السجل التاريخي للتحديد الآلي — التفكيك والفلاتر منطق خادم
-  getAutoHistory: (opts: { symbol?: string; timeframe?: string; type?: 'BSL' | 'SSL'; minScore?: number; from?: number; to?: number; fabioOnly?: boolean; limit?: number; offset?: number } = {}) => {
+  getAutoHistory: (opts: { symbol?: string; timeframe?: string; type?: 'BSL' | 'SSL'; minScore?: number; from?: number; to?: number; fabioOnly?: boolean; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (opts.symbol) q.set('symbol', opts.symbol);
     if (opts.timeframe) q.set('timeframe', opts.timeframe);
@@ -341,13 +341,13 @@ const restApi = {
     if (opts.fabioOnly === false) q.set('fabioOnly', 'false');
     if (opts.limit != null) q.set('limit', String(opts.limit));
     if (opts.offset != null) q.set('offset', String(opts.offset));
-    return fetch(`${BASE}/auto-history?${q}`).then(j<AutoHistoryResponse>);
+    return fetch(`${BASE}/auto-history?${q}`, { signal }).then(j<AutoHistoryResponse>);
   },
-  getAutoScreenshots: (opts: { symbol?: string; from?: number } = {}) => {
+  getAutoScreenshots: (opts: { symbol?: string; from?: number } = {}, signal?: AbortSignal) => {
     const q = new URLSearchParams();
     if (opts.symbol) q.set('symbol', opts.symbol);
     if (opts.from != null) q.set('from', String(opts.from));
-    return fetch(`${BASE}/auto-history/screenshots?${q}`).then(j<{ screenshots: AutoZoneScreenshot[] }>);
+    return fetch(`${BASE}/auto-history/screenshots?${q}`, { signal }).then(j<{ screenshots: AutoZoneScreenshot[] }>);
   },
   postAutoScreenshots: (shots: AutoZoneScreenshot[]) =>
     fetch(`${BASE}/auto-history/screenshots`, {

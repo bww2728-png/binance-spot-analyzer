@@ -184,10 +184,11 @@ const db = {
       const events = await rest('/events_log?type=eq.zone_calibration&select=*&order=ts.desc&limit=1');
       return events.length ? events[0] : null;
     },
-    /** السجل العميق للقطات الآلية: صفحات تنازلية بلا سقف الـ60 (للتبويب التاريخي) */
+    /** السجل العميق للقطات الآلية: صفحات تنازلية بلا سقف الـ60 (للتبويب التاريخي)
+     * جلب مصغر: ts,symbol,meta فقط — meta الضخم هو المطلوب والباقي حشو يضخم النقل */
     autoHistory: async ({ symbol, from, to, limit, offset } = {}) => {
       const q = new URLSearchParams({
-        type: 'eq.auto_zones_snapshot', select: '*', order: 'ts.desc,id.desc',
+        type: 'eq.auto_zones_snapshot', select: 'id,ts,symbol,meta', order: 'ts.desc,id.desc',
         limit: String(Math.min(Number(limit) || 200, 500))
       });
       if (symbol) q.set('symbol', `eq.${String(symbol).toUpperCase()}`);
@@ -369,6 +370,7 @@ const db = {
       if (offset) q.set('offset', String(Number(offset)));
       return rest(`/events_log?${q}`);
     },
+    get: (id) => rest(`/events_log?id=eq.${Number(id)}&select=*&limit=1`).then(rows => rows[0] ?? null),
     create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' })
   }
 };

@@ -113,7 +113,14 @@ export const useStore = create<StoreState>((set, get) => ({
   analyses: [],
   prices: {},
   settings: null,
-  screen: 'board',
+  screen: ((): Screen => {
+    // افتتاح مباشر على التبويب من الرابط (#/history مثلاً) — الافتراضي اللوحة
+    const h = location.hash.replace('#/', '');
+    if (h === 'history') return 'autoHistory';
+    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings'] as const).includes(h as Screen)
+      ? h as Screen
+      : 'board';
+  })(),
   chartModal: null,
   toasts: [],
   streams: null,
@@ -266,7 +273,11 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  setScreen: (s) => set({ screen: s }),
+  setScreen: (s) => {
+    set({ screen: s });
+    // رابط مباشر لكل تبويب: يشارك ويعمل زر الرجوع
+    try { history.replaceState(null, '', `#/${s === 'autoHistory' ? 'history' : s}`); } catch { /* ignore */ }
+  },
 
   openChart: (symbol, tfLower, tfUpper) => set({ chartModal: { symbol, tfLower, tfUpper } }),
   closeChart: () => set({ chartModal: null }),

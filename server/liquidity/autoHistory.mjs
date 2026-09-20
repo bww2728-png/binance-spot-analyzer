@@ -85,6 +85,29 @@ function tryParse(s) {
   try { return JSON.parse(s ?? 'null'); } catch { return null; }
 }
 
+/**
+ * دمج الصفوف حسب zoneKey: لكل منطقة أبقَ أحدث ظهور مع firstSeen/lastSeen/عدد الظهورات.
+ * يحول تدفقاً زمنياً من اللقطات إلى سجل حي لكل منطقة — أغنى معلومةاً وأخف حجماً بكثير.
+ * الإدخال تنازلي بالزمن (ناتج flattenSnapshots): أول ظهور في اللف هو الأحدث.
+ */
+export function dedupeByZoneKey(rows) {
+  const byKey = new Map();
+  for (const r of rows) {
+    const existing = byKey.get(r.zoneKey);
+    if (!existing) {
+      byKey.set(r.zoneKey, { ...r, firstSeen: r.snapshotTs, lastSeen: r.snapshotTs, appearances: 1 });
+    } else {
+      existing.appearances += 1;
+      existing.firstSeen = r.snapshotTs;
+      if (r.swept && !existing.swept) existing.swept = true;
+      if (r.feedback && !existing.feedback) existing.feedback = r.feedback;
+      if (!existing.note && r.note) existing.note = r.note;
+      if (r.sweptAt && !existing.sweptAt) existing.sweptAt = r.sweptAt;
+    }
+  }
+  return [...byKey.values()];
+}
+
 /** حد أقصى آمن للصفحة */
 export function clampPage(limit, offset, maxLimit = 500) {
   return {

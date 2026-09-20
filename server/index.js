@@ -382,12 +382,24 @@ app.get('/api/shariah-research/status', handle(async (_req, res) => {
 }));
 
 // ---- مناطق السيولة: CRUD + بث + مراقبة الاقتراب والسحب ----
+// كاش 5 ثوانٍ: يمتص انفجارات النداءات عند كل جولة كشف (WS يطلق العدادات لكل عملة)
+const zonesCache = { data: null, ts: 0 };
+async function zonesCached() {
+  const now = Date.now();
+  if (zonesCache.data && now - zonesCache.ts < 5000) return zonesCache.data;
+  const data = await db.zones.listAll();
+  zonesCache.data = data;
+  zonesCache.ts = now;
+  return data;
+}
+function invalidateZonesCache() { zonesCache.data = null; zonesCache.ts = 0; }
+
 app.get('/api/zones', handle(async (_req, res) => {
-  res.json({ zones: await db.zones.listAll() });
+  res.json({ zones: await zonesCached() });
 }));
 
 app.get('/api/zones/accuracy', handle(async (req, res) => {
-  const all = await db.zones.listAll();
+  const all = await zonesCached();
   const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : null;
   const scoped = symbol ? all.filter(z => z.symbol === symbol) : all;
   const manual = scoped.filter(z => z.source !== 'auto');
@@ -457,6 +469,7 @@ app.post('/api/zones', handle(async (req, res) => {
     active: true
   };
   await db.zones.append(zone);
+  invalidateZonesCache();
   broadcast({ type: 'zones_changed', symbol });
   res.json({ ok: true, zone });
 }));
@@ -474,6 +487,7 @@ app.patch('/api/zones/:id', handle(async (req, res) => {
     active: typeof b.active === 'boolean' ? b.active : cur.active
   };
   await db.zones.append(zone);
+  invalidateZonesCache();
   broadcast({ type: 'zones_changed', symbol: zone.symbol });
   res.json({ ok: true, zone });
 }));
@@ -483,6 +497,7 @@ app.delete('/api/zones/:id', handle(async (req, res) => {
   const cur = all.find(z => z.id === req.params.id && z.source !== 'auto');
   if (!cur) return res.status(404).json({ error: 'المنطقة غير موجودة أو ليست يدوية — استخدم التغذية الراجعة للمناطق الآلية' });
   await db.zones.append({ ...cur, active: false });
+  invalidateZonesCache();
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
   res.json({ ok: true });
 }));
@@ -506,6 +521,7 @@ app.post('/api/zones/:id/feedback', handle(async (req, res) => {
     symbol: cur.symbol,
     ts: Date.now()
   });
+  invalidateZonesCache();
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
   res.json({
     ok: true,
@@ -528,6 +544,7 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
     symbol: cur.symbol,
     ts: Date.now()
   });
+  invalidateZonesCache();
   broadcast({ type: 'zones_changed', symbol: cur.symbol });
   res.json({ ok: true, zone: { ...cur, note } });
 }));
@@ -724,8 +741,9 @@ app.get('/api/zones/history', handle(async (req, res) => {
 }));
 
 // ---- السجل التاريخي للتحديد الآلي (منطق فابيو) ----
+// دمج حسب المنطقة + ترقيم على مستوى الصفوف: يخفض الحمولة من ميغابايتات إلى كيلوبايتات
 app.get('/api/auto-history', handle(async (req, res) => {
-  const { clampPage, flattenSnapshots } = await import('./liquidity/autoHistory.mjs');
+  const { clampPage, flattenSnapshots, dedupeByZoneKey } = await import('./liquidity/autoHistory.mjs');
   const { limit, offset } = clampPage(req.query.limit, req.query.offset);
   const filters = {
     symbol: req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined,
@@ -736,10 +754,18 @@ app.get('/api/auto-history', handle(async (req, res) => {
     to: req.query.to ? Number(req.query.to) : undefined,
     fabioOnly: req.query.fabioOnly === 'false' ? false : true
   };
-  const raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit, offset });
-  const rows = flattenSnapshots(raw, filters);
-  res.set('X-Total-Count', String(rows.length));
-  res.json({ rows, limit, offset, fabioOnly: filters.fabioOnly });
+  // تفصيل منطقة واحدة: كل لقطات zoneKey محدد (يُستخدم عند توسيع صف)
+  if (req.query.zoneKey) {
+    const raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit: 500, offset: 0 });
+    const all = flattenSnapshots(raw, { ...filters, fabioOnly: false }).filter(r => r.zoneKey === String(req.query.zoneKey).slice(0, 200));
+    return res.json({ rows: all, total: all.length, limit: all.length, offset: 0, fabioOnly: false });
+  }
+  const raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit: 500, offset: 0 });
+  const flat = dedupeByZoneKey(flattenSnapshots(raw, filters));
+  const total = flat.length;
+  const rows = flat.slice(offset, offset + limit);
+  res.set('X-Total-Count', String(total));
+  res.json({ rows, total, limit, offset, fabioOnly: filters.fabioOnly });
 }));
 
 // صور الشارت المحفوظة لحظة التحديد الآلي: إلحاق + قراءة
@@ -803,9 +829,17 @@ app.put('/api/settings', handle(async (req, res) => {
 }));
 
 // ---- events ----
+// قائمة خفيفة: بدون meta (meta الضخم يُجلب عند التوسيع فقط) — يخفض النقل من ميغابايتات إلى كيلوبايتات
 app.get('/api/events', handle(async (req, res) => {
   const rows = await db.events.list(req.query);
-  res.json(rows);
+  res.json(rows.map(r => ({ ...r, meta: null })));
+}));
+
+// تفصيل حدث واحد بmeta الكامل — يُستدعى عند توسيع صف في سجل الأحداث
+app.get('/api/events/:id', handle(async (req, res) => {
+  const row = await db.events.get(Number(req.params.id));
+  if (!row) return res.status(404).json({ error: 'الحدث غير موجود' });
+  res.json(row);
 }));
 
 app.post('/api/events', handle(async (req, res) => {

@@ -11,6 +11,19 @@ import Toasts from './components/Toasts';
 export default function App() {
   const screen = useStore(s => s.screen);
   const setScreen = useStore(s => s.setScreen);
+
+  // زر الرجوع/التقدم في المتصفح يبدل التبويب (الرابط مرآة للشاشة)
+  useEffect(() => {
+    const onHash = () => {
+      const h = location.hash.replace('#/', '');
+      const target = h === 'history' ? 'autoHistory' : h;
+      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings'] as const).includes(target as never) && target !== screen) {
+        setScreen(target as never);
+      }
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [screen, setScreen]);
   const chartModal = useStore(s => s.chartModal);
   const analyses = useStore(s => s.analyses);
   const cases = useStore(s => s.cases);

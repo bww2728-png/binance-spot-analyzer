@@ -25,8 +25,9 @@ export default function AutoHistory() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [shots, setShots] = useState<Map<string, AutoZoneScreenshot>>(new Map());
   const [viewer, setViewer] = useState<AutoZoneScreenshot | null>(null);
+  const [total, setTotal] = useState(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
     try {
@@ -38,24 +39,27 @@ export default function AutoHistory() {
           type: type || undefined,
           minScore: minScore !== '' ? Number(minScore) : undefined,
           fabioOnly,
-          limit: 300
-        }),
-        api.getAutoScreenshots({ symbol: sym }).catch(() => ({ screenshots: [] as AutoZoneScreenshot[] }))
+          limit: 200
+        }, signal),
+        api.getAutoScreenshots({ symbol: sym }, signal).catch(() => ({ screenshots: [] as AutoZoneScreenshot[] }))
       ]);
+      if (signal?.aborted) return;
       setRows(res.rows);
+      setTotal(res.total ?? res.rows.length);
       setShots(new Map(shotRes.screenshots.map(s => [s.zoneKey, s])));
     } catch (e) {
-      setError(String(e));
+      if (!signal?.aborted) setError(String(e));
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [symbol, timeframe, type, minScore, fabioOnly]);
 
   useEffect(() => {
-    void load();
-    // تحديث دوري: السجل آلي يتحرك مع جولات الكشف (كل 30 ثانية)
-    const t = setInterval(() => void load(), 30000);
-    return () => clearInterval(t);
+    const ac = new AbortController();
+    void load(ac.signal);
+    // تحديث دوري: السجل آلي يتحرك مع جولات الكشف (كل 60 ثانية — خفيف على الشبكة)
+    const t = setInterval(() => void load(ac.signal), 60000);
+    return () => { ac.abort(); clearInterval(t); };
   }, [load]);
 
   const stats = useMemo(() => {
@@ -112,8 +116,8 @@ export default function AutoHistory() {
         {/* ملخص */}
         <div className="flex flex-wrap gap-3 mb-4">
           <div className="card px-4 py-2.5 text-center min-w-[110px]">
-            <div className="num text-xl font-bold" style={{ color: 'var(--text-1)' }}>{stats.total}</div>
-            <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>إجمالي اللقطات</div>
+            <div className="num text-xl font-bold" style={{ color: 'var(--text-1)' }}>{total || stats.total}</div>
+            <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>مناطق مرصودة</div>
           </div>
           <div className="card px-4 py-2.5 text-center min-w-[110px]">
             <div className="num text-xl font-bold" style={{ color: 'var(--accent)' }}>{stats.symbols}</div>
