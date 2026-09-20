@@ -145,7 +145,41 @@ export async function fetchDepth(symbol, limit = 100) {
   return { bids: d.bids, asks: d.asks };
 }
 
-export async function fetchAggTrades(symbol, limit = 200) {
+export async function fetchAggTrades(symbol, limit = 1000) {
   const rows = await fetchSpotJson(`/api/v3/aggTrades?symbol=${symbol}&limit=${limit}`);
-  return rows.map(t => ({ price: Number(t.p), qty: Number(t.q) }));
+  return rows.map(t => ({ price: Number(t.p), qty: Number(t.q), isBuyerMaker: Boolean(t.m) }));
+}
+
+/* ---- فقاعات الأوامر العدوانية (فلتر فابيو بصيغة كريبتو) ---- */
+
+/** كمية اسمية تتجاوز النسبة p من الدفعة (0..1) — من البيانات نفسها لا افتراض */
+function notionalQuantile(trades, p) {
+  const sorted = trades.map(t => t.price * t.qty).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+
+/**
+ * فقاعات الأوامر: صفقات فردية ضخمة اسمياً = عدوان لاعب كبير (مبدأ "30 عقد" مُعرَّب:
+ * لا عقود في الكريبتو — العتبة بالدولار الاسمي، ومن أعلى شريحة الدفعة نفسها افتراضياً).
+ * trades = {price, qty, isBuyerMaker}; isBuyerMaker=false → شراء آجل (آمر سوق مشترٍ).
+ * حتمية وقابلة للاختبار بدون شبكة.
+ */
+export function detectBubbles(trades, { notionalPercentile = 0.999, minBubbleCount = 3 } = {}) {
+  if (!Array.isArray(trades) || trades.length < minBubbleCount) return [];
+  const threshold = notionalQuantile(trades, notionalPercentile);
+  if (!(threshold > 0)) return [];
+  const bubbles = [];
+  for (const t of trades) {
+    const notional = t.price * t.qty;
+    if (notional >= threshold) {
+      bubbles.push({
+        type: t.isBuyerMaker ? 'aggressive_sell' : 'aggressive_buy',
+        price: t.price,
+        qty: t.qty,
+        notional
+      });
+    }
+  }
+  return bubbles.sort((a, b) => b.notional - a.notional).slice(0, 5);
 }

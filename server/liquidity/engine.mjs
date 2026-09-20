@@ -4,7 +4,9 @@
 import { candidateZones, pivotStrengthFor, referenceLevels } from './structure.mjs';
 import { scoreZones } from './score.mjs';
 import { collectSignals } from './derivatives.mjs';
-import { estimateLiqClusters, fetchDepth, fetchAggTrades, detectIceberg, detectSpoof, bookImbalance } from './orderbook.mjs';
+import { estimateLiqClusters, fetchDepth, fetchAggTrades, detectIceberg, detectSpoof, bookImbalance, detectBubbles } from './orderbook.mjs';
+import { computeVolumeProfile, classifyLocation } from './volumeProfile.mjs';
+import { sessionFactor } from './session.mjs';
 
 export const ALL_TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'];
 
@@ -35,10 +37,11 @@ export async function bookSignals(symbol, gapMs = 4000) {
     return {
       book: bookImbalance(b2.bids, b2.asks),
       icebergs: detectIceberg(trades),
-      spoofs: detectSpoof(b1.asks.concat(b1.bids), b2.asks.concat(b2.bids), tradedQtyAtPrice)
+      spoofs: detectSpoof(b1.asks.concat(b1.bids), b2.asks.concat(b2.bids), tradedQtyAtPrice),
+      bubbles: detectBubbles(trades)
     };
   } catch {
-    return { book: null, icebergs: [], spoofs: [] };
+    return { book: null, icebergs: [], spoofs: [], bubbles: [] };
   }
 }
 
@@ -64,20 +67,42 @@ export async function detectSymbol({
   // إشارات الدفتر (طبقة شبكية مستقلة)
   const book = await bookSignals(symbol);
 
+  // بعد الجلسة (UTC) — مُعدِّل ندرة وليس فلتر
+  const session = sessionFactor();
+
+  // قمة/قاع اليوم السابق: الشمعة اليومية الأخيرة المغلقة (الثانية من النهاية احتياطاً للشمعة الجارية)
+  let prevDayLevels = null;
+  try {
+    const rawD = await fetchKlines(symbol, '1d', 3);
+    const csD = Array.isArray(rawD) && rawD.length >= 2 ? toCandles(rawD) : [];
+    if (csD.length >= 2) {
+      const prev = csD[csD.length - 2];
+      prevDayLevels = { high: prev.high, low: prev.low };
+    }
+  } catch { /* بلا مراسل يومي لا يعطل الكشف */ }
+
   const perTf = {};
   for (const tf of timeframes) {
     try {
       const raw = await fetchKlines(symbol, tf, 500);
       if (!Array.isArray(raw) || raw.length < 40) continue;
       const candles = toCandles(raw);
+      // الملف الحجمي + حالة المزاد (الموقع) من نفس الشموع — بلا نداءات إضافية
+      const profile = computeVolumeProfile(candles);
+      const location = classifyLocation(candles, profile);
       const cands = candidateZones(candles, {
         strength: pivotStrengthFor(tf),
-        eqhTolerancePct: calibration.eqhTolerancePct
+        eqhTolerancePct: calibration.eqhTolerancePct,
+        profile,
+        location,
+        prevDayLevels
       });
       const scored = scoreZones(cands.zones, {
         ...signals,
         ...book,
-        liqClusters
+        liqClusters,
+        location,
+        session
       }, {
         minScore: calibration.minScore + (TF_LIMITS.minScoreAdj[tf] ?? 0),
         limit: TF_LIMITS.limit[tf] ?? 8,

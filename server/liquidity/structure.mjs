@@ -115,7 +115,10 @@ export function candidateZones(candles, {
   strength = 3,
   eqhTolerancePct = 0.002,
   pivotsLimit = 10,
-  now = Date.now()
+  now = Date.now(),
+  profile = null,
+  location = null,
+  prevDayLevels = null
 } = {}) {
   const pivots = findPivots(candles, strength);
   const clusters = clusterEquals(pivots, eqhTolerancePct);
@@ -157,6 +160,93 @@ export function candidateZones(candles, {
     zone.bandPct = bandPctFor(candles, zone.price);
     merged.set(key, zone);
   }
+
+  /* ---- مناطق المزاد من الملف الحجمي ومراسل فابيو ----
+   * النوع يتبع جانب المستوى عن السعر الحالي: فوقه سيولة شرائية (BSL)، تحته بيعية (SSL).
+   * الأولوية تتبع حالة المزاد: في التوازن حواف القيمة، في عدم التوازن عقد الاستمرار خلف الكسر.
+   */
+  if (profile && candles.length) {
+    const lastClose = Number(candles[candles.length - 1].close);
+    if (Number.isFinite(lastClose) && lastClose > 0) {
+      const addZone = (price, type, meta, side = null) => {
+        if (!Number.isFinite(price) || price <= 0) return false;
+        // لا تكرار: المستوى القريب من منطقة قائمة (هيكلية أو مزاد سابقة) يُتجاهل
+        for (const v of merged.values()) {
+          if (Math.abs(v.price - price) / price <= eqhTolerancePct) return false;
+        }
+        merged.set(meta + ':' + (side ?? type) + ':' + price, {
+          type, price,
+          anchorIndex: candles.length - 1,
+          anchorTime: candles[candles.length - 1].time,
+          clusterCount: 1,
+          swept: false,
+          sweptAt: null,
+          fvgNear: false,
+          bandPct: bandPctFor(candles, price),
+          meta,
+          side
+        });
+        return true;
+      };
+
+      const state = location?.state ?? 'balance';
+      if (state === 'balance') {
+        // في التوازن: الحواف هي برك السيولة المعلّقة
+        if (profile.vah > lastClose) addZone(profile.vah, 'BSL', 'profile_edge', 'high');
+        if (profile.val < lastClose) addZone(profile.val, 'SSL', 'profile_edge', 'low');
+      } else if (state === 'imbalance_up') {
+        // خارج التوازن صعوداً: الحافة المكسورة إعادة اختبار دعماً، والعقد الأدنى فوق المسار استمرار
+        const edge = profile.vah < lastClose ? profile.vah : (profile.val < lastClose ? profile.val : null);
+        if (edge) addZone(edge, 'SSL', 'profile_edge_retest', 'low');
+        const pathLvn = (profile.lvnZones ?? [])
+          .filter(l => l.price > lastClose)
+          .sort((a, b) => a.price - b.price)
+          .slice(0, 2);
+        for (const l of pathLvn) addZone(l.price, 'BSL', 'profile_lvn', 'high');
+      } else if (state === 'imbalance_down') {
+        // خارج التوازن هبوطاً: الحافة المكسورة إعادة اختبار مقاومة، والعقد الأعلى تحت المسار استمرار
+        const retestEdge = profile.val > lastClose ? profile.val : null;
+        if (retestEdge) addZone(retestEdge, 'BSL', 'profile_edge_retest', 'high');
+        const pathLvn = (profile.lvnZones ?? [])
+          .filter(l => l.price < lastClose)
+          .sort((a, b) => b.price - a.price)
+          .slice(0, 2);
+        for (const l of pathLvn) addZone(l.price, 'SSL', 'profile_lvn', 'low');
+      }
+    }
+  }
+
+  /* ---- قمة/قاع اليوم السابق (مرسى فابيو الأول) ----
+   * المستوى المكسور لم يبقَ سيولة معلّقة — يُتجاهل على الجانب الخاطئ.
+   */
+  if (prevDayLevels && candles.length) {
+    const lastClose = Number(candles[candles.length - 1].close);
+    if (Number.isFinite(lastClose) && lastClose > 0) {
+      const addRef = (price, type, side) => {
+        if (!Number.isFinite(price) || price <= 0) return;
+        const wrongSide = (type === 'BSL' && price <= lastClose) || (type === 'SSL' && price >= lastClose);
+        if (wrongSide) return;
+        for (const v of merged.values()) {
+          if (Math.abs(v.price - price) / price <= eqhTolerancePct) return;
+        }
+        merged.set('prevday:' + side, {
+          type, price,
+          anchorIndex: candles.length - 1,
+          anchorTime: candles[candles.length - 1].time,
+          clusterCount: 1,
+          swept: false,
+          sweptAt: null,
+          fvgNear: false,
+          bandPct: bandPctFor(candles, price),
+          meta: 'prev_day',
+          side
+        });
+      };
+      if (Number.isFinite(prevDayLevels.high)) addRef(prevDayLevels.high, 'BSL', 'high');
+      if (Number.isFinite(prevDayLevels.low)) addRef(prevDayLevels.low, 'SSL', 'low');
+    }
+  }
+
   return { zones: [...merged.values()], pivots, clusters, sweeps, fvgs, computedAt: now };
 }
 
