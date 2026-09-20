@@ -8,6 +8,7 @@ import { zScore, betaSpread, cointegrationCheck, regimeGate, inventoryBiasSimple
 import { fitLogistic, featurize, learnedScore, synthFilters, walkForwardSplit, evaluateStrategy, activeDecision, stratifiedLift } from '../backtest/learn.mjs';
 import { loadKlinesPaginated } from '../backtest/engine.mjs';
 import { applyLearnedRules, discoverLiveOpportunities } from '../backtest/live.mjs';
+import { adaptiveConfig, detectLiquidityZones, findPivots, feedbackToAdjustment, scanHistory } from '../liquidity-zones/engine.mjs';
 
 test('كلي النظري: معاملات منشورة تعطي القيم المنشورة', () => {
   // p=0.6, payoff=2 → f = (0.6*2 - 0.4)/0.6 = 1.333
@@ -280,4 +281,66 @@ test('الفرش الحية: كل فرقة حية لها وقف على الجا�
     assert.ok(Number.isFinite(o.distPct) && o.distPct >= 0, 'مسافة محسوبة');
     assert.ok(o.swept !== true, 'الفرقة الحية غير المسحبة فقط');
   }
+});
+
+// ===== محرك مناطق السيولة المستقل =====
+
+const repeatedPeaks = () => {
+  const values = [];
+  for (let j = 0; j < 5; j += 1) {
+    for (let i = 0; i < 8; i += 1) values.push(80 + i * 2.5);
+    for (let i = 0; i < 8; i += 1) values.push(100 - i * 2.5);
+  }
+  return values.map((v, i) => ({
+    time: i * 60,
+    open: v,
+    high: v + 0.05,
+    low: v - 0.05,
+    close: v,
+    volume: 1,
+    index: i
+  }));
+};
+
+test('محرك السيولة: يكتشف Cluster أفقي متكرر ويفصل المرجع عن السيولة', () => {
+  const candles = repeatedPeaks();
+  const pivots = findPivots(candles);
+  const zones = detectLiquidityZones({ symbol: 'XUSDT', timeframe: '1h', candles });
+  assert.ok(pivots.length >= 5);
+  assert.ok(zones.some(z => z.kind === 'horizontal_bsl' && z.touches >= 3));
+  assert.ok(zones.some(z => z.kind === 'horizontal_ssl' && z.touches >= 3));
+  for (const zone of zones) {
+    assert.notEqual(zone.referenceLevel, zone.liquidityLevel);
+    assert.ok(['potential', 'candidate', 'confirmed', 'swept'].includes(zone.state));
+    assert.ok(zone.reasons.length >= 2);
+  }
+});
+
+test('محرك السيولة: adaptiveConfig حتمي ومتغير مع ATR', () => {
+  const candles = repeatedPeaks();
+  const a = adaptiveConfig(candles);
+  const b = adaptiveConfig(candles);
+  assert.deepEqual(a, b);
+  assert.ok(a.rightBars >= 3);
+  assert.ok(a.tolerancePct > 0);
+});
+
+test('محرك السيولة: التاريخ لا يعيد استخدام بيانات ما بعد لحظة المسح', () => {
+  const candles = repeatedPeaks();
+  const first = scanHistory({ symbol: 'XUSDT', timeframe: '1h', candles, step: 3 });
+  const shortened = scanHistory({ symbol: 'XUSDT', timeframe: '1h', candles: candles.slice(0, 48), step: 3 });
+  assert.ok(first.length >= shortened.length);
+  assert.ok(shortened.every(z => z.detectedAt <= candles[47].time));
+});
+
+test('محرك السيولة: feedback يضبط التسامح ويحفظ عدد الأمثلة', () => {
+  const adjustment = feedbackToAdjustment([
+    { verdict: 'accept' },
+    { verdict: 'reject' },
+    { verdict: 'reject' }
+  ], { tolerancePct: 0.002 });
+  assert.equal(adjustment.examples, 3);
+  assert.ok(Number.isFinite(adjustment.tolerancePct));
+  assert.equal(adjustment.accepted.length, 1);
+  assert.equal(adjustment.rejected.length, 2);
 });

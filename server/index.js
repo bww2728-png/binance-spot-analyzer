@@ -14,6 +14,13 @@ import { regimeGate } from './backtest/regime.mjs';
 import { buildPlan, checkPlan, kellyF, fractionalKelly, positionUnits } from './backtest/risk.mjs';
 import { assembleCase, DECISION_ACTORS } from './cases.mjs';
 import { groupZoneHistory } from './archive.mjs';
+import {
+  normalizeCandles,
+  detectLiquidityZones,
+  scanHistory,
+  feedbackToAdjustment,
+  adaptiveConfig
+} from './liquidity-zones/engine.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -570,6 +577,240 @@ const resolveTargets = async (limit = Number.POSITIVE_INFINITY) => {
     return true;
   }).slice(0, limit === Number.POSITIVE_INFINITY ? undefined : limit);
 };
+
+// محرك مناطق السيولة مستقل: لا يستخدم backtestState أو liveState ولا يقفل أياً منهما.
+const liquidityState = {
+  liveBusy: false,
+  liveRotation: 0,
+  livePairsDone: 0,
+  livePairsTotal: 0,
+  liveResults: [],
+  historyBusy: false,
+  historyRotation: 0,
+  historyPairsDone: 0,
+  historyPairsTotal: 0,
+  historyResults: [],
+  feedback: [],
+  adjustment: { tolerancePct: 0.002, examples: 0 },
+  updatedAt: null,
+  error: null
+};
+
+const zoneScreenshot = (zone) => {
+  const w = 960;
+  const h = 360;
+  const ref = Number(zone.referenceLevel) || 0;
+  const liq = Number(zone.liquidityLevel) || ref;
+  const top = Math.max(ref, liq);
+  const bottom = Math.min(ref, liq);
+  const pad = Math.max((top - bottom) * 4, Math.abs(ref) * 0.01, 1);
+  const y = (p) => 40 + ((top + pad - p) / (top - bottom + pad * 2)) * 250;
+  const color = String(zone.kind).includes('ssl') ? '#089981' : '#f23645';
+  const title = `${zone.symbol} ${zone.timeframe} ${zone.kind}`;
+  const escape = (v) => String(v).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <rect width="100%" height="100%" fill="#fff"/>
+    <g stroke="#e5e7eb">${Array.from({ length: 7 }, (_, i) => `<line x1="0" x2="${w}" y1="${50 + i * 42}" y2="${50 + i * 42}"/>`).join('')}</g>
+    <path d="M35 275 L150 180 L245 235 L360 125 L470 205 L610 95 L760 165 L900 80" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round"/>
+    <line x1="45" x2="920" y1="${y(ref)}" y2="${y(ref)}" stroke="#64748b" stroke-width="3" stroke-dasharray="8 8"/>
+    <line x1="45" x2="920" y1="${y(liq)}" y2="${y(liq)}" stroke="${color}" stroke-width="4" stroke-dasharray="3 7"/>
+    <text x="55" y="${y(ref) - 8}" font-family="Arial" font-size="18" fill="#475569">${escape(`Reference ${ref}`)}</text>
+    <text x="55" y="${y(liq) - 8}" font-family="Arial" font-size="18" font-weight="700" fill="${color}">${escape(`Liquidity ${liq}`)}</text>
+    <text x="55" y=" thirty" font-family="Arial" font-size="22" fill="#334155">${escape(title)}</text>
+    <text x="55" y="335" font-family="Arial" font-size="15" fill="#64748b">${escape(zone.reasons?.join(' · ') || '')}</text>
+  </svg>`.replace('y=" thirty"', 'y="28"');
+};
+
+const saveLiquidityEvent = async (type, zone, message, meta = {}) => {
+  try {
+    await db.events.create({
+      symbol: String(zone?.symbol || 'GLOBAL').toUpperCase(),
+      type,
+      message,
+      meta: JSON.stringify({ ...meta, zone }),
+      ts: Date.now()
+    });
+  } catch (e) {
+    console.error('[liquidity-zones] event save failed:', e.message);
+  }
+};
+
+const mergeLiquidityResults = (rows, incoming) => {
+  const map = new Map(rows.map(r => [`${r.symbol}|${r.timeframe}|${r.id}`, r]));
+  for (const zone of incoming) map.set(`${zone.symbol}|${zone.timeframe}|${zone.id}`, zone);
+  return [...map.values()].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+};
+
+const runLiquidityLiveRotation = async () => {
+  if (liquidityState.liveBusy) return;
+  liquidityState.liveBusy = true;
+  try {
+    const targets = await resolveTargets();
+    liquidityState.liveRotation += 1;
+    liquidityState.livePairsDone = 0;
+    liquidityState.livePairsTotal = targets.length;
+    liquidityState.error = null;
+    const rotation = liquidityState.liveRotation;
+    for (let symbolIndex = 0; symbolIndex < targets.length; symbolIndex += 1) {
+      const symbol = targets[symbolIndex];
+      for (let timeframeIndex = 0; timeframeIndex < ALL_TIMEFRAMES.length; timeframeIndex += 1) {
+        const timeframe = ALL_TIMEFRAMES[timeframeIndex];
+        try {
+          const raw = await db.binance.klines(symbol, timeframe, 500);
+          const candles = normalizeCandles(raw);
+          const zones = detectLiquidityZones({
+            symbol,
+            timeframe,
+            candles,
+            tolerancePct: liquidityState.adjustment.tolerancePct
+          }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex }));
+          liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
+        } catch { /* زوج/فريم فاشل لا يوقف المحرك المستقل */ }
+      }
+      liquidityState.livePairsDone += 1;
+      liquidityState.updatedAt = Date.now();
+      broadcast({ type: 'liquidity_zones_live_progress', symbol, rotation });
+    }
+    broadcast({ type: 'liquidity_zones_live_done', rotation });
+  } catch (e) {
+    liquidityState.error = e.message;
+  } finally {
+    liquidityState.liveBusy = false;
+  }
+};
+
+const runLiquidityHistoryRotation = async () => {
+  if (liquidityState.historyBusy) return;
+  liquidityState.historyBusy = true;
+  try {
+    const targets = await resolveTargets();
+    liquidityState.historyRotation += 1;
+    liquidityState.historyPairsDone = 0;
+    liquidityState.historyPairsTotal = targets.length;
+    for (let symbolIndex = 0; symbolIndex < targets.length; symbolIndex += 1) {
+      const symbol = targets[symbolIndex];
+      for (let timeframeIndex = 0; timeframeIndex < ALL_TIMEFRAMES.length; timeframeIndex += 1) {
+        const timeframe = ALL_TIMEFRAMES[timeframeIndex];
+        try {
+          const raw = await db.binance.klines(symbol, timeframe, 1000);
+          const candles = normalizeCandles(raw);
+          const zones = scanHistory({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200 });
+          liquidityState.historyResults = mergeLiquidityResults(liquidityState.historyResults, zones.map(zone => ({ ...zone, mode: 'history', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex })));
+        } catch { /* مستقل */ }
+      }
+      liquidityState.historyPairsDone += 1;
+      broadcast({ type: 'liquidity_zones_history_progress', symbol, rotation: liquidityState.historyRotation });
+    }
+    broadcast({ type: 'liquidity_zones_history_done', rotation: liquidityState.historyRotation });
+  } catch (e) {
+    liquidityState.error = e.message;
+  } finally {
+    liquidityState.historyBusy = false;
+  }
+};
+
+const runLiquidityLoops = async () => {
+  for (;;) {
+    void runLiquidityLiveRotation();
+    void runLiquidityHistoryRotation();
+    await new Promise(r => setTimeout(r, 5000));
+    if (!liquidityState.liveBusy && !liquidityState.historyBusy) continue;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+};
+setTimeout(() => void runLiquidityLoops(), 60_000);
+
+app.get('/api/liquidity-zones/status', handle(async (_req, res) => {
+  res.json({
+    live: {
+      busy: liquidityState.liveBusy,
+      rotation: liquidityState.liveRotation,
+      pairsDone: liquidityState.livePairsDone,
+      pairsTotal: liquidityState.livePairsTotal,
+      total: liquidityState.liveResults.length
+    },
+    history: {
+      busy: liquidityState.historyBusy,
+      rotation: liquidityState.historyRotation,
+      pairsDone: liquidityState.historyPairsDone,
+      pairsTotal: liquidityState.historyPairsTotal,
+      total: liquidityState.historyResults.length
+    },
+    adjustment: liquidityState.adjustment,
+    updatedAt: liquidityState.updatedAt,
+    error: liquidityState.error
+  });
+}));
+
+app.get('/api/liquidity-zones/live', handle(async (req, res) => {
+  let rows = liquidityState.liveResults;
+  if (req.query.symbol) rows = rows.filter(x => x.symbol === String(req.query.symbol).toUpperCase());
+  if (req.query.timeframe) rows = rows.filter(x => x.timeframe === req.query.timeframe);
+  if (req.query.kind) rows = rows.filter(x => x.kind === req.query.kind);
+  res.json({ results: rows.slice(0, 500), total: rows.length, rotation: liquidityState.liveRotation, updatedAt: liquidityState.updatedAt });
+}));
+
+app.get('/api/liquidity-zones/history', handle(async (req, res) => {
+  let rows = liquidityState.historyResults;
+  if (req.query.symbol) rows = rows.filter(x => x.symbol === String(req.query.symbol).toUpperCase());
+  if (req.query.timeframe) rows = rows.filter(x => x.timeframe === req.query.timeframe);
+  if (req.query.kind) rows = rows.filter(x => x.kind === req.query.kind);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  res.json({ results: rows.slice(offset, offset + limit), total: rows.length, rotation: liquidityState.historyRotation });
+}));
+
+app.get('/api/liquidity-zones/:id', handle(async (req, res) => {
+  const id = String(req.params.id);
+  const zone = [...liquidityState.liveResults, ...liquidityState.historyResults].find(x => x.id === id);
+  if (!zone) return res.status(404).json({ error: 'التحديد غير موجود' });
+  res.json({ zone, screenshot: zoneScreenshot(zone) });
+}));
+
+app.get('/api/liquidity-zones/:id/screenshot', handle(async (req, res) => {
+  const id = String(req.params.id);
+  const zone = [...liquidityState.liveResults, ...liquidityState.historyResults].find(x => x.id === id);
+  if (!zone) return res.status(404).json({ error: 'التحديد غير موجود' });
+  res.type('image/svg+xml').send(zoneScreenshot(zone));
+}));
+
+app.post('/api/liquidity-zones/:id/review', handle(async (req, res) => {
+  const id = String(req.params.id);
+  const zone = [...liquidityState.liveResults, ...liquidityState.historyResults].find(x => x.id === id);
+  if (!zone) return res.status(404).json({ error: 'التحديد غير موجود' });
+  const verdict = String(req.body?.verdict || '').toLowerCase();
+  if (!['accept', 'reject', 'confirm', 'clear'].includes(verdict)) return res.status(400).json({ error: 'قرار غير صالح' });
+  const feedback = { zoneId: id, symbol: zone.symbol, verdict, note: String(req.body?.note || ''), correction: req.body?.correction ?? null, ts: Date.now() };
+  liquidityState.feedback.push(feedback);
+  liquidityState.adjustment = feedbackToAdjustment(liquidityState.feedback, liquidityState.adjustment);
+  const updated = { ...zone, review: feedback, reviewVersion: (zone.reviewVersion || 0) + 1 };
+  liquidityState.liveResults = liquidityState.liveResults.map(x => x.id === id ? updated : x);
+  liquidityState.historyResults = liquidityState.historyResults.map(x => x.id === id ? updated : x);
+  await saveLiquidityEvent('liquidity_zone_reviewed', updated, `مراجعة ${verdict}`, feedback);
+  await saveLiquidityEvent('liquidity_rules_updated', updated, 'تحديث قواعد محرك السيولة', { adjustment: liquidityState.adjustment });
+  broadcast({ type: 'liquidity_zone_reviewed', zone: updated });
+  res.json({ ok: true, zone: updated, adjustment: liquidityState.adjustment });
+}));
+
+app.post('/api/liquidity-zones/run', handle(async (_req, res) => {
+  void runLiquidityLiveRotation();
+  void runLiquidityHistoryRotation();
+  res.json({ ok: true, started: true });
+}));
+
+app.post('/api/liquidity-zones/run-custom', handle(async (req, res) => {
+  const symbol = String(req.body?.symbol || '').toUpperCase().trim();
+  const timeframe = String(req.body?.timeframe || '').toLowerCase().trim();
+  const fromTs = Number(req.body?.fromTs);
+  const toTs = Number(req.body?.toTs);
+  if (!/^[A-Z0-9]{4,20}$/.test(symbol)) return res.status(400).json({ error: 'رمز غير صالح' });
+  if (!ALL_TIMEFRAMES.includes(timeframe)) return res.status(400).json({ error: 'فريم غير صالح' });
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return res.status(400).json({ error: 'مدى زمني غير صالح' });
+  const raw = await loadKlinesPaginated(db, symbol, timeframe, 5000, { startTime: fromTs, endTime: toTs, maxPages: 8 });
+  const candles = normalizeCandles(raw);
+  const results = scanHistory({ symbol, timeframe, candles, step: 1, maxZones: 1000 });
+  res.json({ ok: true, symbol, timeframe, fromTs, toTs, results });
+}));
 
 // حالة الباك تيست في الذاكرة (النمط نفسه: حالة خادم بسيطة)
 const backtestState = {

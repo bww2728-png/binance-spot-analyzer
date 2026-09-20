@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -275,6 +275,34 @@ const sbApi = {
   },
   getLiveOpportunities(signal?: AbortSignal): Promise<LiveOpportunitiesResponse> {
     return fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>);
+  },
+  getLiquidityZoneStatus(signal?: AbortSignal): Promise<LiquidityZoneEngineStatus> {
+    return fetch(`${BASE}/liquidity-zones/status`, { signal }).then(j<LiquidityZoneEngineStatus>);
+  },
+  getLiquidityZones(opts: { mode: 'live' | 'history'; symbol?: string; timeframe?: string; kind?: string; limit?: number; offset?: number } = { mode: 'live' }, signal?: AbortSignal): Promise<{ results: LiquidityDetection[]; total: number; rotation: number; updatedAt?: number }> {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    if (opts.kind) q.set('kind', opts.kind);
+    if (opts.limit != null) q.set('limit', String(opts.limit));
+    if (opts.offset != null) q.set('offset', String(opts.offset));
+    return fetch(`${BASE}/liquidity-zones/${opts.mode}?${q}`, { signal }).then(j<{ results: LiquidityDetection[]; total: number; rotation: number; updatedAt?: number }>);
+  },
+  getLiquidityZone(id: string, signal?: AbortSignal): Promise<{ zone: LiquidityDetection; screenshot: string }> {
+    return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshot: string }>);
+  },
+  reviewLiquidityZone(id: string, body: { verdict: 'accept' | 'reject' | 'confirm' | 'clear'; note?: string; correction?: unknown }): Promise<{ ok: boolean; zone: LiquidityDetection; adjustment: LiquidityZoneEngineStatus['adjustment'] }> {
+    return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    }).then(j<{ ok: boolean; zone: LiquidityDetection; adjustment: LiquidityZoneEngineStatus['adjustment'] }>);
+  },
+  runLiquidityZones(): Promise<{ ok: boolean; started: boolean }> {
+    return fetch(`${BASE}/liquidity-zones/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>);
+  },
+  runCustomLiquidityZones(opts: { symbol: string; timeframe: string; fromTs: number; toTs: number }): Promise<{ ok: boolean; results: LiquidityDetection[] }> {
+    return fetch(`${BASE}/liquidity-zones/run-custom`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts)
+    }).then(j<{ ok: boolean; results: LiquidityDetection[] }>);
   }
 };
 
@@ -394,7 +422,26 @@ const restApi = {
       body: JSON.stringify(opts)
     }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>),
   getLiveOpportunities: (signal?: AbortSignal) =>
-    fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>)
+    fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>),
+  getLiquidityZoneStatus: (signal?: AbortSignal) =>
+    fetch(`${BASE}/liquidity-zones/status`, { signal }).then(j<LiquidityZoneEngineStatus>),
+  getLiquidityZones: (opts: { mode: 'live' | 'history'; symbol?: string; timeframe?: string; kind?: string; limit?: number; offset?: number } = { mode: 'live' }, signal?: AbortSignal) => {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    if (opts.kind) q.set('kind', opts.kind);
+    if (opts.limit != null) q.set('limit', String(opts.limit));
+    if (opts.offset != null) q.set('offset', String(opts.offset));
+    return fetch(`${BASE}/liquidity-zones/${opts.mode}?${q}`, { signal }).then(j<{ results: LiquidityDetection[]; total: number; rotation: number; updatedAt?: number }>);
+  },
+  getLiquidityZone: (id: string, signal?: AbortSignal) =>
+    fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshot: string }>),
+  reviewLiquidityZone: (id: string, body: { verdict: 'accept' | 'reject' | 'confirm' | 'clear'; note?: string; correction?: unknown }) =>
+    fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; zone: LiquidityDetection; adjustment: LiquidityZoneEngineStatus['adjustment'] }>),
+  runLiquidityZones: () =>
+    fetch(`${BASE}/liquidity-zones/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>) ,
+  runCustomLiquidityZones: (opts: { symbol: string; timeframe: string; fromTs: number; toTs: number }) =>
+    fetch(`${BASE}/liquidity-zones/run-custom`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) }).then(j<{ ok: boolean; results: LiquidityDetection[] }>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

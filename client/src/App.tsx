@@ -7,6 +7,7 @@ import ChartModal from './components/ChartModal';
 import CaseLedger from './components/CaseLedger';
 import AutoHistory from './components/AutoHistory';
 import BacktestScreen from './components/BacktestScreen';
+import LiquidityZonesScreen from './components/LiquidityZonesScreen';
 import Toasts from './components/Toasts';
 
 export default function App() {
@@ -18,7 +19,7 @@ export default function App() {
     const onHash = () => {
       const h = location.hash.replace('#/', '');
       const target = h === 'history' ? 'autoHistory' : h;
-      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest'] as const).includes(target as never) && target !== screen) {
+      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones'] as const).includes(target as never) && target !== screen) {
         setScreen(target as never);
       }
     };
@@ -51,6 +52,7 @@ export default function App() {
     { id: 'cases', label: 'الأرشيف الكامل', shortLabel: 'الأرشيف', count: cases.length },
     { id: 'autoHistory', label: 'السجل الآلي', shortLabel: 'السجل', count: null },
     { id: 'backtest', label: 'الباك تيست والفرص', shortLabel: 'الباك', count: null },
+    { id: 'liquidityZones', label: 'مناطق السيولة', shortLabel: 'السيولة', count: null },
     { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
     { id: 'settings', label: 'الإعدادات والفلاتر', shortLabel: 'الإعدادات', count: null }
   ] as const;
@@ -130,6 +132,7 @@ export default function App() {
         {screen === 'cases' && <CaseLedger />}
         {screen === 'autoHistory' && <AutoHistory />}
         {screen === 'backtest' && <BacktestScreen />}
+        {screen === 'liquidityZones' && <LiquidityZonesScreen />}
         {screen === 'dashboard' && <Dashboard />}
         {screen === 'settings' && <SettingsPanel />}
       </main>

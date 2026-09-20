@@ -398,6 +398,54 @@ export interface LiveOpportunitiesResponse {
   error: string | null;
 }
 
+export type LiquidityZoneKind =
+  | 'horizontal_bsl'
+  | 'horizontal_ssl'
+  | 'trendline_bsl'
+  | 'trendline_ssl';
+
+export type LiquidityZoneState = 'potential' | 'candidate' | 'confirmed' | 'swept';
+
+export interface LiquidityDetection {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  kind: LiquidityZoneKind;
+  referenceLevel: number;
+  liquidityLevel: number;
+  retailStop: number;
+  state: LiquidityZoneState;
+  createdAt: number;
+  confirmedAt: number | null;
+  sweptAt: number | null;
+  confidence: number;
+  touches: number;
+  touchPoints: { index: number; time: number; price: number }[];
+  prominenceAtr: number;
+  atr: number;
+  distanceAtr: number;
+  reasons: string[];
+  premium: { low: number; high: number; position: number; premium: boolean; fib: { low: number; high: number; midpoint: number } } | null;
+  trendline: { points: { time: number; price: number }[]; slope: number; errorAtr: number; projected: number } | null;
+  invalidation: string;
+  lastPrice: number | null;
+  detectedAt: number;
+  source: string;
+  mode?: 'live' | 'history';
+  rotation?: number;
+  workOrder?: number;
+  review?: { verdict: string; note: string; correction?: unknown; ts: number };
+  reviewVersion?: number;
+}
+
+export interface LiquidityZoneEngineStatus {
+  live: { busy: boolean; rotation: number; pairsDone: number; pairsTotal: number; total: number };
+  history: { busy: boolean; rotation: number; pairsDone: number; pairsTotal: number; total: number };
+  adjustment: { tolerancePct: number; examples: number; updatedAt?: number };
+  updatedAt: number | null;
+  error: string | null;
+}
+
 export interface BacktestStatus {
   busy: boolean;
   continuous?: boolean;
