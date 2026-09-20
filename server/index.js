@@ -742,6 +742,7 @@ app.get('/api/zones/history', handle(async (req, res) => {
 
 // ---- السجل التاريخي للتحديد الآلي (منطق فابيو) ----
 // دمج حسب المنطقة + ترقيم على مستوى الصفوف: يخفض الحمولة من ميغابايتات إلى كيلوبايتات
+const autoSnapCache = new Map();
 app.get('/api/auto-history', handle(async (req, res) => {
   const { clampPage, flattenSnapshots, dedupeByZoneKey } = await import('./liquidity/autoHistory.mjs');
   const { limit, offset } = clampPage(req.query.limit, req.query.offset);
@@ -760,7 +761,17 @@ app.get('/api/auto-history', handle(async (req, res) => {
     const all = flattenSnapshots(raw, { ...filters, fabioOnly: false }).filter(r => r.zoneKey === String(req.query.zoneKey).slice(0, 200));
     return res.json({ rows: all, total: all.length, limit: all.length, offset: 0, fabioOnly: false });
   }
-  const raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit: 500, offset: 0 });
+  // كاش 15 ثانية للجلب الخام (مفتاح: symbol|from|to) — الافتتاح المتكرر للتبويب يصبح فورياً
+  const snapKey = `${filters.symbol ?? ''}|${filters.from ?? ''}|${filters.to ?? ''}`;
+  const cached = autoSnapCache.get(snapKey);
+  let raw;
+  if (cached && Date.now() - cached.ts < 15000) {
+    raw = cached.data;
+  } else {
+    raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit: 500, offset: 0 });
+    if (autoSnapCache.size > 8) autoSnapCache.clear();
+    autoSnapCache.set(snapKey, { data: raw, ts: Date.now() });
+  }
   const flat = dedupeByZoneKey(flattenSnapshots(raw, filters));
   const total = flat.length;
   const rows = flat.slice(offset, offset + limit);
