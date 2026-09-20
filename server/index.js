@@ -723,6 +723,59 @@ app.get('/api/zones/history', handle(async (req, res) => {
   res.json({ events: raw, groups: groupZoneHistory(raw), total: raw.length, limit, offset });
 }));
 
+// ---- السجل التاريخي للتحديد الآلي (منطق فابيو) ----
+app.get('/api/auto-history', handle(async (req, res) => {
+  const { clampPage, flattenSnapshots } = await import('./liquidity/autoHistory.mjs');
+  const { limit, offset } = clampPage(req.query.limit, req.query.offset);
+  const filters = {
+    symbol: req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined,
+    timeframe: req.query.timeframe ? String(req.query.timeframe) : undefined,
+    type: req.query.type === 'BSL' || req.query.type === 'SSL' ? req.query.type : undefined,
+    minScore: req.query.minScore != null && req.query.minScore !== '' ? Number(req.query.minScore) : undefined,
+    from: req.query.from ? Number(req.query.from) : undefined,
+    to: req.query.to ? Number(req.query.to) : undefined,
+    fabioOnly: req.query.fabioOnly === 'false' ? false : true
+  };
+  const raw = await db.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit, offset });
+  const rows = flattenSnapshots(raw, filters);
+  res.set('X-Total-Count', String(rows.length));
+  res.json({ rows, limit, offset, fabioOnly: filters.fabioOnly });
+}));
+
+// صور الشارت المحفوظة لحظة التحديد الآلي: إلحاق + قراءة
+app.post('/api/auto-history/screenshots', handle(async (req, res) => {
+  const shots = (Array.isArray(req.body?.shots) ? req.body.shots : [])
+    .slice(0, 8)
+    .filter(s => typeof s?.zoneKey === 'string' && s.zoneKey.length <= 200
+      && typeof s?.dataUrl === 'string' && s.dataUrl.startsWith('data:image/'))
+    .map(s => ({
+      zoneKey: s.zoneKey.slice(0, 200),
+      symbol: String(s.symbol ?? s.zoneKey.split('|')[0] ?? '').toUpperCase().slice(0, 32),
+      timeframe: String(s.timeframe ?? s.zoneKey.split('|')[1] ?? '').slice(0, 16),
+      type: s.type === 'SSL' ? 'SSL' : 'BSL',
+      price: Number.isFinite(Number(s.price)) ? Number(s.price) : null,
+      dataUrl: s.dataUrl.slice(0, 1_000_000),
+      capturedAt: Number(s.capturedAt) || Date.now()
+    }));
+  if (!shots.length) return res.status(400).json({ error: 'لا توجد صور صالحة' });
+  for (const shot of shots) await db.appendZoneScreenshot(shot);
+  broadcast({ type: 'auto_screenshots_saved', count: shots.length });
+  res.json({ ok: true, saved: shots.length });
+}));
+
+app.get('/api/auto-history/screenshots', handle(async (req, res) => {
+  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+  const from = req.query.from ? Number(req.query.from) : undefined;
+  const events = await db.listZoneScreenshots({ symbol, from });
+  const latest = new Map();
+  for (const e of events) {
+    const shot = (() => { try { return JSON.parse(e.meta || 'null'); } catch { return null; } })();
+    if (!shot?.zoneKey || latest.has(shot.zoneKey)) continue;
+    latest.set(shot.zoneKey, { ...shot, ts: Number(e.ts ?? 0) });
+  }
+  res.json({ screenshots: [...latest.values()] });
+}));
+
 // ---- settings ----
 const ensureSettings = async () => {
   let rows = await db.settings.get();

@@ -4,6 +4,7 @@ import type { Analysis, BarcodeScan, CaseRow, CoinShariahRow, Candle, Settings, 
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
+import { queueZoneCapture } from '../lib/autoCapture';
 import { notifyBrowser, playAlarm } from '../lib/notifications';
 import { evaluateShariah } from '../lib/shariah';
 
@@ -11,7 +12,7 @@ const API = '/api';
 
 const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
-export type Screen = 'board' | 'dashboard' | 'cases' | 'settings';
+export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory';
 export type Theme = 'dark' | 'light';
 export type ArchiveSection = 'cases' | 'zones' | 'events';
 
@@ -189,6 +190,7 @@ export const useStore = create<StoreState>((set, get) => ({
       connectSymbolsSocket((msg) => {
         if (msg.type === 'symbols_updated') void get().refreshSymbols({ silent: false });
         else if (msg.type === 'zones_changed' || msg.type === 'zones_auto_updated') void get().refreshZoneCounts();
+        else if (msg.type === 'zones_auto_updated' && msg.symbol) queueZoneCapture(String(msg.symbol));
         else if (msg.type === 'zone_near' && msg.zone && msg.symbol) {
           get().pushToast(`ⓘ ${msg.symbol}: السعر يقترب من منطقة ${msg.zone.type}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert');
         } else if (msg.type === 'zone_swept' && msg.zone && msg.symbol) {

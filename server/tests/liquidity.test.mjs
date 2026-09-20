@@ -477,3 +477,72 @@ test('scoreZones: حافة منطقة القيمة + قاع اليوم السا�
   assert.ok(zones[0].reasons.some(r => r.includes('VAL')));
   assert.ok(zones[0].reasons.some(r => r.includes('فتكة سيولة')));
 });
+
+/* ---- السجل التاريخي للتحديد الآلي (منطق فابيو) ---- */
+
+import { isFabioZone, flattenSnapshots, zoneKeyOf, clampPage, FABIO_REASON_MARKERS } from '../liquidity/autoHistory.mjs';
+
+test('isFabioZone: meta أولاً ثم الأسباب (للتاريخ القديم) — والهيكلية تُرفض', () => {
+  assert.equal(isFabioZone({ meta: 'profile_lvn', reasons: [] }), true);
+  assert.equal(isFabioZone({ meta: 'prev_day', reasons: [] }), true);
+  assert.equal(isFabioZone({ meta: undefined, reasons: ['حافة منطقة القيمة عالية (VAH) — سيولة شرائية معلقة'] }), true);
+  assert.equal(isFabioZone({ meta: undefined, reasons: ['فقاعة شراء عدوانية نحو المنطقة (81k$)'] }), true);
+  assert.equal(isFabioZone({ meta: 'structural', reasons: ['عنقود 5 نقاط متساوية'] }), false);
+  assert.equal(isFabioZone(null), false);
+  for (const m of FABIO_REASON_MARKERS) assert.equal(typeof m, 'string');
+});
+
+test('zoneKeyOf: مفتاح مستقر عبر اللقطات — سلة سعرية قريبة تعطي نفس المفتاح', () => {
+  const a = { symbol: 'BTCUSDT', timeframe: '5m', type: 'BSL', price: 76113.1011 };
+  const b = { symbol: 'BTCUSDT', timeframe: '5m', type: 'BSL', price: 76113.1012 };
+  assert.equal(zoneKeyOf(a), zoneKeyOf(b));
+  assert.notEqual(zoneKeyOf(a), zoneKeyOf({ ...a, type: 'SSL' }));
+  assert.notEqual(zoneKeyOf(a), zoneKeyOf({ ...a, timeframe: '15m' }));
+});
+
+test('flattenSnapshots: تفكيك + فلاتر العملة/الفريم/النوع/الدرجة/الفترة/فابيو', () => {
+  const t0 = 1_790_000_000_000;
+  const events = [
+    {
+      id: 2, ts: t0 + 5000, symbol: 'AGLDUSDT',
+      meta: JSON.stringify({
+        symbol: 'AGLDUSDT', ts: t0 + 5000,
+        zones: [
+          { id: 'x1', type: 'SSL', price: 0.19, timeframe: '1m', score: 97, reasons: ['فقاعة بيع عدوانية نحو المنطقة (8k$)'], anchorTime: t0, bandPct: 0.001, meta: 'profile_lvn' },
+          { id: 'x2', type: 'BSL', price: 100, timeframe: '5m', score: 80, reasons: ['عنقود 5 نقاط متساوية'], anchorTime: t0, bandPct: 0.002 }
+        ]
+      })
+    },
+    {
+      id: 1, ts: t0, symbol: 'BTCUSDT',
+      meta: JSON.stringify({
+        symbol: 'BTCUSDT', ts: t0,
+        zones: [{ id: 'y1', type: 'SSL', price: 76113, timeframe: '5m', score: 77, reasons: ['قاع اليوم السابق'], anchorTime: t0 - 86400000, bandPct: 0.001 }]
+      })
+    }
+  ];
+  const all = flattenSnapshots(events, {});
+  assert.equal(all.length, 2);
+  assert.equal(all[0].symbol, 'AGLDUSDT');
+  assert.ok(all[0].snapshotTs > all[1].snapshotTs);
+  assert.equal(all[0].zoneKey, 'AGLDUSDT|1m|SSL|0.19');
+  // فابيو فقط (الافتراضي): عنقود الهيكلية يُسقط
+  assert.equal(flattenSnapshots(events, { fabioOnly: true }).length, 2);
+  const withStructural = flattenSnapshots(events, { fabioOnly: false });
+  assert.equal(withStructural.length, 3);
+  // فلاتر
+  assert.equal(flattenSnapshots(events, { symbol: 'BTCUSDT' }).length, 1);
+  assert.equal(flattenSnapshots(events, { timeframe: '5m', fabioOnly: false }).length, 2);
+  assert.equal(flattenSnapshots(events, { type: 'BSL', fabioOnly: false }).length, 1);
+  assert.equal(flattenSnapshots(events, { minScore: 90, fabioOnly: false }).length, 1);
+  assert.equal(flattenSnapshots(events, { from: t0 + 1000 }).length, 1);
+  assert.equal(flattenSnapshots(events, { to: t0 }).length, 1);
+  // تالف يتجاهل
+  assert.equal(flattenSnapshots([{ id: 9, ts: t0, symbol: 'X', meta: '{broken' }], { fabioOnly: false }).length, 0);
+});
+
+test('clampPage: حدود الصفحة الآمنة', () => {
+  assert.deepEqual(clampPage(undefined, undefined), { limit: 200, offset: 0 });
+  assert.deepEqual(clampPage('5000', '-5'), { limit: 500, offset: 0 });
+  assert.deepEqual(clampPage('50', '120'), { limit: 50, offset: 120 });
+});

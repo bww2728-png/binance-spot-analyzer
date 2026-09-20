@@ -5,6 +5,7 @@ import Dashboard from './components/Dashboard';
 import SettingsPanel from './components/SettingsPanel';
 import ChartModal from './components/ChartModal';
 import CaseLedger from './components/CaseLedger';
+import AutoHistory from './components/AutoHistory';
 import Toasts from './components/Toasts';
 
 export default function App() {
@@ -34,6 +35,7 @@ export default function App() {
   const tabs = [
     { id: 'board', label: 'لوحة التحليل', shortLabel: 'اللوحة', count: analyses.length },
     { id: 'cases', label: 'الأرشيف الكامل', shortLabel: 'الأرشيف', count: cases.length },
+    { id: 'autoHistory', label: 'السجل الآلي', shortLabel: 'السجل', count: null },
     { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
     { id: 'settings', label: 'الإعدادات والفلاتر', shortLabel: 'الإعدادات', count: null }
   ] as const;
@@ -111,6 +113,7 @@ export default function App() {
       <main className="flex-1 overflow-auto">
         {screen === 'board' && <AnalysisBoard />}
         {screen === 'cases' && <CaseLedger />}
+        {screen === 'autoHistory' && <AutoHistory />}
         {screen === 'dashboard' && <Dashboard />}
         {screen === 'settings' && <SettingsPanel />}
       </main>

@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -227,6 +227,32 @@ const sbApi = {
     const events = data as EventLog[];
     const { groupZoneHistory } = await import('./zonesHistory');
     return { events, groups: groupZoneHistory(events), total: events.length, limit: opts.limit ?? 2000, offset: opts.offset ?? 0 };
+  },
+  // السجل التاريخي للتحديد الآلي — يمر عبر الخادم دائماً (التفكيك والفلاتر منطق خادم)
+  getAutoHistory(opts: { symbol?: string; timeframe?: string; type?: 'BSL' | 'SSL'; minScore?: number; from?: number; to?: number; fabioOnly?: boolean; limit?: number; offset?: number } = {}): Promise<AutoHistoryResponse> {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    if (opts.type) q.set('type', opts.type);
+    if (opts.minScore != null) q.set('minScore', String(opts.minScore));
+    if (opts.from != null) q.set('from', String(opts.from));
+    if (opts.to != null) q.set('to', String(opts.to));
+    if (opts.fabioOnly === false) q.set('fabioOnly', 'false');
+    if (opts.limit != null) q.set('limit', String(opts.limit));
+    if (opts.offset != null) q.set('offset', String(opts.offset));
+    return fetch(`${BASE}/auto-history?${q}`).then(j<AutoHistoryResponse>);
+  },
+  getAutoScreenshots(opts: { symbol?: string; from?: number } = {}): Promise<{ screenshots: AutoZoneScreenshot[] }> {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.from != null) q.set('from', String(opts.from));
+    return fetch(`${BASE}/auto-history/screenshots?${q}`).then(j<{ screenshots: AutoZoneScreenshot[] }>);
+  },
+  postAutoScreenshots(shots: AutoZoneScreenshot[]): Promise<{ ok: boolean; saved: number }> {
+    return fetch(`${BASE}/auto-history/screenshots`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shots })
+    }).then(j<{ ok: boolean; saved: number }>);
   }
 };
 
@@ -302,7 +328,32 @@ const restApi = {
     if (opts.limit) q.set('limit', String(opts.limit));
     if (opts.offset) q.set('offset', String(opts.offset));
     return fetch(`${BASE}/zones/history?${q}`).then(j<{ events: EventLog[]; groups: ZoneHistoryGroup[]; total: number; limit: number; offset: number }>);
-  }
+  },
+  // السجل التاريخي للتحديد الآلي — التفكيك والفلاتر منطق خادم
+  getAutoHistory: (opts: { symbol?: string; timeframe?: string; type?: 'BSL' | 'SSL'; minScore?: number; from?: number; to?: number; fabioOnly?: boolean; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    if (opts.type) q.set('type', opts.type);
+    if (opts.minScore != null) q.set('minScore', String(opts.minScore));
+    if (opts.from != null) q.set('from', String(opts.from));
+    if (opts.to != null) q.set('to', String(opts.to));
+    if (opts.fabioOnly === false) q.set('fabioOnly', 'false');
+    if (opts.limit != null) q.set('limit', String(opts.limit));
+    if (opts.offset != null) q.set('offset', String(opts.offset));
+    return fetch(`${BASE}/auto-history?${q}`).then(j<AutoHistoryResponse>);
+  },
+  getAutoScreenshots: (opts: { symbol?: string; from?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.symbol) q.set('symbol', opts.symbol);
+    if (opts.from != null) q.set('from', String(opts.from));
+    return fetch(`${BASE}/auto-history/screenshots?${q}`).then(j<{ screenshots: AutoZoneScreenshot[] }>);
+  },
+  postAutoScreenshots: (shots: AutoZoneScreenshot[]) =>
+    fetch(`${BASE}/auto-history/screenshots`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shots })
+    }).then(j<{ ok: boolean; saved: number }>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

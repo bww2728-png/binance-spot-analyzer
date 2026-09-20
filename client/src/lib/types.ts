@@ -230,3 +230,48 @@ export interface CaseRow {
   decided_at: number;
   payload: CasePayload;
 }
+
+/* ================= السجل التاريخي للتحديد الآلي ================= */
+
+/** صف مسطح من لقطة الكشف الآلي — يخدم جدول السجل الآلي */
+export interface AutoHistoryRow {
+  zoneKey: string;
+  snapshotTs: number;
+  computedAt: number;
+  eventId: number;
+  symbol: string;
+  id: string;
+  type: 'BSL' | 'SSL';
+  price: number;
+  timeframe: string;
+  score: number | null;
+  reasons: string[];
+  clusterCount: number | null;
+  swept: boolean;
+  sweptAt: number | null;
+  bandPct: number | null;
+  anchorTime: number | null;
+  feedback: 'confirm' | 'reject' | null;
+  note: string;
+  meta: string;
+  side: string | null;
+}
+
+export interface AutoHistoryResponse {
+  rows: AutoHistoryRow[];
+  limit: number;
+  offset: number;
+  fabioOnly: boolean;
+}
+
+/** صورة شارت محفوظة لحظة التحديد الآلي — مرتبطة بمنطقة عبر zoneKey (ts يُضاف عند القراءة) */
+export interface AutoZoneScreenshot {
+  zoneKey: string;
+  symbol: string;
+  timeframe: string;
+  type: 'BSL' | 'SSL';
+  price: number | null;
+  dataUrl: string;
+  capturedAt: number;
+  ts?: number;
+}

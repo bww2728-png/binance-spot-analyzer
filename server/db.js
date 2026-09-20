@@ -184,6 +184,40 @@ const db = {
       const events = await rest('/events_log?type=eq.zone_calibration&select=*&order=ts.desc&limit=1');
       return events.length ? events[0] : null;
     },
+    /** السجل العميق للقطات الآلية: صفحات تنازلية بلا سقف الـ60 (للتبويب التاريخي) */
+    autoHistory: async ({ symbol, from, to, limit, offset } = {}) => {
+      const q = new URLSearchParams({
+        type: 'eq.auto_zones_snapshot', select: '*', order: 'ts.desc,id.desc',
+        limit: String(Math.min(Number(limit) || 200, 500))
+      });
+      if (symbol) q.set('symbol', `eq.${String(symbol).toUpperCase()}`);
+      if (from) q.set('ts', `gte.${Number(from)}`);
+      if (to) q.set('ts', `lte.${Number(to)}`);
+      if (offset) q.set('offset', String(Number(offset)));
+      return rest(`/events_log?${q}`);
+    },
+    /** صورة شارت محفوظة لحظة التحديد الآلي — حدث إلحاقي (نفس نمط case_images) */
+    appendZoneScreenshot: (shot) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: String(shot.symbol).toUpperCase(),
+        type: 'auto_zone_screenshot',
+        message: `صورة شارت لحظة التحديد: ${shot.zoneKey}`,
+        meta: JSON.stringify(shot),
+        ts: Date.now()
+      },
+      prefer: 'return=minimal'
+    }),
+    /** أحدث صورة لكل مفتاح منطقة خلال فترة */
+    listZoneScreenshots: async ({ symbol, from, limit } = {}) => {
+      const q = new URLSearchParams({
+        type: 'eq.auto_zone_screenshot', select: '*', order: 'ts.desc,id.desc',
+        limit: String(Math.min(Number(limit) || 1000, 2000))
+      });
+      if (symbol) q.set('symbol', `eq.${String(symbol).toUpperCase()}`);
+      if (from) q.set('ts', `gte.${Number(from)}`);
+      return rest(`/events_log?${q}`);
+    },
     appendCalibration: (cal) => rest('/events_log?select=*', {
       method: 'POST',
       body: {
