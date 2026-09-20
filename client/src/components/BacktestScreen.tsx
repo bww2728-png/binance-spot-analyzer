@@ -302,6 +302,40 @@ export default function BacktestScreen() {
               </div>
             )}
 
+
+            {/* نتائج الأزواج: بترتيب العمل — أول عملة تم العمل عليها أولاً */}
+            {results.results?.length > 0 && (
+              <div className="rounded-xl px-4 py-3" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
+                <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>
+                  نتائج الأزواج (بترتيب العمل — أول عملة أولاً){results.total != null ? ` — ${fmtNum(results.total)} زوج إجمالاً` : ''}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
+                  {results.results.map(pair => {
+                    const tr = pair.trades ?? [];
+                    const dec = tr.filter(t => t.win === 0 || t.win === 1);
+                    const wins = dec.filter(t => t.win === 1).length;
+                    const wr = dec.length ? wins / dec.length : null;
+                    return (
+                      <div key={`${pair.symbol}-${pair.timeframe}`} className="flex items-center justify-between gap-2 rounded-md px-2 py-1 text-[10px]" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+                        <span className="num font-bold" style={{ color: 'var(--text-1)' }}>{pair.symbol}</span>
+                        <span className="num" style={{ color: 'var(--text-3)' }}>{pair.timeframe}</span>
+                        <span className="num" style={{ color: 'var(--text-2)' }}>{fmtNum(dec.length)} صفقة</span>
+                        <span className="num" style={{ color: wr == null ? 'var(--text-3)' : wr >= 0.7 ? 'var(--accent)' : 'var(--text-2)' }}>{wr == null ? '—' : pct(wr)}</span>
+                        {pair.reason && <span title={pair.reason} style={{ color: 'var(--warn)' }}>!</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="text-[13px] px-4 py-10 rounded-xl text-center" style={{ background: 'var(--surface-1)', border: '1px dashed var(--border-1)', color: 'var(--text-3)' }}>
+            {results?.message ?? 'الحلقة المستمرة تعمل الآن — بانتظار اكتمال أول دورة (النتائج تظهر فور اكتمالها)'}
+          </div>
+        )}
+
+        {/* الجولة المخصصة + الفرص الحية — دائماً ظاهرة (محركات مستقلة لا تتوقف على اكتمال الدورة) */}
             {/* الجولة المخصصة: عملة محددة + فريم + مدى الاختبار (من — إلى) */}
             <div className="rounded-xl px-4 py-3" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
               <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>جولة مخصصة (عملة + فريم + مدى الاختبار)</div>
@@ -405,12 +439,6 @@ export default function BacktestScreen() {
                 </div>
               )}
             </div>
-          </>
-        ) : (
-          <div className="text-[13px] px-4 py-10 rounded-xl text-center" style={{ background: 'var(--surface-1)', border: '1px dashed var(--border-1)', color: 'var(--text-3)' }}>
-            {results?.message ?? 'لم تُجرَ جولة بعد — اضغط "إطلاق الجولة" لبدء الباك تيست على المستهدفات'}
-          </div>
-        )}
       </div>
     </div>
   );

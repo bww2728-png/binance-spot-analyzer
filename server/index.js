@@ -756,7 +756,8 @@ const runLiveRotation = async () => {
   if (liveState.busy) return;
   liveState.busy = true;
   const liveOut = new Map(); // (رمز|فريم) -> فرق العملة — البناء يُجري تلفزيياً
-  const rebuild = () => [...liveOut.values()].flat().sort((a, b) => (b.ts || 0) - (a.ts || 0) || a.distPct - b.distPct);
+  // الترتيب: بترتيب العمل — أول عملة تم العمل عليها أولاً (Map يحترم ترتيب الإلحاق = ترتيب التنفيذ)
+  const rebuild = () => [...liveOut.values()].flat();
   try {
     const targets = await resolveTargets();
     if (!targets.length) { liveState.error = 'لا مستهدفات (لاحلال/لا غير-باركود)'; return; }
