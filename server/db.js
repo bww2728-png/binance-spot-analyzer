@@ -45,6 +45,34 @@ async function fetchBinanceJson(path, timeoutMs = 30000) {
   throw lastErr ?? new Error('all Binance hosts failed');
 }
 
+// سجل القرارات على events_log — تحويل شكل الحدث إلى صف القرار القياسي
+const toCardRow = (row) => ({
+  id: row.id,
+  symbol: row.symbol,
+  actor: String(row.type || '').replace(/^decision_/, ''),
+  decided_at: Number(row.ts),
+  payload: row.meta ? JSON.parse(row.meta) : {}
+});
+
+const toImageEvent = (row) => ({
+  symbol: String(row.symbol || 'GLOBAL').toUpperCase(),
+  type: 'decision_image',
+  message: `#${row.case_id}`,
+  meta: JSON.stringify({ tf: row.tf ?? '', data_url: row.data_url ?? '', captured_at: Number(row.captured_at) || Date.now() }),
+  ts: Number(row.captured_at) || Date.now()
+});
+
+const toImageRow = (row) => {
+  const m = row.meta ? JSON.parse(row.meta) : {};
+  return {
+    id: row.id,
+    case_id: Number(String(row.message || '').replace(/^#/, '')) || 0,
+    tf: m.tf ?? '',
+    data_url: m.data_url ?? '',
+    captured_at: Number(m.captured_at ?? row.ts)
+  };
+};
+
 const db = {
   binance: {
     exchangeInfo: () => fetchBinanceJson('/api/v3/exchangeInfo', 30000),
@@ -345,19 +373,37 @@ const db = {
     create: (row) => rest('/settings?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
     update: (row) => rest('/settings?id=eq.1&select=*', { method: 'PATCH', body: row, prefer: 'return=representation' })
   },
+  // سجل القرارات على events_log الإلحاقي (نفس معمارية باقي الوظائف — صفر تغيير مخطط):
+  // - قرار واحد = حدث type=decision_<actor> وmeta=payload JSON
+  // - صورة قرار = حدث type=decision_image وmessage='#<caseId>' للربط الدقيق
   cases: {
-    save: (row) => rest('/cases?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
+    save: (row) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: String(row.symbol).toUpperCase(),
+        type: `decision_${row.actor}`,
+        message: String(row.actor),
+        meta: row.payload,
+        ts: Number(row.decided_at) || Date.now()
+      },
+      prefer: 'return=representation'
+    }),
     list: async ({ symbol, limit } = {}) => {
-      const q = new URLSearchParams({ select: '*', order: 'decided_at.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
+      const q = new URLSearchParams({ type: 'like.decision_*', select: '*', order: 'ts.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
-      return rest(`/cases?${q}`);
+      const rows = await rest(`/events_log?${q}`);
+      return rows.map(toCardRow);
     },
     get: async (id) => {
-      const rows = await rest(`/cases?id=eq.${Number(id)}&select=*`);
-      return rows.length ? rows[0] : null;
+      const rows = await rest(`/events_log?id=eq.${Number(id)}&select=*&limit=1`);
+      return rows.length ? toCardRow(rows[0]) : null;
     },
-    imagesSave: (rows) => rest('/case_images?select=*', { method: 'POST', body: rows, prefer: 'return=representation' }),
-    imagesList: (caseId) => rest(`/case_images?case_id=eq.${Number(caseId)}&select=*&order=captured_at.asc,id.asc`)
+    imagesSave: (rows) => rest('/events_log', { method: 'POST', body: rows.map(toImageEvent), prefer: 'return=minimal' }),
+    imagesList: async (caseId) => {
+      const q = new URLSearchParams({ type: 'eq.decision_image', message: `eq.%23${Number(caseId)}`, select: '*', order: 'ts.asc,id.asc' });
+      const rows = await rest(`/events_log?${q}`);
+      return rows.map(toImageRow);
+    }
   },
   events: {
     list: ({ symbol, from, limit, offset, type }) => {

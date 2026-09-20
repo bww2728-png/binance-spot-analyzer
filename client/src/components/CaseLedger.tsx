@@ -267,6 +267,7 @@ function CasesSection() {
   const refresh = useStore(s => s.refreshCases);
   const setCaseFilter = useStore(s => s.setCaseFilter);
   const casesLoaded = useStore(s => s.casesLoaded);
+  const casesError = useStore(s => s.casesError);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
 
@@ -307,6 +308,13 @@ function CasesSection() {
           <button className="btn !py-1.5 !px-3 text-[11px]" onClick={exportJson}>تصدير JSON</button>
         </div>
       </div>
+
+      {casesError && (
+        <div className="badge badge-warn flex items-center gap-2">
+          تعذر جلب القرارات: {casesError}
+          <button className="underline cursor-pointer" onClick={() => void refresh()}>إعادة المحاولة</button>
+        </div>
+      )}
 
       {!casesLoaded ? (
         <SkeletonRow height={64} />

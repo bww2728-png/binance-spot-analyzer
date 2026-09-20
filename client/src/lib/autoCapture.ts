@@ -1,5 +1,5 @@
 /** الالتقاط التلقائي لصور الشارت لحظة التحديد الآلي.
- * عند بث zones_auto_updated: تُجلب المناطق الجديدة، تُرسم شموع الفريم في Chart خارج الشاشة
+ * عند بث zones_auto_updated: تُجلب المناطق الجديدة (أي منطقة — بخنق)
  * مع خط المنطقة ونطاقها، تُلتقط PNG وتُخزَّن عبر /api/auto-history/screenshots.
  * كل الفشل صامت — الالتقاط ترفيهي ولا يجب أن يكسر المراقبة.
  */
@@ -29,21 +29,18 @@ const HOLLOW_CANDLES = {
   wickDownColor: '#f23645'
 } as const;
 
-/** ماركرات منطق المزاد — نفس قائمة الخادم (liquidity/autoHistory.mjs) */
-const FABIO_MARKERS = [
-  'منطقة القيمة', 'عقدة حجم منخفض', 'اليوم السابق',
-  'ندرة حادة', 'فتكة سيولة', 'إعادة اختبار', 'فقاعة'
-];
-
-const isFabio = (z: LiquidityZone) =>
-  ['profile_edge', 'profile_edge_retest', 'profile_lvn', 'prev_day'].includes((z as { meta?: string }).meta ?? '')
-  || (z.reasons ?? []).some(r => FABIO_MARKERS.some(m => r.includes(m)));
-
 /** خنق: لقطة واحدة لكل رمز كل 8 دقائق + منع التزامن */
 const lastCapture = new Map<string, number>();
 const inFlight = new Set<string>();
 const MIN_INTERVAL_MS = 8 * 60_000;
-const MAX_ZONES_PER_ROUND = 2;
+const MAX_ZONES_PER_ROUND = 3;
+
+const capturedAt = new Map<string, number>();
+const REPEAT_MS = 4 * 60 * 60_000;
+
+/** مفتاح المنطقة — نفس معادلة قيمة zoneKey المخزّنة */
+const zoneKeyOf = (symbol: string, z: LiquidityZone) =>
+  `${symbol}|${z.timeframe}|${z.type}|${Number(z.price.toPrecision(4))}`;
 
 /** نقطة التعليق من بث useStore — تُستدعى عند zones_auto_updated */
 export function queueZoneCapture(symbol: string) {
@@ -57,23 +54,29 @@ export function queueZoneCapture(symbol: string) {
 
 async function captureZones(symbol: string) {
   const { zones } = await api.getZones(symbol);
-  const fabio = zones.filter(isFabio).slice(0, MAX_ZONES_PER_ROUND);
-  if (!fabio.length) return;
+  // أحدث المناطق أولاً (الترتيب صاعد) — أي منطقة وليس مناطق محددة
+  const now = Date.now();
+  const targets = zones.slice(-MAX_ZONES_PER_ROUND).reverse()
+    .filter(z => now - (capturedAt.get(zoneKeyOf(symbol, z)) ?? 0) > REPEAT_MS);
+  if (!targets.length) return;
   const shots: AutoZoneScreenshot[] = [];
-  for (const z of fabio) {
+  for (const z of targets) {
     const dataUrl = await drawZoneChart(symbol, z);
     if (!dataUrl) continue;
     shots.push({
-      zoneKey: `${symbol}|${z.timeframe}|${z.type}|${Number(z.price.toPrecision(4))}`,
+      zoneKey: zoneKeyOf(symbol, z),
       symbol,
       timeframe: z.timeframe,
       type: z.type,
       price: z.price,
       dataUrl,
-      capturedAt: Date.now()
+      capturedAt: now
     });
   }
-  if (shots.length) void api.postAutoScreenshots(shots).catch(() => { /* صامت */ });
+  if (shots.length) {
+    for (const s of shots) capturedAt.set(s.zoneKey, now);
+    void api.postAutoScreenshots(shots).catch(() => { /* صامت */ });
+  }
 }
 
 /** يرسم شارت الشموع للفريم مع خط المنطقة ونطاقها خارج الشاشة ويلتقطه dataURL */

@@ -46,6 +46,7 @@ interface StoreState {
   lastSync: number;
   theme: Theme;
   cases: CaseRow[];
+  casesError: string | null;
   casesLoaded: boolean;
   caseFilter: string | null;
   archiveSection: ArchiveSection;
@@ -130,6 +131,7 @@ export const useStore = create<StoreState>((set, get) => ({
   theme: initialTheme(),
   cases: [],
   casesLoaded: false,
+  casesError: null,
   caseFilter: null,
   archiveSection: 'cases',
 
@@ -296,11 +298,14 @@ export const useStore = create<StoreState>((set, get) => ({
   setArchiveSection: (s) => set({ archiveSection: s }),
 
   refreshCases: async () => {
+    const symbol = get().caseFilter ?? undefined;
     try {
-      const symbol = get().caseFilter ?? undefined;
       const rows = await api.getCases(symbol);
-      set({ cases: rows, casesLoaded: true });
-    } catch { /* لا يُفشل التنقل */ }
+      set({ cases: rows, casesLoaded: true, casesError: null });
+    } catch (e) {
+      // فشل واضح بدل skeleton لا نهائي — لا يُفشل التنقل
+      set({ cases: [], casesLoaded: true, casesError: String(e) });
+    }
   },
 
   addAnalysis: async (symbol, extras) => {

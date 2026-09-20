@@ -690,14 +690,14 @@ const periodicResearch = async () => {
 app.get('/api/cases', handle(async (req, res) => {
   const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
   const rows = await db.cases.list({ symbol });
-  res.json(rows.map(r => ({ ...r, payload: r.payload ? JSON.parse(r.payload) : {} })));
+  res.json(rows);
 }));
 
 app.get('/api/cases/:id', handle(async (req, res) => {
   const row = await db.cases.get(req.params.id);
   if (!row) return res.status(404).json({ error: 'القرار غير موجود' });
   const images = await db.cases.imagesList(row.id);
-  res.json({ ...row, payload: row.payload ? JSON.parse(row.payload) : {}, images });
+  res.json({ ...row, images });
 }));
 
 app.post('/api/cases', handle(async (req, res) => {
@@ -719,6 +719,7 @@ app.post('/api/cases', handle(async (req, res) => {
         .filter(s => typeof s?.dataUrl === 'string' && s.dataUrl.startsWith('data:image/'))
         .map(s => ({
           case_id: id,
+          symbol,
           tf: String(s.tf ?? '').slice(0, 16),
           data_url: s.dataUrl.slice(0, 1_000_000),
           captured_at: decidedAt
