@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import type { BacktestResults, BacktestStatus, BacktestTrade } from '../lib/types';
+import type { BacktestCustomRun, BacktestFrameStat, BacktestResults, BacktestStatus, BacktestTrade } from '../lib/types';
 import Skeleton from './ui/Skeleton';
 
 /* واجهة الباك تيست والفرص الحية — walk-forward + حلقة تعلم مستمرة + أدوات المخاطر (عرض فقط)
@@ -22,6 +22,39 @@ function fmtNum(n: number | null | undefined, digits = 2) {
   return n == null ? '—' : n.toLocaleString('en', { maximumFractionDigits: digits });
 }
 
+function CustomRunCard({ run }: { run: BacktestCustomRun }) {
+  const pair = run.result;
+  const all = pair.trades ?? [];
+  const decided = all.filter(t => t.win === 0 || t.win === 1);
+  const wins = decided.filter(t => t.win === 1).length;
+  return (
+    <div className="mt-2 rounded-lg px-3 py-2.5" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-bold num" style={{ color: 'var(--text-1)' }}>{run.symbol}</span>
+          <span className="text-[11px] num" style={{ color: 'var(--text-3)' }}>{run.timeframe}</span>
+          {pair.reason && <span className="badge-warn text-[10px] px-1.5 py-0.5 rounded-full">{pair.reason}</span>}
+        </div>
+        <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+          {fmtNum(decided.length)} صفقة محسومة — دقة {pct(decided.length ? wins / decided.length : null)}
+        </span>
+      </div>
+      {all.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5 mt-2">
+          {all.slice(-10).reverse().map((t, i) => (
+            <div key={i} className="rounded-md px-2 py-1 text-[10px]" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
+              <span className={`num font-bold ${t.win === 1 ? 'badge-up' : t.win === 0 ? 'badge-warn' : ''}`} style={{ color: t.win === 1 ? 'var(--up)' : t.win === 0 ? 'var(--warn)' : 'var(--text-2)' }}>
+                {t.win === 1 ? 'هدف' : t.win === 0 ? 'وقف' : 'قيد المحاكاة'}
+              </span>
+              {' · '}دخول {fmtNum(t.entry, 6)} · وقف {fmtNum(t.protectedPrice, 6)} · درجة {fmtNum(t.score, 0)} · {fmtTime(t.ts)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function BacktestScreen() {
   const [status, setStatus] = useState<BacktestStatus | null>(null);
   const [results, setResults] = useState<BacktestResults | null>(null);
@@ -30,7 +63,14 @@ export default function BacktestScreen() {
   const [error, setError] = useState<string | null>(null);
   const [coin, setCoin] = useState('');
   const [frame, setFrame] = useState('');
+  const [customSymbol, setCustomSymbol] = useState('');
+  const [customFrame, setCustomFrame] = useState('1h');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [customLaunching, setCustomLaunching] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const RUN_FRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'];
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -77,8 +117,28 @@ export default function BacktestScreen() {
     }
   }, [load]);
 
+  // جولة مخصصة: عملة محددة + فريمها + مدى الاختبار (من — إلى)
+  const runCustom = useCallback(async () => {
+    setCustomLaunching(true);
+    try {
+      await api.runCustomBacktest({
+        symbol: customSymbol.trim().toUpperCase(),
+        timeframe: customFrame,
+        fromTs: customFrom ? new Date(customFrom).getTime() : undefined,
+        toTs: customTo ? new Date(customTo).getTime() : undefined
+      });
+      void load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCustomLaunching(false);
+    }
+  }, [customSymbol, customFrame, customFrom, customTo, load]);
+
   // محسوب: ملخص + تقسيم الفريمات + الفرص الحية (آخر صفقة غير محسومة لكل منطقة)
   const summary = useMemo(() => {
+    // التلخيص محسوب على الخادم فوق النتائج كاملة (الصفحات ثقيلة — الأداء أولاً)
+    if (results?.summary) return results.summary;
     const all = (results?.results ?? []).flatMap(r => r.trades ?? []);
     const decided = all.filter(t => t.win === 0 || t.win === 1);
     const wins = decided.filter(t => t.win === 1).length;
@@ -89,11 +149,15 @@ export default function BacktestScreen() {
       avgRR: decided.length && decided.filter(t => Number.isFinite(t.rr)).length
         ? decided.reduce((a, t) => a + (Number.isFinite(t.rr) ? t.rr : 0), 0) / decided.filter(t => Number.isFinite(t.rr)).length
         : null,
-      avgBars: decided.length ? decided.reduce((a, t) => a + (t.bars || 0), 0) / decided.length : null
+      avgBars: decided.length ? decided.reduce((a, t) => a + (t.bars || 0), 0) / decided.length : null,
+      perFrame: [] as BacktestFrameStat[]
     };
   }, [results]);
 
   const perFrame = useMemo(() => {
+    if (results?.summary?.perFrame?.length) {
+      return results.summary.perFrame.map(s => [s.timeframe, { decided: s.decided, wins: s.wins }] as const);
+    }
     const map = new Map<string, { decided: number; wins: number }>();
     for (const pair of results?.results ?? []) {
       for (const t of pair.trades ?? []) {
@@ -134,14 +198,17 @@ export default function BacktestScreen() {
               walk-forward على الحلال + غير الباركود × كل الفريمات — تعلم مستمرة بهدف نجاح ≥ 70% — عرض فقط
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="badge-accent px-3 py-1.5 rounded-lg text-[12px]">
+              حلولة مستمرة آلية{status?.cycle != null && status.cycle > 0 ? ` — دورة ${status.cycle}` : ''}
+            </span>
             <button
               onClick={() => void launch()}
               disabled={launching || status?.busy}
               className="px-4 py-2 rounded-lg text-[13px] font-bold"
               style={{ background: 'var(--accent)', color: '#fff', opacity: launching || status?.busy ? 0.5 : 1 }}
             >
-              {status?.busy ? 'الجولة قيد التنفيذ...' : 'إطلاق الجولة'}
+              {status?.busy ? 'الدورة قيد التنفيذ...' : 'إطلاق دورة الآن'}
             </button>
           </div>
         </div>
@@ -149,7 +216,7 @@ export default function BacktestScreen() {
         {/* شريط حالة الجولة */}
         {status?.busy && (
           <div className="badge-accent px-4 py-2.5 rounded-lg text-[12px]">
-            الجولة قيد التنفيذ: {status.pairsDone}/{status.pairsTotal} زوج — المستهدفات: {status.targetsCount} (الحلال + غير الباركود)
+            الدورة قيد التنفيذ: {status.pairsDone}/{status.pairsTotal} عملة — كل فريمات الرمز × كل فريمات الرمز — المستهدفات: {status.targetsCount} (الحلال + غير الباركود) — الدورة التالية تبدأ فور الاكتمال
           </div>
         )}
         {status?.error && (
@@ -217,6 +284,40 @@ export default function BacktestScreen() {
               </div>
             )}
 
+            {/* الجولة المخصصة: عملة محددة + فريم + مدى الاختبار (من — إلى) */}
+            <div className="rounded-xl px-4 py-3" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
+              <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>جولة مخصصة (عملة + فريم + مدى الاختبار)</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={customSymbol}
+                  onChange={e => setCustomSymbol(e.target.value)}
+                  placeholder="رمز العملة (مثال: BTCUSDT)"
+                  className="px-3 py-1.5 rounded-lg text-[12px] num w-44"
+                  style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+                />
+                <select
+                  value={customFrame}
+                  onChange={e => setCustomFrame(e.target.value)}
+                  className="px-3 py-1.5 rounded-lg text-[12px]"
+                  style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+                >
+                  {RUN_FRAMES.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+                <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} className="px-3 py-1.5 rounded-lg text-[12px] num" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }} />
+                <span style={{ color: 'var(--text-3)' }}>—</span>
+                <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} className="px-3 py-1.5 rounded-lg text-[12px] num" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }} />
+                <button
+                  onClick={() => void runCustom()}
+                  disabled={customLaunching || status?.customBusy || !customSymbol.trim()}
+                  className="px-4 py-1.5 rounded-lg text-[12px] font-bold"
+                  style={{ background: 'var(--accent)', color: '#fff', opacity: customLaunching || status?.customBusy || !customSymbol.trim() ? 0.5 : 1 }}
+                >
+                  {status?.customBusy || customLaunching ? 'قيد التنفيذ...' : 'إطلاق الجولة المخصصة'}
+                </button>
+              </div>
+              {results?.custom && <CustomRunCard run={results.custom} />}
+            </div>
+
             {/* الفرص الحية */}
             <div>
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -236,9 +337,7 @@ export default function BacktestScreen() {
                     style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
                   >
                     <option value="">كل الفريمات</option>
-                    <option value="1h">1h</option>
-                    <option value="4h">4h</option>
-                    <option value="1d">1d</option>
+                    {RUN_FRAMES.map(f => <option key={f} value={f}>{f}</option>)}
                   </select>
                 </div>
               </div>

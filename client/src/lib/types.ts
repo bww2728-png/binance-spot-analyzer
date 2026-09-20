@@ -322,22 +322,54 @@ export interface BacktestLearn {
   winRate?: number;
 }
 
+export interface BacktestFrameStat {
+  timeframe: string;
+  decided: number;
+  wins: number;
+}
+
+export interface BacktestSummary {
+  total: number;
+  decided: number;
+  wins: number;
+  winRate: number | null;
+  avgRR: number | null;
+  avgBars: number | null;
+  perFrame: BacktestFrameStat[];
+}
+
+export interface BacktestCustomRun {
+  symbol: string;
+  timeframe: string;
+  fromTs: number | null;
+  toTs: number | null;
+  at: number;
+  result: { symbol: string; timeframe: string; trades: BacktestTrade[]; reason?: string };
+}
+
 export interface BacktestResults {
   exists: boolean;
   message?: string;
+  cycle?: number;
   startedAt?: number;
   lastRunAt?: number;
+  total?: number;
   results: BacktestPair[];
+  summary?: BacktestSummary;
   learn: BacktestLearn | null;
+  custom?: BacktestCustomRun | null;
 }
 
 export interface BacktestStatus {
   busy: boolean;
+  continuous?: boolean;
+  cycle?: number;
   startedAt: number | null;
   lastRunAt: number | null;
   pairsDone: number;
   pairsTotal: number;
   targetsCount: number;
   targets: string[];
+  customBusy?: boolean;
   error: string | null;
 }

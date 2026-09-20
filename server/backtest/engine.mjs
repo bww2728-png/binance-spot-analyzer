@@ -17,18 +17,21 @@ import { regimeGate } from './regime.mjs';
 import { walkForwardSplit, fitLogistic, featurize, learnedScore, synthFilters, evaluateStrategy } from './learn.mjs';
 
 /** تحميل شموع مجزّأ (أقصى عمق): pages من 1000 صف — Binance يحتمل 1000/نداء افتراضياً. */
-export async function loadKlinesPaginated(db, symbol, interval, targetLimit, { pageMs = 900, maxPages = 8 } = {}) {
+export async function loadKlinesPaginated(db, symbol, interval, targetLimit, { pageMs = 450, maxPages = 8, startTime, endTime } = {}) {
   const out = [];
-  let endTime;
+  let cursor = endTime; // نداء أول بوقت انتهاء اختياري (نطاق صريح: من — إلى)
   for (let p = 0; p < maxPages && out.length < targetLimit; p += 1) {
-    const raw = await db.binance.klines(symbol, interval, 1000, undefined, endTime);
+    const raw = await db.binance.klines(symbol, interval, 1000, undefined, cursor);
     if (!Array.isArray(raw) || !raw.length) break;
     out.unshift(...raw);
-    endTime = raw[0][0] - 1; // قبل أقدم صفحة
+    const oldestOpen = raw[0][0];
+    cursor = oldestOpen - 1; // قبل أقدم صفحة
+    if (startTime != null && oldestOpen <= startTime) break; // بلغنا بداية النطاق
     if (raw.length < 1000) break;
     if (p < maxPages - 1) await new Promise(r => setTimeout(r, pageMs));
   }
-  return out.slice(-targetLimit);
+  const inRange = startTime != null ? out.filter(c => c[0] >= startTime) : out;
+  return inRange.slice(-targetLimit);
 }
 
 const DAY_MS = 86_400_000;
@@ -123,8 +126,10 @@ export function simulateZone(candles, touchIdx, zone, { protectedPrice, targets 
 }
 
 /** باك تيست لزوج (رمز، فريم): لحظات كشف يومية → لمس → محاكاة — trades كامل مع الأدوات. */
-export async function runPairBacktest(db, { symbol, timeframe, calibration = {}, bars = 3000, capital = 10000, capitalF = 0.01, pWinFallback = 0.5 }) {
-  const raw = await loadKlinesPaginated(db, symbol, timeframe, bars);
+export async function runPairBacktest(db, { symbol, timeframe, calibration = {}, bars = 3000, capital = 10000, capitalF = 0.01, pWinFallback = 0.5, startTime, endTime, maxPages }) {
+  const opts = { startTime, endTime };
+  if (maxPages) opts.maxPages = maxPages;
+  const raw = await loadKlinesPaginated(db, symbol, timeframe, bars, opts);
   if (!Array.isArray(raw) || raw.length < 400) return { symbol, timeframe, trades: [], reason: 'لا شموع كافية' };
   const candles = raw.map(k => ({
     time: Number(k[0]), open: Number(k[1]), high: Number(k[2]),

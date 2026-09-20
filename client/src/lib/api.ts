@@ -264,8 +264,14 @@ const sbApi = {
     if (opts.timeframe) q.set('timeframe', opts.timeframe);
     return fetch(`${BASE}/backtest/results?${q}`, { signal }).then(j<BacktestResults>);
   },
-  runBacktest(): Promise<{ ok: boolean; started: boolean; pairsTotal: number }> {
-    return fetch(`${BASE}/backtest/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean; pairsTotal: number }>);
+  runBacktest(): Promise<{ ok: boolean; started: boolean }> {
+    return fetch(`${BASE}/backtest/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>);
+  },
+  runCustomBacktest(opts: { symbol: string; timeframe: string; fromTs?: number; toTs?: number }): Promise<{ ok: boolean; started: boolean; symbol: string; timeframe: string }> {
+    return fetch(`${BASE}/backtest/run-custom`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts)
+    }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>);
   }
 };
 
@@ -378,7 +384,12 @@ const restApi = {
     return fetch(`${BASE}/backtest/results?${q}`, { signal }).then(j<BacktestResults>);
   },
   runBacktest: () =>
-    fetch(`${BASE}/backtest/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean; pairsTotal: number }>)
+    fetch(`${BASE}/backtest/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
+  runCustomBacktest: (opts: { symbol: string; timeframe: string; fromTs?: number; toTs?: number }) =>
+    fetch(`${BASE}/backtest/run-custom`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts)
+    }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

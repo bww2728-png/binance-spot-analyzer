@@ -6,6 +6,7 @@ import assert from 'node:assert';
 import { kellyF, fractionalKelly, positionUnits, buildPlan, checkPlan } from '../backtest/risk.mjs';
 import { zScore, betaSpread, cointegrationCheck, regimeGate, inventoryBiasSimple } from '../backtest/regime.mjs';
 import { fitLogistic, featurize, learnedScore, synthFilters, walkForwardSplit, evaluateStrategy, activeDecision, stratifiedLift } from '../backtest/learn.mjs';
+import { loadKlinesPaginated } from '../backtest/engine.mjs';
 
 test('كلي النظري: معاملات منشورة تعطي القيم المنشورة', () => {
   // p=0.6, payoff=2 → f = (0.6*2 - 0.4)/0.6 = 1.333
@@ -182,4 +183,44 @@ test('الرفع الطبقي: المقام المقام سليم', () => {
   const lift = stratifiedLift(trades, { has: 'عنقود', groupOf: (t) => t.tier });
   assert.ok(lift['عنقود@prime'] > 1);
   assert.ok(lift['عنقود@lull'] < 1);
+});
+
+
+// ===== النطاق الزمني الصريح (من — إلى) — حتمية بدون شبكة =====
+
+const mkMdb = (candlesByCall) => {
+  let call = 0;
+  return { binance: { klines: async () => {
+    const r = candlesByCall[call] ?? [];
+    call += 1;
+    return r;
+  } } };
+};
+const mkRow = (t) => [t, '1', '1', '1', '1', '1', 0, 0, 0, '0.5', 0];
+
+test('النطاق الزمني: يتوقف عند بداية النطاق ويقص الشموع قبله', async () => {
+  // صفحتان: أحدث (2000..2999) ثم أقدم (1000..1999) — النطاق يبدأ عند 1500
+  const page1 = Array.from({ length: 1000 }, (_, i) => mkRow(2000 + i));
+  const page2 = Array.from({ length: 1000 }, (_, i) => mkRow(1000 + i));
+  const mdb = mkMdb([page1, page2]);
+  const out = await loadKlinesPaginated(mdb, 'X', '1h', 100000, { startTime: 1500, pageMs: 0 });
+  assert.ok(out.length >= 500 && out.length <= 2000, `count=${out.length}`);
+  assert.ok(out.every(r => r[0] >= 1500), 'كل الصفوف داخل النطاق');
+});
+
+test('النطاق الزمني: بوقت انتهاء يبدأ النداء الأول قبله', async () => {
+  let firstCursor;
+  const mdb = { binance: { klines: async (sym, int, lim, startTime, cursor) => {
+    if (firstCursor === undefined) firstCursor = cursor ?? null;
+    return [];
+  } } };
+  await loadKlinesPaginated(mdb, 'X', '1h', 10, { endTime: 5555, pageMs: 0 });
+  assert.equal(firstCursor, 5555);
+});
+
+test('النطاق الزمني: بلا نطاق يتصرف كما السابق', async () => {
+  const page1 = Array.from({ length: 1000 }, (_, i) => mkRow(2000 + i));
+  const mdb = mkMdb([page1]);
+  const out = await loadKlinesPaginated(mdb, 'X', '1h', 100000, { pageMs: 0 });
+  assert.equal(out.length, 1000);
 });

@@ -555,7 +555,7 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
 // ==================== الباك تيست + الفرص الحية (walk-forward + حلقة تعلم مستمرة) ====================
 
 // قائمة المستهدفة: الحلال + غير الباركود فقط (coin_shariah + coin_flags) — مؤكدة بأجوبتك
-const resolveTargets = async (limit = 40) => {
+const resolveTargets = async (limit = Number.POSITIVE_INFINITY) => {
   const [sh, flags] = await Promise.all([
     db.coinShariah.list().catch(() => []),
     db.coinFlags.list().catch(() => [])
@@ -567,81 +567,178 @@ const resolveTargets = async (limit = 40) => {
     if (seen.has(s) || barcode.has(s)) return false;
     seen.add(s);
     return true;
-  }).slice(0, limit);
+  }).slice(0, limit === Number.POSITIVE_INFINITY ? undefined : limit);
 };
 
 // حالة الباك تيست في الذاكرة (النمط نفسه: حالة خادم بسيطة)
-const backtestState = { busy: false, startedAt: null, lastRunAt: null, pairsDone: 0, pairsTotal: 0, lastRun: null, error: null };
+const backtestState = {
+  busy: false, startedAt: null, lastRunAt: null, pairsDone: 0, pairsTotal: 0,
+  lastRun: null, error: null, cycle: 0,
+  customBusy: false, customRun: null, customError: null
+};
 
 app.get('/api/backtest/status', handle(async (_req, res) => {
   const targets = await resolveTargets();
   res.json({
     busy: backtestState.busy,
+    continuous: true,
+    cycle: backtestState.cycle,
     startedAt: backtestState.startedAt,
     lastRunAt: backtestState.lastRunAt,
     pairsDone: backtestState.pairsDone,
     pairsTotal: backtestState.pairsTotal,
     targetsCount: targets.length,
     targets: targets.slice(0, 20),
+    customBusy: backtestState.customBusy,
     error: backtestState.error
   });
 }));
 
+// مجموع + تقسيم كل فريم محسوب على الخادم (النتائج كاملة قد تصل عشرات الميغابايت — الأداء أولاً)
+const summarizeResults = (rows) => {
+  const all = rows.flatMap(r => r.trades ?? []);
+  const decided = all.filter(t => t.win === 0 || t.win === 1);
+  const wins = decided.filter(t => t.win === 1).length;
+  const rrRatios = decided.filter(t => Number.isFinite(t.rr));
+  const frames = new Map();
+  for (const pair of rows) {
+    for (const t of pair.trades ?? []) {
+      if (t.win !== 0 && t.win !== 1) continue;
+      const m = frames.get(pair.timeframe) || { decided: 0, wins: 0 };
+      m.decided += 1;
+      if (t.win === 1) m.wins += 1;
+      frames.set(pair.timeframe, m);
+    }
+  }
+  return {
+    total: all.length,
+    decided: decided.length,
+    wins,
+    winRate: decided.length ? wins / decided.length : null,
+    avgRR: rrRatios.length ? rrRatios.reduce((a, t) => a + t.rr, 0) / rrRatios.length : null,
+    avgBars: decided.length ? decided.reduce((a, t) => a + (t.bars || 0), 0) / decided.length : null,
+    perFrame: [...frames.entries()].map(([tf, m]) => ({ timeframe: tf, ...m })).sort((a, b) => a.timeframe.localeCompare(b.timeframe))
+  };
+};
+
 app.get('/api/backtest/results', handle(async (req, res) => {
   const run = backtestState.lastRun;
-  if (!run) return res.json({ exists: false, message: 'لم تُجرَ جولة بعد — اضغط "إطلاق الجولة"' });
+  if (!run) return res.json({ exists: false, message: 'الحلقة المستمرة تعمل — بانتظار اكتمال أول دورة', custom: backtestState.customRun });
   let rows = run.results ?? [];
   const coin = req.query.coin ? String(req.query.coin).toUpperCase() : undefined;
   const timeframe = req.query.timeframe ? String(req.query.timeframe) : undefined;
   if (coin) rows = rows.filter(r => r.symbol === coin);
   if (timeframe) rows = rows.filter(r => r.timeframe === timeframe);
-  res.json({ exists: true, startedAt: run.startedAt, lastRunAt: run.lastRunAt, results: rows, learn: run.learn ?? null });
+  // ترقيم صفحات الأزواج: الأزواج الكاملة ثقيلة — الافتراضي 400 (بحد أقصى 2000)
+  const limit = Math.min(Math.max(Number(req.query.limit) || 400, 1), 2000);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  res.json({
+    exists: true,
+    cycle: backtestState.cycle,
+    startedAt: run.startedAt,
+    lastRunAt: run.lastRunAt,
+    total: rows.length,
+    results: rows.slice(offset, offset + limit),
+    summary: summarizeResults(rows),
+    learn: run.learn ?? null,
+    custom: backtestState.customRun
+  });
 }));
 
-app.post('/api/backtest/run', handle(async (_req, res) => {
-  if (backtestState.busy) return res.status(409).json({ error: 'جولة قيد التنفيذ بالفعل' });
-  const targets = await resolveTargets();
-  if (!targets.length) return res.status(400).json({ error: 'لا مستهدفات (لاحلال/لا غير-باركود)' });
+// الدورة: كل المستهدفات × كل الفريمات — نفس خطوات الكشف الحي حرفياً (صفر تعديل على منطق التداول)
+const runCycle = async () => {
+  if (backtestState.busy || backtestState.customBusy) return;
   backtestState.busy = true;
-  backtestState.startedAt = Date.now();
-  backtestState.pairsDone = 0;
-  backtestState.pairsTotal = targets.length;
-  backtestState.error = null;
-  res.json({ ok: true, started: true, pairsTotal: targets.length });
-  // مجدول تدريجي (لا يُخنق الـ API): زوج → زوج — والجولة تجري في الخلفية
-  void (async () => {
-    const results = [];
-    try {
-      const calibration = await readCalibration();
-      const timeframes = ['1h', '4h', '1d'];
-      for (const symbol of targets) {
-        for (const tf of timeframes) {
-          try {
-            results.push(await runPairBacktest(db, { symbol, timeframe: tf, calibration, capital: 10000 }));
-          } catch (e) {
-            results.push({ symbol, timeframe: tf, trades: [], reason: e.message });
-          }
-          await new Promise(r => setTimeout(r, 1500));
+  const results = [];
+  try {
+    const targets = await resolveTargets();
+    if (!targets.length) { backtestState.error = 'لا مستهدفات (لاحلال/لا غير-باركود)'; return; }
+    backtestState.startedAt = Date.now();
+    backtestState.pairsDone = 0;
+    backtestState.pairsTotal = targets.length;
+    backtestState.cycle += 1; // الدورة الجانية: التالية تبدأ فور اكتمال هذه
+    const cycleNo = backtestState.cycle;
+    backtestState.error = null;
+    const calibration = await readCalibration();
+    for (const symbol of targets) {
+      for (const tf of ALL_TIMEFRAMES) {
+        try {
+          results.push(await runPairBacktest(db, { symbol, timeframe: tf, calibration, capital: 10000 }));
+        } catch (e) {
+          results.push({ symbol, timeframe: tf, trades: [], reason: e.message });
         }
-        backtestState.pairsDone += 1;
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 300));
       }
-      // حلقة التعلم المستمرة: على جولة كاملة
-      let learn = null;
-      try {
-        learn = learnOnTrades(results, { targetWinRate: 0.7 });
-      } catch (e) {
-        console.error('[backtest] learning failed:', e.message);
-      }
-      backtestState.lastRun = { startedAt: backtestState.startedAt, lastRunAt: Date.now(), results, learn };
-      backtestState.lastRunAt = Date.now();
-      console.log(`[backtest] run done: pairs ${backtestState.pairsDone}/${backtestState.pairsTotal} | learn: ${learn?.enough ? `winRate ${learn.winRate}` : 'غير كافية'}`);
-      broadcast({ type: 'backtest_done' });
+      backtestState.pairsDone += 1;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    // حلقة التعلم المستمرة: على دورة كاملة
+    let learn = null;
+    try {
+      learn = learnOnTrades(results, { targetWinRate: 0.7 });
     } catch (e) {
-      backtestState.error = e.message;
-      console.error('[backtest] cycle failed:', e.message);
+      console.error('[backtest] learning failed:', e.message);
+    }
+    backtestState.lastRun = { startedAt: backtestState.startedAt, lastRunAt: Date.now(), results, learn };
+    backtestState.lastRunAt = Date.now();
+    console.log(`[backtest] cycle ${cycleNo} done: pairs ${backtestState.pairsDone}/${backtestState.pairsTotal} | learn: ${learn?.enough ? `winRate ${learn.winRate}` : 'غير كافية'}`);
+    broadcast({ type: 'backtest_done' });
+  } catch (e) {
+    backtestState.error = e.message;
+    console.error('[backtest] cycle failed:', e.message);
+  } finally {
+    backtestState.busy = false;
+  }
+};
+
+// الحلقة الدورية المستمرة: تنتهي دورة → تبدأ التالية فوراً (لا انتظار ضغط — مهلة 5 ثوانٍ فقط بين اللفات)
+const runBacktestLoop = async () => {
+  for (;;) {
+    await runCycle();
+    await new Promise(r => setTimeout(r, 5000));
+  }
+};
+setTimeout(() => void runBacktestLoop(), 30_000); // تبدأ تلقائياً بعد مزامنة العملات
+
+app.post('/api/backtest/run', handle(async (_req, res) => {
+  if (backtestState.busy) return res.status(409).json({ error: 'دورة قيد التنفيذ بالفعل — الحلقة مستمرة تلقائياً' });
+  res.json({ ok: true, started: true });
+  void runCycle();
+}));
+
+// جولة مخصصة: عملة محددة + فريمها + مدى زمني (من — إلى) — منفصلة عن الدوري ولا تعيق الحلقة
+app.post('/api/backtest/run-custom', handle(async (req, res) => {
+  const symbol = String(req.body?.symbol || '').toUpperCase().trim();
+  const timeframe = String(req.body?.timeframe || '1h').toLowerCase().trim();
+  // قبول أرقام epoch أو صيغ تاريخ (ISO) — أكثر مرونة
+  const parseTs = (v) => {
+    if (v == null || v === '') return undefined;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+    const d = Date.parse(v);
+    return Number.isNaN(d) ? undefined : d;
+  };
+  const fromTs = parseTs(req.body?.fromTs);
+  const toTs = parseTs(req.body?.toTs);
+  const tsGiven = (v) => v != null && v !== '';
+  if ((tsGiven(req.body?.fromTs) && fromTs === undefined) || (tsGiven(req.body?.toTs) && toTs === undefined)) return res.status(400).json({ error: 'مدى زمني غير صالح' });
+  backtestState.customBusy = true;
+  backtestState.customError = null;
+  res.json({ ok: true, started: true, symbol, timeframe });
+  void (async () => {
+    try {
+      const result = await runPairBacktest(db, {
+        symbol, timeframe, calibration: await readCalibration(), capital: 10000,
+        startTime: fromTs, endTime: toTs, bars: 20000
+      });
+      backtestState.customRun = { symbol, timeframe, fromTs: fromTs ?? null, toTs: toTs ?? null, at: Date.now(), result };
+      console.log(`[backtest] custom done: ${symbol} ${timeframe}`);
+      broadcast({ type: 'backtest_custom_done' });
+    } catch (e) {
+      backtestState.customError = e.message;
+      console.error('[backtest] custom failed:', e.message);
     } finally {
-      backtestState.busy = false;
+      backtestState.customBusy = false;
     }
   })();
 }));
