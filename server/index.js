@@ -736,7 +736,7 @@ app.get('/api/auto-history', handle(async (req, res) => {
     to: req.query.to ? Number(req.query.to) : undefined,
     fabioOnly: req.query.fabioOnly === 'false' ? false : true
   };
-  const raw = await db.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit, offset });
+  const raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit, offset });
   const rows = flattenSnapshots(raw, filters);
   res.set('X-Total-Count', String(rows.length));
   res.json({ rows, limit, offset, fabioOnly: filters.fabioOnly });
@@ -758,7 +758,7 @@ app.post('/api/auto-history/screenshots', handle(async (req, res) => {
       capturedAt: Number(s.capturedAt) || Date.now()
     }));
   if (!shots.length) return res.status(400).json({ error: 'لا توجد صور صالحة' });
-  for (const shot of shots) await db.appendZoneScreenshot(shot);
+  for (const shot of shots) await db.zones.appendZoneScreenshot(shot);
   broadcast({ type: 'auto_screenshots_saved', count: shots.length });
   res.json({ ok: true, saved: shots.length });
 }));
@@ -766,7 +766,7 @@ app.post('/api/auto-history/screenshots', handle(async (req, res) => {
 app.get('/api/auto-history/screenshots', handle(async (req, res) => {
   const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
   const from = req.query.from ? Number(req.query.from) : undefined;
-  const events = await db.listZoneScreenshots({ symbol, from });
+  const events = await db.zones.listZoneScreenshots({ symbol, from });
   const latest = new Map();
   for (const e of events) {
     const shot = (() => { try { return JSON.parse(e.meta || 'null'); } catch { return null; } })();
