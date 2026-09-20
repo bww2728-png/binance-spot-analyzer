@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -272,6 +272,9 @@ const sbApi = {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(opts)
     }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>);
+  },
+  getLiveOpportunities(signal?: AbortSignal): Promise<LiveOpportunitiesResponse> {
+    return fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>);
   }
 };
 
@@ -389,7 +392,9 @@ const restApi = {
     fetch(`${BASE}/backtest/run-custom`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(opts)
-    }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>)
+    }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>),
+  getLiveOpportunities: (signal?: AbortSignal) =>
+    fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

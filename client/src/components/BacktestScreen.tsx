@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import type { BacktestCustomRun, BacktestFrameStat, BacktestResults, BacktestStatus, BacktestTrade } from '../lib/types';
+import type { BacktestCustomRun, BacktestFrameStat, BacktestResults, BacktestStatus, LiveOpportunitiesResponse } from '../lib/types';
 import Skeleton from './ui/Skeleton';
 
 /* واجهة الباك تيست والفرص الحية — walk-forward + حلقة تعلم مستمرة + أدوات المخاطر (عرض فقط)
@@ -68,7 +68,27 @@ export default function BacktestScreen() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [customLaunching, setCustomLaunching] = useState(false);
+  const [live, setLive] = useState<LiveOpportunitiesResponse | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // محرك الفَرض الحية (مستقل): poll سريع منفصل عن poll الباك تيست
+  const loadLive = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const res = await api.getLiveOpportunities(signal);
+      if (!signal?.aborted) setLive(res);
+    } catch { /* فشل poll الفَرض لا يعطل الشاشة */ }
+  }, []);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    void loadLive(ac.signal);
+    return () => ac.abort();
+  }, [loadLive]);
+
+  useEffect(() => {
+    const iv = setInterval(() => void loadLive(), 10000);
+    return () => clearInterval(iv);
+  }, [loadLive]);
 
   const RUN_FRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'];
 
@@ -171,19 +191,12 @@ export default function BacktestScreen() {
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [results]);
 
-  const live = useMemo(() => {
-    // الفرص الحية: صفقة واحدة لكل (رمز، فريم، منطقة) — الأحدث — غير محسومة
-    const best = new Map<string, BacktestTrade>();
-    for (const pair of results?.results ?? []) {
-      for (const t of pair.trades ?? []) {
-        if (t.win !== undefined || t.undecided) continue;
-        const key = `${t.symbol}|${t.timeframe}|${t.zoneType}|${t.zonePrice}`;
-        const prev = best.get(key);
-        if (!prev || (t.ts ?? 0) > (prev.ts ?? 0)) best.set(key, t);
-      }
-    }
-    return [...best.values()].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)).slice(0, 30);
-  }, [results]);
+  const liveList = useMemo(() => {
+    // من محرك الفَرض الحية المستقل (بخطة كاملة + مسافة من السعر + قرار) — فلترة عميل
+    const coinU = coin.trim().toUpperCase();
+    return (live?.opportunities ?? []).filter(o =>
+      (!coinU || o.symbol === coinU) && (!frame || o.timeframe === frame)).slice(0, 30);
+  }, [live, coin, frame]);
 
   const goalMet = (summary.winRate ?? 0) >= 0.7;
 
@@ -217,6 +230,11 @@ export default function BacktestScreen() {
         {status?.busy && (
           <div className="badge-accent px-4 py-2.5 rounded-lg text-[12px]">
             الدورة قيد التنفيذ: {status.pairsDone}/{status.pairsTotal} عملة — كل فريمات الرمز × كل فريمات الرمز — المستهدفات: {status.targetsCount} (الحلال + غير الباركود) — الدورة التالية تبدأ فور الاكتمال
+          </div>
+        )}
+        {live?.busy && (
+          <div className="badge-accent px-4 py-2.5 rounded-lg text-[12px]">
+            لفة الفرص الحية قيد التنفيذ (محرك مستقل): {live.pairsDone}/{live.pairsTotal} عملة — اللَّفة التالية تبدأ فور الاكتمال
           </div>
         )}
         {status?.error && (
@@ -321,7 +339,9 @@ export default function BacktestScreen() {
             {/* الفرص الحية */}
             <div>
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <div className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>الفرص الحية (بخطة كاملة — عرض فقط)</div>
+                <div className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>
+                  الفرص الحية (محرك مستقل — بخطة كاملة — عرض فقط){live?.rotation != null && live.rotation > 0 ? ` — لفة ${live.rotation}` : ''}
+                </div>
                 <div className="flex items-center gap-2">
                   <input
                     value={coin}
@@ -341,13 +361,13 @@ export default function BacktestScreen() {
                   </select>
                 </div>
               </div>
-              {live.length === 0 ? (
+              {liveList.length === 0 ? (
                 <div className="text-[12px] px-4 py-6 rounded-xl text-center" style={{ background: 'var(--surface-1)', border: '1px dashed var(--border-1)', color: 'var(--text-3)' }}>
-                  لا فرص محسومة حالياً — كل الصفقات المحسومة من جولة الجولة الأخيرة حُسمت (هدف/وقف) أو لم تبدأ جولة بعد
+                  لا فرص حية حالياً — محرك الفرص يلف الآن (اللَّفة التالية تبدأ فور اكتمال الحالية) أو لا مناطق حية تُلبي قواعد المتعلم بعد
                 </div>
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                  {live.map((t, i) => (
+                  {liveList.map((t, i) => (
                     <div key={`${t.symbol}-${t.timeframe}-${t.zoneType}-${t.zonePrice}-${i}`} className="rounded-xl px-4 py-3" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
@@ -358,18 +378,20 @@ export default function BacktestScreen() {
                         </div>
                         <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>{fmtTime(t.ts)}</span>
                       </div>
-                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 mt-2 text-center">
+                      <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 mt-2 text-center">
                         {[
                           { l: 'دخول', v: fmtNum(t.entry) },
-                          { l: 'وقف', v: fmtNum(t.protectedPrice) },
+                          { l: 'وقف', v: fmtNum(t.stop) },
+                          { l: 'هدف', v: fmtNum(t.tp) },
                           { l: 'rr', v: fmtNum(t.rr) },
-                          { l: 'كلي', v: fmtNum(t.kelly, 2) },
+                          { l: 'مسافة', v: `${fmtNum(t.distPct, 3)}%` },
+                          { l: 'قرار', v: t.decision?.action === 'enter' ? 'دخول' : t.decision?.action === 'wait' ? 'انتظار' : t.decision?.action === 'skip' ? 'تخطي' : '—' },
                           { l: 'كلي مجزأ', v: fmtNum(t.fF, 3) },
                           { l: 'حجم', v: fmtNum(t.units, 3) }
                         ].map(c => (
                           <div key={c.l}>
                             <div className="text-[9px]" style={{ color: 'var(--text-3)' }}>{c.l}</div>
-                            <div className="text-[11px] font-semibold num" style={{ color: 'var(--text-1)' }}>{c.v}</div>
+                            <div className="text-[11px] font-semibold num" style={{ color: c.l === 'قرار' && c.v === 'دخول' ? 'var(--accent)' : 'var(--text-1)' }}>{c.v}</div>
                           </div>
                         ))}
                       </div>

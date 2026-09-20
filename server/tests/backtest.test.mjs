@@ -7,6 +7,7 @@ import { kellyF, fractionalKelly, positionUnits, buildPlan, checkPlan } from '..
 import { zScore, betaSpread, cointegrationCheck, regimeGate, inventoryBiasSimple } from '../backtest/regime.mjs';
 import { fitLogistic, featurize, learnedScore, synthFilters, walkForwardSplit, evaluateStrategy, activeDecision, stratifiedLift } from '../backtest/learn.mjs';
 import { loadKlinesPaginated } from '../backtest/engine.mjs';
+import { applyLearnedRules, discoverLiveOpportunities } from '../backtest/live.mjs';
 
 test('كلي النظري: معاملات منشورة تعطي القيم المنشورة', () => {
   // p=0.6, payoff=2 → f = (0.6*2 - 0.4)/0.6 = 1.333
@@ -223,4 +224,60 @@ test('النطاق الزمني: بلا نطاق يتصرف كما السابق'
   const mdb = mkMdb([page1]);
   const out = await loadKlinesPaginated(mdb, 'X', '1h', 100000, { pageMs: 0 });
   assert.equal(out.length, 1000);
+});
+
+
+// ===== محرك الفرص الحية المستقل (live.mjs) — حتمية بدون شبكة =====
+
+test('تطبيق قواعد المتعلم: يقلص الفَرق حتمياً', () => {
+  const list = [
+    { score: 60, reasons: [], clusterCount: 2, swept: false },
+    { score: 40, reasons: [], clusterCount: 2, swept: false },
+    { score: 80, reasons: [], clusterCount: 0, swept: false }
+  ];
+  const kept = applyLearnedRules(list, { minScore: 50, requireCluster: true, requireBubble: false, allowSwept: true });
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].score, 60);
+});
+
+test('قواعد ناقصة → مرور كامل بدون قص', () => {
+  const list = [{ score: 10, reasons: [], clusterCount: 0, swept: false }];
+  assert.equal(applyLearnedRules(list, null), list);
+  assert.equal(applyLearnedRules(list, {}), list);
+  assert.equal(applyLearnedRules(list, { minScore: 'x' }), list);
+});
+
+test('الفرش الحية: شموع مسطحة → لا فرق ولا رمي (شكل محفوظ)', async () => {
+  const flat = Array.from({ length: 120 }, (_, i) => [i * 1000, '100', '100', '100', '100', '1', 0, 0, 0, '0.5', 0]);
+  const mdb = { binance: { klines: async () => flat } };
+  const out = await discoverLiveOpportunities(mdb, { symbol: 'X', timeframe: '1h' });
+  assert.equal(out.symbol, 'X');
+  assert.equal(out.timeframe, '1h');
+  assert.ok(Array.isArray(out.opportunities));
+  assert.equal(out.opportunities.length, 0);
+});
+
+test('الفرش الحية: كل فرقة حية لها وقف على الجانب الآمن وقرار معروف', async () => {
+  // قمة مزدوجة: صعود إلى 100 → هبوط → صعود إلى 99.85 (ضمن تسامح التساوي، أسفل القمة فلا تُسحب)
+  const targets = [];
+  for (let i = 0; i <= 39; i++) targets.push(50 + 50 * (i / 39));
+  for (let i = 1; i <= 20; i++) targets.push(100 - 4 * (i / 20));
+  for (let i = 1; i <= 20; i++) targets.push(96 + 3.85 * (i / 20));
+  for (let i = 1; i <= 10; i++) targets.push(99.85 - 0.025 * i);
+  const rows = targets.map((c, i) => {
+    const o = i === 0 ? c : targets[i - 1];
+    const hi = Math.max(o, c);
+    const lo = Math.min(o, c);
+    return [i * 3600000, String(o), String(hi), String(lo), String(c), '1', 0, 0, 0, '0.5', 0];
+  });
+  const mdb = { binance: { klines: async () => rows } };
+  const out = await discoverLiveOpportunities(mdb, { symbol: 'X', timeframe: '1h' });
+  assert.ok(Array.isArray(out.opportunities));
+  for (const o of out.opportunities) {
+    assert.ok(['enter', 'wait', 'skip'].includes(o.decision?.action), 'قرار معروف');
+    if (o.zoneType === 'BSL') assert.ok(o.stop < o.entry, 'وقف شراء أسفل الدخول');
+    else assert.ok(o.stop > o.entry, 'وقف بيع أعلى الدخول');
+    assert.ok(Number.isFinite(o.distPct) && o.distPct >= 0, 'مسافة محسوبة');
+    assert.ok(o.swept !== true, 'الفرقة الحية غير المسحبة فقط');
+  }
 });

@@ -9,6 +9,7 @@ import { researchSymbol } from './research.mjs';
 import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
 import { runPairBacktest, learnOnTrades, loadKlinesPaginated } from './backtest/engine.mjs';
+import { discoverLiveOpportunities } from './backtest/live.mjs';
 import { regimeGate } from './backtest/regime.mjs';
 import { buildPlan, checkPlan, kellyF, fractionalKelly, positionUnits } from './backtest/risk.mjs';
 import { assembleCase, DECISION_ACTORS } from './cases.mjs';
@@ -590,7 +591,10 @@ app.get('/api/backtest/status', handle(async (_req, res) => {
     targetsCount: targets.length,
     targets: targets.slice(0, 20),
     customBusy: backtestState.customBusy,
-    error: backtestState.error
+    error: backtestState.error,
+    liveRotation: liveState.rotation,
+    livePairsDone: liveState.pairsDone,
+    livePairsTotal: liveState.pairsTotal
   });
 }));
 
@@ -647,7 +651,7 @@ app.get('/api/backtest/results', handle(async (req, res) => {
 
 // الدورة: كل المستهدفات × كل الفريمات — نفس خطوات الكشف الحي حرفياً (صفر تعديل على منطق التداول)
 const runCycle = async () => {
-  if (backtestState.busy || backtestState.customBusy) return;
+  if (backtestState.busy) return;
   backtestState.busy = true;
   const results = [];
   try {
@@ -741,6 +745,77 @@ app.post('/api/backtest/run-custom', handle(async (req, res) => {
       backtestState.customBusy = false;
     }
   })();
+}));
+
+// ==================== محرك الفرص الحية المستقل (يلف بالتوازي — لا يعيق المحركات الأخرى) ====================
+
+const liveState = { busy: false, rotation: 0, pairsDone: 0, pairsTotal: 0, opportunities: [], updatedAt: null, error: null };
+
+// اللفة: كل المستهدفات × كل الفريمات — نفس الوحدات الحية حرفياً (profile + location + candidates + score)
+const runLiveRotation = async () => {
+  if (liveState.busy) return;
+  liveState.busy = true;
+  const liveOut = new Map(); // (رمز|فريم) -> فرق العملة — البناء يُجري تلفزيياً
+  const rebuild = () => [...liveOut.values()].flat().sort((a, b) => (b.ts || 0) - (a.ts || 0) || a.distPct - b.distPct);
+  try {
+    const targets = await resolveTargets();
+    if (!targets.length) { liveState.error = 'لا مستهدفات (لاحلال/لا غير-باركود)'; return; }
+    liveState.rotation += 1;
+    const rotNo = liveState.rotation;
+    liveState.pairsDone = 0;
+    liveState.pairsTotal = targets.length;
+    liveState.error = null;
+    const calibration = await readCalibration();
+    const learnedRules = backtestState.lastRun?.learn?.rules ?? null;
+    // الأسعار الحالية لكل الرموز (نداء واحد) — المسافة الحية من منطقة
+    const prices = await db.binance.tickerPrices(targets).catch(() => ({}));
+    for (const symbol of targets) {
+      for (const tf of ALL_TIMEFRAMES) {
+        try {
+          const r = await discoverLiveOpportunities(db, { symbol, timeframe: tf, calibration, learnedRules, price: prices[symbol] ?? null, capital: 10000 });
+          liveOut.set(`${symbol}|${tf}`, (r.opportunities || []).map(o => ({ ...o, rotation: rotNo })));
+        } catch { /* زوج فاشل لا يوقف اللَّفة */ }
+        await new Promise(r => setTimeout(r, 300));
+      }
+      // تحديث تلفزي: الفرص تظهر فور اكتمال كل عملة (لا انتظار نهاية اللفة)
+      liveState.opportunities = rebuild();
+      liveState.updatedAt = Date.now();
+      liveState.pairsDone += 1;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    liveState.opportunities = rebuild();
+    liveState.updatedAt = Date.now();
+    console.log(`[live] rotation ${rotNo} done: ${liveState.opportunities.length} opportunities | pairs ${liveState.pairsDone}/${liveState.pairsTotal}`);
+    broadcast({ type: 'live_opportunities' });
+    broadcast({ type: 'live_opportunities' });
+  } catch (e) {
+    liveState.error = e.message;
+    console.error('[live] rotation failed:', e.message);
+  } finally {
+    liveState.busy = false;
+  }
+};
+
+// الحلقة المستمرة: تنتهي لفَّة → التالية فوراً (مهلة 5 ثوانٍ فقط — لا مدة زمنية معتبرة)
+const runLiveLoop = async () => {
+  for (;;) {
+    await runLiveRotation();
+    await new Promise(r => setTimeout(r, 5000));
+  }
+};
+setTimeout(() => void runLiveLoop(), 45_000); // يلف بالتوازي مع المحركات الأخرى — ينطلق عند بدء الخادم
+
+app.get('/api/live/opportunities', handle(async (_req, res) => {
+  res.json({
+    busy: liveState.busy,
+    rotation: liveState.rotation,
+    pairsDone: liveState.pairsDone,
+    pairsTotal: liveState.pairsTotal,
+    opportunities: liveState.opportunities.slice(0, 120),
+    total: liveState.opportunities.length,
+    updatedAt: liveState.updatedAt,
+    error: liveState.error
+  });
 }));
 
 // جدولة الكشف الآلي: كل عملات لوحة التحليل × كل الفريمات

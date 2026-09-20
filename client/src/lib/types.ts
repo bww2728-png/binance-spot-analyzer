@@ -360,6 +360,44 @@ export interface BacktestResults {
   custom?: BacktestCustomRun | null;
 }
 
+export interface LiveOpportunity {
+  symbol: string;
+  timeframe: string;
+  zoneType: 'BSL' | 'SSL';
+  zoneId?: string;
+  zonePrice: number;
+  score: number;
+  reasons: string[];
+  clusterCount?: number;
+  swept?: boolean;
+  bandPct?: number;
+  ts: number;
+  price: number;
+  entry: number;
+  stop: number;
+  tp: number;
+  protectedPrice: number;
+  distPct: number;
+  rr: number;
+  kelly: number;
+  fF: number;
+  units: number;
+  rotation: number;
+  targets?: number[];
+  decision: { action: string; reason: string; freeEnergy?: number };
+}
+
+export interface LiveOpportunitiesResponse {
+  busy: boolean;
+  rotation: number;
+  pairsDone: number;
+  pairsTotal: number;
+  opportunities: LiveOpportunity[];
+  total: number;
+  updatedAt: number | null;
+  error: string | null;
+}
+
 export interface BacktestStatus {
   busy: boolean;
   continuous?: boolean;
