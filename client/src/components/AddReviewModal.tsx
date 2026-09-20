@@ -302,7 +302,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
               </div>
             )}
             {alreadyAdded && (
-              <div className="text-[12px]" style={{ color: '#fbbf24' }}>
+              <div className="text-[12px]" style={{ color: 'var(--warn)' }}>
                 ملاحظة: هذه العملة مُدرجة بالفعل في لوحة المتابعة.
               </div>
             )}
@@ -319,7 +319,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
                 className="rounded-lg p-2.5 flex items-center justify-between gap-2 flex-wrap"
                 style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)' }}
               >
-                <span className="text-[12px] leading-relaxed" style={{ color: '#fbbf24' }}>
+                <span className="text-[12px] leading-relaxed" style={{ color: 'var(--warn)' }}>
                   {undocumented
                     ? 'لا توجد بيانات موثقة عن هذا المشروع — ابحث آلياً في المصادر أو وثّقه يدوياً.'
                     : 'الحكم «للتحقق» حسب التوثيق الحالي — يمكنك البحث آلياً أو استكمال التوثيق يدوياً.'}
@@ -586,7 +586,7 @@ export default function AddReviewModal({ symbol, onClose }: { symbol: string; on
             <button className="btn" onClick={onClose} disabled={adding}>إلغاء</button>
             {haramBlocked || shariahBlocked ? (
               <div className="flex items-center gap-2">
-                <span className="text-[12px]" style={{ color: verdict === 'haram' ? '#fb7185' : '#fbbf24' }}>
+                <span className="text-[12px]" style={{ color: verdict === 'haram' ? 'var(--down)' : 'var(--warn)' }}>
                   {verdict === 'haram'
                     ? 'محرّمة حسب البيانات الموثقة'
                     : 'لا يوجد حكم حلال موثق — وثّق المشروع من النموذج أعلاه لفتح الإدراج'}

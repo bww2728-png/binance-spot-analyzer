@@ -141,7 +141,7 @@ export default function ShariahBadge({ symbol }: { symbol: string }) {
 
           {/* خلاف فقهي */}
           {computed.fiqh_dispute && (
-            <div className="rounded-lg p-2.5 text-[11.5px] leading-relaxed" style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)', color: '#fbbf24' }}>
+            <div className="rounded-lg p-2.5 text-[11.5px] leading-relaxed" style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.3)', color: 'var(--warn)' }}>
               ⚖ {computed.fiqh_dispute}
             </div>
           )}

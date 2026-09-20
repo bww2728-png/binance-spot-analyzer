@@ -122,7 +122,7 @@ const MiniChart = memo(function MiniChart({ symbol, timeframe, zones, height = 1
       {isBarcode && (
         <div
           className="absolute bottom-1 left-1 z-10 text-[9.5px] font-semibold rounded px-1.5 py-0.5"
-          style={{ background: 'rgba(245, 158, 11, 0.18)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)' }}
+          style={{ background: 'rgba(245, 158, 11, 0.18)', color: '#b45309', border: '1px solid rgba(180, 83, 9, 0.45)' }}
           title={`شموع الدقيقة متقطعة/غير مستقرة — الدرجة ${barcodeScan.score} — الشارت قد يكون مضللاً`}
         >
           باركود

@@ -1,8 +1,8 @@
 import { useStore } from '../store/useStore';
 
 const KIND_STYLE = {
-  alert: { border: 'var(--down)', bg: 'rgba(242,54,69,0.12)', icon: '!', color: '#fb7185' },
-  info:  { border: 'var(--accent)', bg: 'var(--surface-2)', icon: 'i', color: '#7dd3fc' }
+  alert: { border: 'var(--down)', bg: 'rgba(242,54,69,0.12)', icon: '!', color: 'var(--down)' },
+  info:  { border: 'var(--accent)', bg: 'var(--surface-2)', icon: 'i', color: 'var(--accent)' }
 } as const;
 
 export default function Toasts() {

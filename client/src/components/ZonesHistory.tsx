@@ -7,9 +7,9 @@ import SkeletonRow from './ui/Skeleton';
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
 const ACTION_STYLE: Record<string, { label: string; bg: string; color: string }> = {
-  create: { label: 'إنشاء', bg: 'rgba(38,166,154,0.15)', color: '#26a69a' },
-  edit: { label: 'تعديل', bg: 'rgba(251,191,36,0.15)', color: '#fbbf24' },
-  delete: { label: 'حذف', bg: 'rgba(242,54,69,0.15)', color: '#f23645' }
+  create: { label: 'إنشاء', bg: 'rgba(38,166,154,0.15)', color: '#0a7f6a' },
+  edit: { label: 'تعديل', bg: 'rgba(180,83,9,0.15)', color: '#b45309' },
+  delete: { label: 'حذف', bg: 'rgba(214,31,49,0.15)', color: '#d61f31' }
 };
 const PAGE = 500;
 

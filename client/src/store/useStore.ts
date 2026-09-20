@@ -17,8 +17,13 @@ export type Theme = 'dark' | 'light';
 export type ArchiveSection = 'cases' | 'zones' | 'events';
 
 function initialTheme(): Theme {
+  // الأولوية للاختيار المحفوظ من زر التبديل، والافتراضي أبيض
+  try {
+    const s = localStorage.getItem('theme');
+    if (s === 'dark') return 'dark';
+  } catch { /* ignore */ }
   const t = document.documentElement.dataset.theme;
-  return t === 'light' ? 'light' : 'dark';
+  return t === 'dark' ? 'dark' : 'light';
 }
 
 interface StoreState {

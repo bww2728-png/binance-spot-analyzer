@@ -72,7 +72,7 @@ const ReplayChart = memo(function ReplayChart({ view, zones, analysis }: {
       createSeriesMarkers(series, []).setMarkers([{
         time: data[data.length - 1].time,
         position: 'inBar',
-        color: '#fbbf24',
+        color: '#b45309',
         shape: 'circle',
         text: 'قرار'
       }]);

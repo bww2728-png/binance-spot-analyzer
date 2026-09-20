@@ -8,22 +8,22 @@ import SkeletonRow from './ui/Skeleton';
 const PAGE = 200;
 
 const TYPE_STYLE: Record<string, string> = {
-  liquidity_zone: '#089981',
-  zone_feedback: '#fbbf24',
-  auto_zones_snapshot: '#8b5cf6',
-  zone_calibration: '#f97316',
-  zone_touch: '#38bdf8',
-  barcode_scan: '#e879f9',
-  timeout: '#f23645',
-  start: '#26a69a',
-  manual: '#64748b'
+  liquidity_zone: '#0a7f6a',
+  zone_feedback: '#b45309',
+  auto_zones_snapshot: '#7c3aed',
+  zone_calibration: '#c2410c',
+  zone_touch: '#1d4ed8',
+  barcode_scan: '#a21caf',
+  timeout: '#d61f31',
+  start: '#0a7f6a',
+  manual: '#475569'
 };
 
 function typeColor(t: string) {
   if (TYPE_STYLE[t]) return TYPE_STYLE[t];
-  if (t.startsWith('zone')) return '#38bdf8';
-  if (t.startsWith('shariah')) return '#a78bfa';
-  return '#94a3b8';
+  if (t.startsWith('zone')) return '#1d4ed8';
+  if (t.startsWith('shariah')) return '#7c3aed';
+  return '#64748b';
 }
 
 function Row({ e }: { e: EventLog }) {

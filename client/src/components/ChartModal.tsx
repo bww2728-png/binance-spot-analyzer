@@ -857,7 +857,7 @@ export default function ChartModal() {
               style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.35)' }}
               role="alert"
             >
-              <div className="text-[12.5px] leading-relaxed flex-1" style={{ color: '#fbbf24' }}>
+              <div className="text-[12.5px] leading-relaxed flex-1" style={{ color: 'var(--warn)' }}>
                 <b>{isBarcode ? 'تحذير «باركود»:' : 'نتيجة فحص الباركود:'}</b> {barcodeScan.reason}.
                 الدرجة {barcodeScan.score} من 100، وفُحصت {barcodeScan.candles_count} شمعة.
                 مراقبة SSL/BSL تعمل على السعر الحي المباشر ولا تتأثر — والوسم تحذيري فقط ولا يستبعد العملة.

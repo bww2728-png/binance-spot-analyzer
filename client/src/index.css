@@ -137,7 +137,7 @@ body {
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: var(--surface-0); }
 ::-webkit-scrollbar-thumb { background: var(--surface-4); border-radius: 5px; border: 2px solid var(--surface-0); }
-::-webkit-scrollbar-thumb:hover { background: #31426b; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
 
 /* ============ Form controls الموحدة ============ */
 select, input[type="text"], input[type="number"], input[type="search"], input:not([type]) {

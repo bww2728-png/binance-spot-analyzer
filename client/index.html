@@ -1,14 +1,16 @@
 <!doctype html>
-<html lang="ar" dir="rtl" data-theme="dark">
+<html lang="ar" dir="rtl" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0a0e16" />
+    <meta name="theme-color" content="#f7f8fa" />
     <title>محلل عملات بينانس السبوت</title>
     <script>
       try {
-        // السمة داكنة دائماً — قرار مؤكد: الأبيض للشارت فقط، والصفحة تبقى داكنة
-        document.documentElement.dataset.theme = 'dark';
+        // الافتراضي أبيض — مع احترام اختيار المستخدم المحفوظ من زر التبديل
+        var saved = null;
+        try { saved = localStorage.getItem('theme'); } catch (e) {}
+        document.documentElement.dataset.theme = saved === 'dark' ? 'dark' : 'light';
       } catch (e) { /* تجاهل */ }
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />

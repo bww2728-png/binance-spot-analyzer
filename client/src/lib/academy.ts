@@ -17,11 +17,11 @@ export interface AcademyTool {
 }
 
 export const STATUS_META: Record<AcademyStatus, { label: string; color: string; bg: string }> = {
-  active: { label: 'تعمل الآن في الكشف', color: '#089981', bg: 'rgba(8,153,129,0.12)' },
-  partial: { label: 'تقريب مبسط يعمل', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
-  external: { label: 'مصدر خارجي مدفوع — لاحقاً', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-  advisory: { label: 'شرح تعليمي — ليست محدِّد مناطق', color: '#8b5cf6', bg: 'rgba(139,92,246,0.12)' },
-  heuristic: { label: 'كشف تقريبي بالشذوذ', color: '#ec4899', bg: 'rgba(236,72,153,0.12)' }
+  active: { label: 'تعمل الآن في الكشف', color: '#0a7f6a', bg: 'rgba(8,153,129,0.12)' },
+  partial: { label: 'تقريب مبسط يعمل', color: '#1d4ed8', bg: 'rgba(59,130,246,0.12)' },
+  external: { label: 'مصدر خارجي مدفوع — لاحقاً', color: '#b45309', bg: 'rgba(245,158,11,0.12)' },
+  advisory: { label: 'شرح تعليمي — ليست محدِّد مناطق', color: '#7c3aed', bg: 'rgba(139,92,246,0.12)' },
+  heuristic: { label: 'كشف تقريبي بالشذوذ', color: '#be185d', bg: 'rgba(236,72,153,0.12)' }
 };
 
 export const ACADEMY_CATEGORIES: { key: string; title: string; intro: string; tools: AcademyTool[] }[] = [

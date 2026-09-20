@@ -97,7 +97,7 @@ export default function App() {
           className="flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-medium"
           style={{
             background: live ? 'var(--up-soft)' : 'var(--warn-soft)',
-            color: live ? '#2dd4a8' : '#fbbf24',
+            color: live ? '#0a7f6a' : '#b45309',
             border: `1px solid ${live ? 'rgba(8,153,129,0.35)' : 'rgba(245,158,11,0.35)'}`
           }}
           title={live ? 'اتصال السوق الحي يعمل' : 'بانتظار بيانات السوق…'}
