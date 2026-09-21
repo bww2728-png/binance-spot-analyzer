@@ -174,7 +174,7 @@ function stateFor(cluster, candles, direction, endIndex) {
   const staircase = perIterationStaircase(candles.slice(0, endIndex + 1), cluster.points.map(x => x.index), direction, endIndex);
   const hasBreak = Boolean(reaction) && staircase.valid;
   return {
-    state: swept >= 0 ? 'swept' : hasBreak ? 'confirmed' : cluster.touches >= 2 ? 'candidate' : 'potential',
+    state: swept >= 0 ? 'swept' : hasBreak ? 'confirmed' : cluster.touches >= 3 ? 'candidate' : 'potential',
     sweptAt: swept >= 0 ? relevant[swept].time : null,
     reaction,
     staircase,
@@ -257,7 +257,7 @@ export function detectLiquidityZones({ symbol, timeframe, candles: input, endInd
   for (const kind of ['high', 'low']) {
     const points = pivots.filter(p => p.kind === kind && p.index <= end);
     for (const cluster of clusterPoints(points, tol)) {
-      if (cluster.touches < 2) continue;
+      if (cluster.touches < 3) continue;
       const direction = kind === 'high' ? 'down' : 'up';
       const state = stateFor(cluster, candles, direction, end);
       const premium = premiumContext(candles, end);

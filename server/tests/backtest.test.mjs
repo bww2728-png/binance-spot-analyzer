@@ -492,6 +492,14 @@ test('بوابة السلّم: العكس صحيح في SSL — رد فعل قم
   assert.equal(ssl[0].confirmedAt, cs[26].time);
 });
 
+test('الأفقي: قمتان فقط → لا منطقة أفقية (3+ قمم/قيعان مطلوبة)', () => {
+  const cs = stairComplete().map(c => ({ ...c }));
+  cs[24].high = 100.30; // القمة الثالثة تتحرك خارج نطاق التجميع — تبقى قمتان في النطاق
+  const zones = detectLiquidityZones({ symbol: 'S6USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const bsl = zones.filter(z => z.kind === 'horizontal_bsl');
+  assert.equal(bsl.length, 0, 'قمتان لا تنشئان منطقة أفقية');
+});
+
 test('بوابة السلّم: نقاط خط الاتجاه تخضع نفس البوابة', () => {
   // 7/15/24 قمم متقاربة (ميل هابط) + كسور الرد فعل بعد كل لمسة + ذيل متسع 34-40 (طول >= 40)
   const cs = [
