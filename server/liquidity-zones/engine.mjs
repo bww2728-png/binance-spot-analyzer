@@ -120,6 +120,46 @@ function breakAfterReject(candles, cluster, direction) {
   return null;
 }
 
+/**
+ * بوابة السلّم (بحرية المشروع): بعد كل لمسة ينشأ رد فعل (قاع BSL / قمه SSL)،
+ * ويجب أن يُكسر بعد اللمسة التالية وقبل التي تليها — بذيل (low/high) أو إغلاق (close).
+ * كل اللمسات بلا استثناء يتبعها كسر؛ والكسر الأخير (آلية breakAfterReject بدون تعديل) = لحظة التأكيد.
+ */
+function perIterationStaircase(candles, touchIndices, direction, endIndex) {
+  const n = touchIndices.length;
+  const breaks = [];
+  if (n < 2) return { valid: true, breaks, missingAt: -1 };
+  for (let i = 0; i < n - 1; i += 1) {
+    const t = touchIndices[i];
+    const nextT = touchIndices[i + 1];
+    let reactionPrice = direction === 'down' ? Infinity : -Infinity;
+    let hasReaction = false;
+    for (let k = t + 1; k < nextT && k <= endIndex; k += 1) {
+      const c = candles[k];
+      if (!c) continue;
+      hasReaction = true;
+      reactionPrice = direction === 'down' ? Math.min(reactionPrice, c.low) : Math.max(reactionPrice, c.high);
+    }
+    if (!hasReaction) return { valid: false, breaks, missingAt: i };
+    const afterNext = touchIndices[i + 2] != null ? touchIndices[i + 2] : endIndex + 1;
+    let hit = false;
+    for (let k = nextT + 1; k < afterNext && k <= endIndex; k += 1) {
+      const c = candles[k];
+      if (!c) continue;
+      const broke = direction === 'down'
+        ? (c.low < reactionPrice || c.close < reactionPrice)
+        : (c.high > reactionPrice || c.close > reactionPrice);
+      if (broke) {
+        breaks.push({ index: k, time: c.time, reactionPrice });
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) return { valid: false, breaks, missingAt: i };
+  }
+  return { valid: true, breaks, missingAt: -1 };
+}
+
 function stateFor(cluster, candles, direction, endIndex) {
   const p = cluster.lastPoint;
   const relevant = candles.slice(p.index + 1, endIndex + 1);
@@ -131,11 +171,13 @@ function stateFor(cluster, candles, direction, endIndex) {
     ? relevant.findIndex(c => c.high >= liquidity)
     : relevant.findIndex(c => c.low <= liquidity);
   const reaction = breakAfterReject(candles.slice(0, endIndex + 1), cluster, direction);
-  const hasBreak = Boolean(reaction);
+  const staircase = perIterationStaircase(candles.slice(0, endIndex + 1), cluster.points.map(x => x.index), direction, endIndex);
+  const hasBreak = Boolean(reaction) && staircase.valid;
   return {
     state: swept >= 0 ? 'swept' : hasBreak ? 'confirmed' : cluster.touches >= 2 ? 'candidate' : 'potential',
     sweptAt: swept >= 0 ? relevant[swept].time : null,
     reaction,
+    staircase,
     liquidity,
     atr
   };
@@ -182,7 +224,11 @@ function makeZone(symbol, timeframe, kind, cluster, state, candles, endIndex, ex
     reasons: [
       `${cluster.touches} لمسات متقاربة`,
       `بروز ${p.prominenceAtr.toFixed(2)} ATR`,
-      state.state === 'confirmed' ? 'كسر القاع/القمة بعد آخر رفض' : 'بانتظار كسر القاع/القمة بعد آخر رفض',
+      state.state === 'confirmed'
+        ? 'كسر بعد كل تكرار — سلسلة مكتملة'
+        : state.staircase && !state.staircase.valid
+          ? 'سلسلة الكسور بعد كل تكرار غير مكتملة'
+          : 'بانتظار كسر الرد فعل الناشئ بعد كل تكرار',
       ...(extra.trendline ? ['ثلاث نقاط أو أكثر على خط اتجاه'] : []),
       ...(extra.premium?.premium ? ['داخل Premium فوق 0.5'] : [])
     ],

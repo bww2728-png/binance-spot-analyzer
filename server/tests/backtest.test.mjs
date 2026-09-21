@@ -346,6 +346,204 @@ test('محرك السيولة: feedback يضبط التسامح ويحفظ عد�
   assert.equal(adjustment.rejected.length, 2);
 });
 
+// ===== بوابة السلّم: كسر الرد فعل الناشئ بعد كل تكرار (بحرية المشروع) =====
+
+const stairCandle = (i, open, high, low, close) => ({ time: i * 3600, open, high, low, close, volume: 1, index: i });
+
+/* سلسلة كاملة (34 شمعة): صعود بادئ ← لمسة1(100.05) ← رد فعل(99.91) ← لمسة2(100.04)
+ * ← كسر بذيل(99.90 < 99.91) ← لمسة3(100.06) ← رد فعل(99.90) ← الكسر الأخير(99.80/99.84) = التأكيد
+ * النافذة التكيّفية تبدأ المسح من leftBars(4) — لذلك الصعود البادئ 0-6 ضروري.
+ */
+const stairComplete = () => [
+  stairCandle(0, 99.85, 99.89, 99.83, 99.87),
+  stairCandle(1, 99.87, 99.90, 99.84, 99.88),
+  stairCandle(2, 99.88, 99.91, 99.85, 99.89),
+  stairCandle(3, 99.89, 99.92, 99.86, 99.90),
+  stairCandle(4, 99.90, 99.93, 99.87, 99.91),
+  stairCandle(5, 99.91, 99.94, 99.88, 99.92),
+  stairCandle(6, 99.92, 99.95, 99.90, 99.94),
+  stairCandle(7, 99.94, 100.05, 99.85, 100.00),
+  stairCandle(8, 100.00, 100.03, 99.98, 100.00),
+  stairCandle(9, 100.00, 100.02, 99.98, 100.00),
+  stairCandle(10, 100.00, 100.01, 99.93, 99.95),
+  stairCandle(11, 99.95, 99.99, 99.91, 99.95),
+  stairCandle(12, 99.95, 99.99, 99.91, 99.95),
+  stairCandle(13, 99.95, 99.99, 99.91, 99.95),
+  stairCandle(14, 99.95, 99.99, 99.91, 99.95),
+  stairCandle(15, 99.95, 100.04, 99.91, 99.95),
+  stairCandle(16, 99.95, 100.02, 99.91, 99.95),
+  stairCandle(17, 99.95, 99.95, 99.90, 99.95),
+  stairCandle(18, 99.95, 99.99, 99.92, 99.95),
+  stairCandle(19, 99.95, 99.99, 99.92, 99.95),
+  stairCandle(20, 99.95, 99.99, 99.92, 99.95),
+  stairCandle(21, 99.95, 99.99, 99.92, 99.95),
+  stairCandle(22, 99.95, 99.99, 99.92, 99.95),
+  stairCandle(23, 99.95, 99.99, 99.92, 99.95),
+  stairCandle(24, 99.95, 100.06, 99.96, 99.95),
+  stairCandle(25, 99.95, 100.00, 99.84, 99.86),
+  stairCandle(26, 99.86, 99.86, 99.80, 99.82),
+  stairCandle(27, 99.82, 99.84, 99.72, 99.76),
+  stairCandle(28, 99.76, 99.80, 99.70, 99.74),
+  stairCandle(29, 99.74, 99.81, 99.68, 99.76),
+  stairCandle(30, 99.76, 99.79, 99.66, 99.73),
+  stairCandle(31, 99.73, 99.78, 99.64, 99.72),
+  stairCandle(32, 99.72, 99.77, 99.63, 99.71),
+  stairCandle(33, 99.71, 99.76, 99.62, 99.70),
+  stairCandle(34, 99.55, 99.67, 99.50, 99.62),
+  stairCandle(35, 99.62, 99.68, 99.45, 99.63),
+  stairCandle(36, 99.63, 99.69, 99.40, 99.64),
+  stairCandle(37, 99.64, 99.71, 99.35, 99.65),
+  stairCandle(38, 99.65, 99.72, 99.30, 99.66),
+  stairCandle(39, 99.66, 99.73, 99.25, 99.67),
+  stairCandle(40, 99.67, 99.74, 99.20, 99.68)
+];
+
+test('بوابة السلّم: سلسلة كاملة (لمسة←رد فعل←لمسة←كسر بذيل) → confirmed عند الكسر الأخير', () => {
+  const cs = stairComplete();
+  const zones = detectLiquidityZones({ symbol: 'S1USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const bsl = zones.filter(z => z.kind === 'horizontal_bsl');
+  assert.equal(bsl.length, 1);
+  assert.equal(bsl[0].state, 'confirmed');
+  assert.equal(bsl[0].touches, 3);
+  assert.ok(bsl[0].reasons.some(r => r.includes('سلسلة مكتملة')));
+  assert.equal(bsl[0].confirmedAt, cs[26].time);
+  assert.equal(bsl[0].liquidityLevel, bsl[0].retailStop);
+  const ssl = zones.filter(z => z.kind === 'horizontal_ssl');
+  assert.ok(ssl.every(z => z.state !== 'confirmed'), 'رد فعل SSL لم يكتمل سلسله هنا');
+});
+
+test('بوابة السلّم: رد فعل لم يُكسر بعد اللمسة التالية → candidate بلا تأكيد', () => {
+  const cs = stairComplete().map(c => ({ ...c }));
+  // شمعة 17: الرد فعل يبقى فوقه (99.91 = 99.91) — لا كسر في نافذة الكسر
+  cs[17].low = 99.91;
+  const zones = detectLiquidityZones({ symbol: 'S2USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const bsl = zones.filter(z => z.kind === 'horizontal_bsl');
+  assert.equal(bsl.length, 1);
+  assert.equal(bsl[0].state, 'candidate');
+  assert.ok(bsl[0].reasons.some(r => r.includes('غير مكتملة')));
+  assert.equal(bsl[0].confirmedAt, null);
+});
+
+test('بوابة السلّم: التسلسل الصارم — انهيار قبل اللمسة التالية لا يُقبل كسراً', () => {
+  const cs = stairComplete().map(c => ({ ...c }));
+  // شمعة 9 تنهار (99.80) قبل لمسة 2 — يُمتص في تعريف الرد فعل، ونافذة الكسر تبقى بلا كسر
+  cs[9].low = 99.80;
+  const zones = detectLiquidityZones({ symbol: 'S3USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const bsl = zones.filter(z => z.kind === 'horizontal_bsl');
+  assert.equal(bsl.length, 1);
+  assert.equal(bsl[0].state, 'candidate');
+  assert.ok(bsl[0].reasons.some(r => r.includes('غير مكتملة')));
+});
+
+test('بوابة السلّم: العكس صحيح في SSL — رد فعل قمه ويُكسر صعوداً', () => {
+  // 0-6 تدرج نازل نحو اللمسة الأولى، 7 لمسة SSL1 (low 99.95)، 8-14 رد فعل صاعد (قمه 100.12)،
+  // 15 لمسة SSL2 (low 99.96)، 16 كسر بالذيل (high 100.14 > 100.12)، 17-23 رد فعل2 (قمه 100.14 من 16)،
+  // 24 لمسة SSL3 (low 99.94)، 25 كسر2 (high 100.16 > 100.14)، 26 reaction أخير (100.18 > 100.16) = التأكيد،
+  // 27-40 ذيل متدرج نازل يمنع أقماع الذيل من الانضمام ويحافظ على ATR معقولاً.
+  const cs = [
+    stairCandle(0, 100.40, 100.42, 100.38, 100.39),
+    stairCandle(1, 100.39, 100.41, 100.37, 100.38),
+    stairCandle(2, 100.38, 100.40, 100.36, 100.37),
+    stairCandle(3, 100.37, 100.39, 100.35, 100.36),
+    stairCandle(4, 100.36, 100.38, 100.34, 100.35),
+    stairCandle(5, 100.35, 100.37, 100.33, 100.34),
+    stairCandle(6, 100.34, 100.36, 100.32, 100.33),
+    stairCandle(7, 100.33, 100.34, 99.95, 100.00),
+    stairCandle(8, 100.00, 100.09, 100.02, 100.05),
+    stairCandle(9, 100.05, 100.09, 100.02, 100.05),
+    stairCandle(10, 100.05, 100.10, 100.07, 100.09),
+    stairCandle(11, 100.09, 100.12, 100.09, 100.10),
+    stairCandle(12, 100.10, 100.12, 100.09, 100.10),
+    stairCandle(13, 100.10, 100.12, 100.09, 100.10),
+    stairCandle(14, 100.10, 100.12, 100.09, 100.10),
+    stairCandle(15, 100.10, 100.12, 99.96, 100.00),
+    stairCandle(16, 100.00, 100.14, 99.96, 100.00),
+    stairCandle(17, 100.00, 100.10, 99.98, 99.99),
+    stairCandle(18, 99.99, 100.12, 100.00, 100.05),
+    stairCandle(19, 100.05, 100.12, 100.00, 100.05),
+    stairCandle(20, 100.05, 100.12, 100.00, 100.05),
+    stairCandle(21, 100.05, 100.12, 100.00, 100.05),
+    stairCandle(22, 100.05, 100.12, 100.00, 100.05),
+    stairCandle(23, 100.05, 100.12, 100.00, 100.05),
+    stairCandle(24, 100.05, 100.12, 99.94, 100.00),
+    stairCandle(25, 100.00, 100.16, 99.96, 99.98),
+    stairCandle(26, 99.98, 100.18, 99.96, 99.98),
+    stairCandle(27, 99.98, 100.17, 99.98, 99.99),
+    stairCandle(28, 99.99, 100.16, 99.99, 100.00),
+    stairCandle(29, 100.00, 100.15, 100.00, 100.01),
+    stairCandle(30, 100.01, 100.14, 100.01, 100.02),
+    stairCandle(31, 100.02, 100.13, 100.02, 100.03),
+    stairCandle(32, 100.03, 100.12, 100.03, 100.04),
+    stairCandle(33, 100.04, 100.11, 100.04, 100.05),
+    stairCandle(34, 100.05, 100.10, 100.05, 100.06),
+    stairCandle(35, 100.06, 100.09, 100.06, 100.07),
+    stairCandle(36, 100.07, 100.08, 100.07, 100.08),
+    stairCandle(37, 100.08, 100.08, 100.08, 100.08),
+    stairCandle(38, 100.08, 100.08, 100.08, 100.08),
+    stairCandle(39, 100.08, 100.08, 100.08, 100.08),
+    stairCandle(40, 100.08, 100.08, 100.08, 100.08)
+  ];
+  const zones = detectLiquidityZones({ symbol: 'S4USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const ssl = zones.filter(z => z.kind === 'horizontal_ssl');
+  assert.equal(ssl.length, 1);
+  assert.equal(ssl[0].state, 'confirmed');
+  assert.equal(ssl[0].touches, 3);
+  assert.ok(ssl[0].reasons.some(r => r.includes('سلسلة مكتملة')));
+  assert.equal(ssl[0].confirmedAt, cs[26].time);
+});
+
+test('بوابة السلّم: نقاط خط الاتجاه تخضع نفس البوابة', () => {
+  // 7/15/24 قمم متقاربة (ميل هابط) + كسور الرد فعل بعد كل لمسة + ذيل متسع 34-40 (طول >= 40)
+  const cs = [
+    stairCandle(0, 99.85, 99.89, 99.83, 99.87),
+    stairCandle(1, 99.87, 99.90, 99.84, 99.88),
+    stairCandle(2, 99.88, 99.91, 99.85, 99.89),
+    stairCandle(3, 99.89, 99.92, 99.86, 99.90),
+    stairCandle(4, 99.90, 99.93, 99.87, 99.91),
+    stairCandle(5, 99.91, 99.94, 99.88, 99.92),
+    stairCandle(6, 99.92, 99.95, 99.90, 99.94),
+    stairCandle(7, 99.94, 100.05, 99.85, 100.00),
+    stairCandle(8, 100.00, 100.02, 99.95, 99.97),
+    stairCandle(9, 99.97, 99.99, 99.93, 99.95),
+    stairCandle(10, 99.95, 99.97, 99.90, 99.92),
+    stairCandle(11, 99.92, 99.95, 99.91, 99.93),
+    stairCandle(12, 99.93, 99.97, 99.92, 99.95),
+    stairCandle(13, 99.95, 99.99, 99.93, 99.97),
+    stairCandle(14, 99.97, 100.00, 99.94, 99.98),
+    stairCandle(15, 99.98, 100.02, 99.94, 99.98),
+    stairCandle(16, 99.98, 99.98, 99.80, 99.91),
+    stairCandle(17, 99.91, 99.92, 99.81, 99.83),
+    stairCandle(18, 99.83, 99.87, 99.82, 99.85),
+    stairCandle(19, 99.85, 99.89, 99.84, 99.87),
+    stairCandle(20, 99.87, 99.91, 99.86, 99.89),
+    stairCandle(21, 99.89, 99.93, 99.88, 99.91),
+    stairCandle(22, 99.91, 99.95, 99.90, 99.93),
+    stairCandle(23, 99.93, 99.96, 99.92, 99.94),
+    stairCandle(24, 99.94, 99.99, 99.92, 99.98),
+    stairCandle(25, 99.98, 99.98, 99.70, 99.81),
+    stairCandle(26, 99.81, 99.82, 99.65, 99.68),
+    stairCandle(27, 99.68, 99.70, 99.58, 99.62),
+    stairCandle(28, 99.62, 99.66, 99.56, 99.60),
+    stairCandle(29, 99.60, 99.63, 99.54, 99.57),
+    stairCandle(30, 99.57, 99.59, 99.51, 99.53),
+    stairCandle(31, 99.53, 99.55, 99.48, 99.50),
+    stairCandle(32, 99.50, 99.51, 99.44, 99.46),
+    stairCandle(33, 99.46, 99.47, 99.40, 99.42),
+    stairCandle(34, 99.35, 99.48, 99.25, 99.37),
+    stairCandle(35, 99.37, 99.49, 99.20, 99.38),
+    stairCandle(36, 99.38, 99.50, 99.15, 99.39),
+    stairCandle(37, 99.39, 99.51, 99.10, 99.40),
+    stairCandle(38, 99.40, 99.52, 99.05, 99.41),
+    stairCandle(39, 99.41, 99.53, 99.00, 99.42),
+    stairCandle(40, 99.42, 99.54, 98.95, 99.43)
+  ];
+  const zones = detectLiquidityZones({ symbol: 'S5USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const trend = zones.filter(z => z.kind === 'trendline_bsl');
+  assert.equal(trend.length, 1);
+  assert.equal(trend[0].state, 'confirmed');
+  assert.ok(trend[0].trendline.slope < 0, 'ميل هابط');
+  assert.ok(trend[0].reasons.some(r => r.includes('سلسلة مكتملة')));
+});
 
 // ===== الكشف البصري متعدد الوسائط (visual.mjs) — حتمي وبلا شبكة =====
 
