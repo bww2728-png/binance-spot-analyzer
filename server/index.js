@@ -562,14 +562,31 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
 
 // ==================== الباك تيست + الفرص الحية (walk-forward + حلقة تعلم مستمرة) ====================
 
-// قائمة المستهدفة: الحلال + غير الباركود فقط (coin_shariah + coin_flags) — مؤكدة بأجوبتك
+// قائمة المستهدفة: الحلال + غير الباركود فقط — بأسماء الأعمدة الفعلية:
+// coin_shariah.verdict ('halal' | 'haram')، coin_flags.barcode (bool بأساس بدون لاحقة مثل 'BTC')
 const resolveTargets = async (limit = Number.POSITIVE_INFINITY) => {
   const [sh, flags] = await Promise.all([
     db.coinShariah.list().catch(() => []),
     db.coinFlags.list().catch(() => [])
   ]);
-  const barcode = new Set((flags || []).filter(f => f.is_barcode).map(f => f.symbol));
-  const halal = (sh || []).filter(r => r.is_halal !== false).map(r => r.symbol);
+  const barcode = new Set();
+  for (const f of (flags || [])) {
+    if (f.barcode === true || f.is_barcode === true) {
+      const base = String(f.symbol || '').toUpperCase().trim();
+      if (!base) continue;
+      barcode.add(base);            // أساس
+      barcode.add(base + 'USDT');   // زوج يوسدت
+      barcode.add(base + 'FDUSD');  // زدوج فيديوسدت
+    }
+  }
+  const halal = (sh || [])
+    .filter(r => {
+      const verdict = String(r.verdict ?? '').toLowerCase().trim();
+      if (verdict) return verdict === 'halal';
+      return r.is_halal !== false; // احتياطي فقط لو تغيّر المخطط
+    })
+    .map(r => r.symbol)
+    .filter(s => /^[A-Z0-9]+USDT$/.test(s)); // زوج يوسدت حقيقي
   const seen = new Set();
   return halal.filter(s => {
     if (seen.has(s) || barcode.has(s)) return false;
@@ -646,6 +663,8 @@ const runLiquidityLiveRotation = async () => {
   liquidityState.liveBusy = true;
   try {
     const targets = await resolveTargets();
+    const allowed = new Set(targets);
+    liquidityState.liveResults = liquidityState.liveResults.filter(z => allowed.has(z.symbol)); // تطهير عملات الخرج
     liquidityState.liveRotation += 1;
     liquidityState.livePairsDone = 0;
     liquidityState.livePairsTotal = targets.length;
@@ -684,6 +703,8 @@ const runLiquidityHistoryRotation = async () => {
   liquidityState.historyBusy = true;
   try {
     const targets = await resolveTargets();
+    const allowed = new Set(targets);
+    liquidityState.historyResults = liquidityState.historyResults.filter(z => allowed.has(z.symbol)); // تطهير عملات الخرج
     liquidityState.historyRotation += 1;
     liquidityState.historyPairsDone = 0;
     liquidityState.historyPairsTotal = targets.length;
