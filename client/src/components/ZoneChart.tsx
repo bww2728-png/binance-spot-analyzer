@@ -72,13 +72,17 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
     const pivotMs = pivot * 1000;
     let lastSec = 0;
 
-    // جلب مع إعادة محاولة واحدة
+    // جلب مع محاولات بتأخير متزايد — تجنب سقوط إعادة المحاولة تحت حدود بينانس (429)
     const fetchRetry = async (limit: number, startTime?: number, endTime?: number): Promise<Candle[]> => {
-      try {
-        return await fetchKlines(zone.symbol, zone.timeframe, limit, startTime, endTime);
-      } catch {
-        return await fetchKlines(zone.symbol, zone.timeframe, limit, startTime, endTime);
+      const delays = [0, 700, 2000];
+      let lastError: unknown = null;
+      for (const d of delays) {
+        if (d > 0) await new Promise(r => setTimeout(r, d));
+        try {
+          return await fetchKlines(zone.symbol, zone.timeframe, limit, startTime, endTime);
+        } catch (e) { lastError = e; }
       }
+      throw lastError ?? new Error('klines unavailable');
     };
 
     void (async () => {
@@ -91,9 +95,39 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
         if (disposed) return;
         const before = settled[0].status === 'fulfilled' ? settled[0].value : [];
         const after = settled[1].status === 'fulfilled' ? settled[1].value : [];
+        // نافذة متصلة (proven): كاش العميل قد يحفظ نوافذ متباعدة لنفس المفتاح —
+        // المشي المتصل من المحك (شمعة شمعة، توقف عند أول فراغ) يضمن اتصال المحور الزمني
+        // ولا يمتد عبر فجوة (لا شموع ممتدة عبر نوافذ متباعدة)
+        const tfSec = tfSeconds(zone.timeframe);
+        const walkBack = (raw: Candle[], pivot: number, limit: number): Candle[] => {
+          const byTime = new Map(raw.filter(c => c.time <= pivot).map(c => [c.time, c] as const));
+          const run: Candle[] = [];
+          let t = pivot;
+          while (run.length < limit) {
+            const c = byTime.get(t);
+            if (!c) break;
+            run.unshift(c);
+            t -= tfSec;
+          }
+          return run;
+        };
+        const walkForward = (raw: Candle[], pivot: number, limit: number): Candle[] => {
+          const byTime = new Map(raw.filter(c => c.time >= pivot).map(c => [c.time, c] as const));
+          const run: Candle[] = [];
+          let t = pivot;
+          while (run.length < limit) {
+            const c = byTime.get(t);
+            if (!c) break;
+            run.push(c);
+            t += tfSec;
+          }
+          return run;
+        };
+        const beforeWin = walkBack(before, pivot, BEFORE);
+        const afterWin = walkForward(after, pivot, AFTER);
         const map = new Map<number, Candle>();
-        for (const c of before) map.set(c.time, c);
-        for (const c of after) map.set(c.time, c);
+        for (const c of beforeWin) map.set(c.time, c);
+        for (const c of afterWin) map.set(c.time, c);
         const candles = Array.from(map.values()).sort((a, b) => a.time - b.time);
         if (!candles.length) { setFailed(true); setLoading(false); return; }
         series.setData(candles.map(toBar));
