@@ -53,10 +53,12 @@ function ZoneCard({ zone, onOpen }: { zone: LiquidityDetection; onOpen: (zone: L
 function ZoneDetail({ zone, onClose, onReviewed }: { zone: LiquidityDetection; onClose: () => void; onReviewed: (zone: LiquidityDetection) => void }) {
   const [note, setNote] = useState(zone.review?.note ?? '');
   const [saving, setSaving] = useState(false);
-  const [screenshot, setScreenshot] = useState('');
+  const [chartAt, setChartAt] = useState('');
+  const [chartAfter, setChartAfter] = useState('');
+  const [phase, setPhase] = useState<'at' | 'after'>('at');
   useEffect(() => {
     const ac = new AbortController();
-    void api.getLiquidityZone(zone.id, ac.signal).then(x => setScreenshot(x.screenshot)).catch(() => {});
+    void api.getLiquidityZone(zone.id, ac.signal).then(x => { setChartAt(x.screenshotAt); setChartAfter(x.screenshotAfter); }).catch(() => {});
     return () => ac.abort();
   }, [zone.id]);
   const review = async (verdict: 'accept' | 'reject') => {
@@ -68,7 +70,8 @@ function ZoneDetail({ zone, onClose, onReviewed }: { zone: LiquidityDetection; o
       setSaving(false);
     }
   };
-  const image = screenshot ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(screenshot)}` : '';
+  const raw = phase === 'after' ? chartAfter : chartAt;
+  const image = raw ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}` : '';
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3" style={{ background: 'rgba(15,23,42,.35)' }} onClick={onClose}>
       <div className="w-full max-w-5xl max-h-[92vh] overflow-auto rounded-2xl p-4" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', boxShadow: 'var(--shadow-lg)' }} onClick={e => e.stopPropagation()}>
@@ -80,8 +83,25 @@ function ZoneDetail({ zone, onClose, onReviewed }: { zone: LiquidityDetection; o
           <button onClick={onClose} className="px-3 py-1.5 rounded-lg text-[12px]" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>إغلاق</button>
         </div>
         <div className="grid lg:grid-cols-[1.2fr_1fr] gap-4">
-          <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid var(--border-1)' }}>
-            {image ? <img src={image} alt={`شارت ${zone.symbol} ${zone.timeframe}`} className="w-full" /> : <div className="h-64 flex items-center justify-center text-sm" style={{ color: 'var(--text-3)' }}>تحميل الصورة…</div>}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <button onClick={() => setPhase('at')} className="px-3 py-1.5 rounded-lg text-[11px]" style={{ background: phase === 'at' ? 'var(--accent-soft)' : 'var(--surface-1)', color: phase === 'at' ? 'var(--accent)' : 'var(--text-2)' }}>عند الكشف</button>
+              <button onClick={() => setPhase('after')} className="px-3 py-1.5 rounded-lg text-[11px]" style={{ background: phase === 'after' ? 'var(--accent-soft)' : 'var(--surface-1)', color: phase === 'after' ? 'var(--accent)' : 'var(--text-2)' }}>بعد الكشف</button>
+              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>الشموع حقيقية والمستويات فوقها</span>
+            </div>
+            <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid var(--border-1)' }}>
+              {image ? <img src={image} alt={`شارت ${zone.symbol} ${zone.timeframe} ${phase === 'after' ? 'بعد الكشف' : 'عند الكشف'}`} className="w-full" /> : <div className="h-64 flex items-center justify-center text-sm" style={{ color: 'var(--text-3)' }}>تحميل الصورة…</div>}
+            </div>
+            <div className="rounded-lg p-2 flex flex-wrap gap-x-4 gap-y-1" style={{ background: 'var(--surface-1)' }}>
+              <span className="text-[10px]"><span title="المرجع" style={{ color: '#64748b' }}>— —</span> المرجع (المقاومة/الدعم)</span>
+              <span className="text-[10px]"><span style={{ color: '#7c3aed' }}>◯</span> نقطة لمس (قمة/قاع بنّت المنطقة)</span>
+              <span className="text-[10px]"><span style={{ color: '#f59e0b' }}>━</span> خط الاتجاه</span>
+              <span className="text-[10px]"><span style={{ color: '#7c3aed' }}>تظليل</span> Premium</span>
+              <span className="text-[10px]"><span style={{ color: '#d97706' }}>· ·</span> وقف Retail</span>
+            </div>
+            <div className="text-[10px] rounded-lg p-2" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>
+              لتحقيق منطقك: راقب النقاط ◯ والمستويات فوق الشموع الحقيقية. إن كان التحديد خاطئاً ارفضه واكتب ملاحظتك — ملاحظتك تدخل تعلّم المحرك.
+            </div>
           </div>
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2">

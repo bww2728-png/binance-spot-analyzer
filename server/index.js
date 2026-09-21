@@ -613,29 +613,137 @@ const liquidityState = {
   error: null
 };
 
-const zoneScreenshot = (zone) => {
+// عرض حقيقي من الشموع الفعلية (بدون أي رسمة مزيفة): جسم + ذيل لكل شمعة حسب OHLC الحقيقي،
+// مع رسم المنطقة كاملة: المرجع/السيولة/وقف Retail/نقاط اللمس/خط الاتجاه/تظليل Premium + مفتاح قروء.
+const escapeSvg = (v) => String(v).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+const renderZoneChart = (zone, candles, markerIndex) => {
   const w = 960;
-  const h = 360;
-  const ref = Number(zone.referenceLevel) || 0;
-  const liq = Number(zone.liquidityLevel) || ref;
-  const top = Math.max(ref, liq);
-  const bottom = Math.min(ref, liq);
-  const pad = Math.max((top - bottom) * 4, Math.abs(ref) * 0.01, 1);
-  const y = (p) => 40 + ((top + pad - p) / (top - bottom + pad * 2)) * 250;
+  const h = 420;
+  const left = 50;
+  const right = 940;
+  const top = 60;
+  const bottom = 310;
+  const list = (candles || []).filter(c => Number.isFinite(c.high) && Number.isFinite(c.low));
+  if (list.length < 5) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="100%" height="100%" fill="#fff"/><text x="${w / 2}" y="${h / 2}" text-anchor="middle" font-family="Arial" font-size="20" fill="#64748b">لا شموع متاحة للعرض</text></svg>`;
+  }
+  const ref = Number(zone.referenceLevel);
+  const liq = Number(zone.liquidityLevel);
+  const stop = Number(zone.retailStop);
+  const fib = zone.premium?.fib || null;
+  const fibVals = fib ? [fib.low, fib.high].filter(Number.isFinite) : [];
+  const lows = list.map(c => Math.min(c.low, ref, liq, stop, ...fibVals));
+  const highs = list.map(c => Math.max(c.high, ref, liq, stop, ...fibVals));
+  const pMin = Math.min(...lows);
+  const pMax = Math.max(...highs);
+  const span = Math.max(pMax - pMin, pMax * 0.004, 1e-12);
+  const x = (i) => left + ((i + 0.5) / list.length) * (right - left);
+  const y = (p) => bottom - ((p - pMin) / span) * (bottom - top);
+  const bodyW = Math.max(((right - left) / list.length) * 0.6, 1);
   const color = String(zone.kind).includes('ssl') ? '#089981' : '#f23645';
-  const title = `${zone.symbol} ${zone.timeframe} ${zone.kind}`;
-  const escape = (v) => String(v).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  const marker = markerIndex != null && markerIndex >= 0 && markerIndex < list.length ? x(markerIndex) : null;
+  // الشموع الحقيقية: جسم حسب open/close + ذيل حسب high/low
+  const bars = list.map((c, i) => {
+    const cx = x(i);
+    const up = c.close >= c.open;
+    const col = up ? '#26a69a' : '#ef5350';
+    const hi = y(c.high);
+    const lo = y(c.low);
+    const op = y(c.open);
+    const cl = y(c.close);
+    const topB = Math.min(op, cl);
+    const botB = Math.max(op, cl);
+    return `<line x1="${cx}" x2="${cx}" y1="${hi}" y2="${lo}" stroke="${col}" stroke-width="1"/><rect x="${(cx - bodyW / 2)}" y="${topB}" width="${bodyW}" height="${Math.max(botB - topB, 1)}" fill="${col}"/>`;
+  }).join('');
+  const hLine = (p, col, width, dash, label) => {
+    if (!Number.isFinite(p)) return '';
+    const ly = y(p);
+    const text = `<text x="${right - 8}" y="${ly - 6}" text-anchor="end" font-family="Arial" font-size="15" fill="${col}">${escapeSvg(label)} ${p.toPrecision(8)}</text>`;
+    return `<line x1="${left}" x2="${right}" y1="${ly}" y2="${ly}" stroke="${col}" stroke-width="${width}" ${dash}/>${text}`;
+  };
+  // دوائر نقاط اللمس على القمم/القيعان التي بنّت المنطقة (دوائر فقط حول النقاط)
+  const dots = (zone.touchPoints || []).map(t => {
+    const i = list.findIndex(c => c.time === t.time);
+    if (i < 0) return '';
+    return `<circle cx="${x(i)}" cy="${y(t.price)}" r="6" fill="none" stroke="#7c3aed" stroke-width="2.5"/>`;
+  }).join('');
+  // خط الاتجاه: يُرسم من النقاط + امتداده للمشروع
+  let trend = '';
+  if (zone.trendline?.points?.length) {
+    const pts = zone.trendline.points.map(p => {
+      const i = list.findIndex(c => c.time === p.time);
+      return i >= 0 ? `${x(i)},${y(p.price)}` : null;
+    }).filter(Boolean);
+    if (pts.length) {
+      trend = `<polyline points="${pts.join(' ')}" fill="none" stroke="#f59e0b" stroke-width="2.5"/>`;
+    }
+  }
+  // تظليل منطقة Premium إن انطبقت
+  let premium = '';
+  if (fib && Number.isFinite(fib.low) && Number.isFinite(fib.high)) {
+    const yMid = y((fib.low + fib.high) / 2);
+    premium = `<rect x="${left}" y="${top}" width="${right - left}" height="${Math.max(yMid - top, 0)}" fill="rgba(124,58,237,0.08)"/><text x="${left + 8}" y="${top + 18}" font-family="Arial" font-size="13" fill="#7c3aed">Premium</text>`;
+  }
+  const grid = Array.from({ length: 6 }, (_, i) => `<line x1="${left}" x2="${right}" y1="${top + i * ((bottom - top) / 5)}" y2="${top + i * ((bottom - top) / 5)}" stroke="#f1f5f9"/>`).join('');
+  const legend = [
+    ['<line x1="0" x2="18" y1="0" y2="0" stroke="#64748b" stroke-width="3" stroke-dasharray="8 8"/>', 'المرجع'],
+    [`<line x1="0" x2="18" y1="0" y2="0" stroke="${color}" stroke-width="4" stroke-dasharray="3 7"/>`, 'السيولة'],
+    ['<line x1="0" x2="18" y1="0" y2="0" stroke="#d97706" stroke-width="3" stroke-dasharray="2 5"/>', 'وقف Retail'],
+    ['<circle cx="9" cy="0" r="5" fill="none" stroke="#7c3aed" stroke-width="2.5"/>', 'نقطة لمس'],
+    ['<line x1="0" x2="18" y1="0" y2="0" stroke="#f59e0b" stroke-width="2.5"/>', 'خط اتجاه']
+  ].map((p, i) => `<g transform="translate(${left + i * 175},${335})">${p[0]}<text x="26" y="5" font-family="Arial" font-size="14" fill="#334155">${escapeSvg(p[1])}</text></g>`).join('');
+  const title = `${zone.symbol} ${zone.timeframe} — ${String(zone.kind).replace(/_/g, ' ')} — ${String(zone.state)}`;
+  const reasons = (zone.reasons || []).slice(0, 3).join(' · ');
+  const markerLine = marker ? `<line x1="${marker}" x2="${marker}" y1="${top - 24}" y2="${bottom}" stroke="#334155" stroke-width="1.5" stroke-dasharray="4 4"/><text x="${marker + 6}" y="${top - 10}" font-family="Arial" font-size="13" fill="#334155">الكشف</text>` : '';
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
     <rect width="100%" height="100%" fill="#fff"/>
-    <g stroke="#e5e7eb">${Array.from({ length: 7 }, (_, i) => `<line x1="0" x2="${w}" y1="${50 + i * 42}" y2="${50 + i * 42}"/>`).join('')}</g>
-    <path d="M35 275 L150 180 L245 235 L360 125 L470 205 L610 95 L760 165 L900 80" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round"/>
-    <line x1="45" x2="920" y1="${y(ref)}" y2="${y(ref)}" stroke="#64748b" stroke-width="3" stroke-dasharray="8 8"/>
-    <line x1="45" x2="920" y1="${y(liq)}" y2="${y(liq)}" stroke="${color}" stroke-width="4" stroke-dasharray="3 7"/>
-    <text x="55" y="${y(ref) - 8}" font-family="Arial" font-size="18" fill="#475569">${escape(`Reference ${ref}`)}</text>
-    <text x="55" y="${y(liq) - 8}" font-family="Arial" font-size="18" font-weight="700" fill="${color}">${escape(`Liquidity ${liq}`)}</text>
-    <text x="55" y=" thirty" font-family="Arial" font-size="22" fill="#334155">${escape(title)}</text>
-    <text x="55" y="335" font-family="Arial" font-size="15" fill="#64748b">${escape(zone.reasons?.join(' · ') || '')}</text>
-  </svg>`.replace('y=" thirty"', 'y="28"');
+    ${grid}${premium}
+    ${bars}${dots}${trend}
+    ${hLine(ref, '#64748b', 3, 'stroke-dasharray="8 8"', 'المرجع')}
+    ${hLine(liq, color, 4, 'stroke-dasharray="3 7"', 'السيولة')}
+    ${hLine(stop, '#d97706', 3, 'stroke-dasharray="2 5"', 'وقف Retail')}
+    ${markerLine}
+    <text x="${left}" y="32" font-family="Arial" font-size="20" font-weight="700" fill="#0f172a">${escapeSvg(title)}</text>
+    <text x="${left}" y="${h - 32}" font-family="Arial" font-size="13" fill="#64748b">${escapeSvg(reasons)}</text>
+    ${legend}
+  </svg>`;
+};
+
+// الشموع حول لحظة معينة: نافذة قبل/بعد المؤشر
+const zoneCandlesWindow = async (zone, phase) => {
+  const tfMs = tfToMs(zone.timeframe);
+  const anchorSec = Math.max(Math.max(Number(zone.confirmedAt) || 0, Number(zone.createdAt) || 0), Number(zone.detectedAt) > 1e12 ? Number(zone.detectedAt) / 1000 : Number(zone.detectedAt) || 0) || 0;
+  if (!anchorSec) return [];
+  const before = 60;
+  const after = phase === 'after' ? 80 : 2;
+  const startTime = (anchorSec - before * tfMs / 1000) * 1000;
+  const endTime = (anchorSec + after * tfMs / 1000) * 1000;
+  const raw = await db.binance.klines(zone.symbol, zone.timeframe, before + after + 10, startTime, endTime);
+  return normalizeCandles(raw);
+};
+
+const tfToMs = (tf) => {
+  const n = parseInt(tf, 10) || 1;
+  const unit = tf.replace(/[0-9]/g, '');
+  const mult = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[unit] || 3_600_000;
+  return n * mult;
+};
+
+const zoneScreenshotAt = async (zone, phase) => {
+  const candles = await zoneCandlesWindow(zone, phase);
+  if (!candles.length) return renderZoneChart(zone, [], null);
+  // مؤشر الكشف: أقرب شمعة إلى لحظة الإنشاء
+  const anchorMs = (Math.max(Number(zone.confirmedAt) || 0, Number(zone.createdAt) || 0) || (Number(zone.detectedAt) > 1e12 ? Number(zone.detectedAt) / 1000 : Number(zone.detectedAt) || 0)) * 1000;
+  let markerIndex = null;
+  if (anchorMs) {
+    let best = Infinity;
+    for (let i = 0; i < candles.length; i += 1) {
+      const d = Math.abs(candles[i].time * 1000 - anchorMs);
+      if (d < best) { best = d; markerIndex = i; }
+    }
+  }
+  return renderZoneChart(zone, candles, markerIndex);
 };
 
 const saveLiquidityEvent = async (type, zone, message, meta = {}) => {
@@ -785,14 +893,16 @@ app.get('/api/liquidity-zones/:id', handle(async (req, res) => {
   const id = String(req.params.id);
   const zone = [...liquidityState.liveResults, ...liquidityState.historyResults].find(x => x.id === id);
   if (!zone) return res.status(404).json({ error: 'التحديد غير موجود' });
-  res.json({ zone, screenshot: zoneScreenshot(zone) });
+  const [at, after] = await Promise.all([zoneScreenshotAt(zone, 'at'), zoneScreenshotAt(zone, 'after')]);
+  res.json({ zone, screenshotAt: at, screenshotAfter: after });
 }));
 
 app.get('/api/liquidity-zones/:id/screenshot', handle(async (req, res) => {
   const id = String(req.params.id);
   const zone = [...liquidityState.liveResults, ...liquidityState.historyResults].find(x => x.id === id);
   if (!zone) return res.status(404).json({ error: 'التحديد غير موجود' });
-  res.type('image/svg+xml').send(zoneScreenshot(zone));
+  const phase = req.query.phase === 'after' ? 'after' : 'at';
+  res.type('image/svg+xml').send(await zoneScreenshotAt(zone, phase));
 }));
 
 app.post('/api/liquidity-zones/:id/review', handle(async (req, res) => {

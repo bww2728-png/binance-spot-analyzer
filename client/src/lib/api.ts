@@ -288,8 +288,8 @@ const sbApi = {
     if (opts.offset != null) q.set('offset', String(opts.offset));
     return fetch(`${BASE}/liquidity-zones/${opts.mode}?${q}`, { signal }).then(j<{ results: LiquidityDetection[]; total: number; rotation: number; updatedAt?: number }>);
   },
-  getLiquidityZone(id: string, signal?: AbortSignal): Promise<{ zone: LiquidityDetection; screenshot: string }> {
-    return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshot: string }>);
+  getLiquidityZone(id: string, signal?: AbortSignal): Promise<{ zone: LiquidityDetection; screenshotAt: string; screenshotAfter: string }> {
+    return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshotAt: string; screenshotAfter: string }>);
   },
   reviewLiquidityZone(id: string, body: { verdict: 'accept' | 'reject' | 'confirm' | 'clear'; note?: string; correction?: unknown }): Promise<{ ok: boolean; zone: LiquidityDetection; adjustment: LiquidityZoneEngineStatus['adjustment'] }> {
     return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}/review`, {
@@ -435,7 +435,7 @@ const restApi = {
     return fetch(`${BASE}/liquidity-zones/${opts.mode}?${q}`, { signal }).then(j<{ results: LiquidityDetection[]; total: number; rotation: number; updatedAt?: number }>);
   },
   getLiquidityZone: (id: string, signal?: AbortSignal) =>
-    fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshot: string }>),
+    fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshotAt: string; screenshotAfter: string }>),
   reviewLiquidityZone: (id: string, body: { verdict: 'accept' | 'reject' | 'confirm' | 'clear'; note?: string; correction?: unknown }) =>
     fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean; zone: LiquidityDetection; adjustment: LiquidityZoneEngineStatus['adjustment'] }>),
   runLiquidityZones: () =>
