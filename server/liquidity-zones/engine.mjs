@@ -218,6 +218,8 @@ function makeZone(symbol, timeframe, kind, cluster, state, candles, endIndex, ex
     confidence: Number(confidence.toFixed(4)),
     touches: cluster.touches,
     touchPoints: cluster.points.map(x => ({ index: x.index, time: x.time, price: x.price })),
+    staircase: state.staircase ?? null,
+    finalBreak: state.reaction ? { breakTime: candles[state.reaction.breakIndex]?.time ?? null, reactionPrice: state.reaction.reactionPrice } : null,
     prominenceAtr: Number(p.prominenceAtr.toFixed(3)),
     atr: Number(state.atr.toPrecision(8)),
     distanceAtr: Number((distance / Math.max(state.atr, 1e-12)).toFixed(3)),

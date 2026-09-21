@@ -492,6 +492,24 @@ test('بوابة السلّم: العكس صحيح في SSL — رد فعل قم
   assert.equal(ssl[0].confirmedAt, cs[26].time);
 });
 
+test('إثراء الرسم: المنطقة تحمل سلّم التكرارات + الكسر النهائي', () => {
+  const cs = stairComplete();
+  const zones = detectLiquidityZones({ symbol: 'S7USDT', timeframe: '1h', candles: cs, tolerancePct: 0.002 });
+  const bsl = zones.find(z => z.kind === 'horizontal_bsl');
+  assert.ok(bsl, 'المنطقة موجودة');
+  assert.ok(bsl.staircase, 'السلّم مُرسَل');
+  assert.equal(bsl.staircase.valid, true);
+  // 3 لمسات = تكراران (لمسة1←لمسة2 = كسر 17، لمسة2←لمسة3 = كسر 25)
+  assert.equal(bsl.staircase.breaks.length, 2);
+  assert.equal(bsl.staircase.breaks[0].time, cs[17].time, 'كسر الرد فعل 1 (رد 99.91 بذيل 99.90)');
+  assert.ok(Math.abs(bsl.staircase.breaks[0].reactionPrice - 99.91) < 1e-9);
+  assert.equal(bsl.staircase.breaks[1].time, cs[25].time, 'كسر الرد فعل 2 (رد 99.90 بالإغلاق 99.86)');
+  assert.ok(Math.abs(bsl.staircase.breaks[1].reactionPrice - 99.90) < 1e-9);
+  assert.ok(bsl.finalBreak, 'الكسر النهائي مُرسَل');
+  assert.equal(bsl.finalBreak.breakTime, cs[26].time, 'لحظة التأكيد');
+  assert.ok(Math.abs(bsl.finalBreak.reactionPrice - 99.84) < 1e-9, 'رد فعل اللمسة الأخيرة = أدنى قاع بعدها');
+});
+
 test('الأفقي: قمتان فقط → لا منطقة أفقية (3+ قمم/قيعان مطلوبة)', () => {
   const cs = stairComplete().map(c => ({ ...c }));
   cs[24].high = 100.30; // القمة الثالثة تتحرك خارج نطاق التجميع — تبقى قمتان في النطاق

@@ -421,6 +421,8 @@ export interface LiquidityDetection {
   confidence: number;
   touches: number;
   touchPoints: { index: number; time: number; price: number }[];
+  staircase: { valid: boolean; breaks: { index: number; time: number; reactionPrice: number }[]; missingAt: number } | null;
+  finalBreak: { breakTime: number | null; reactionPrice: number } | null;
   prominenceAtr: number;
   atr: number;
   distanceAtr: number;

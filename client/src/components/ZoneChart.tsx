@@ -154,10 +154,44 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
           series.createPriceLine({ price: zone.referenceLevel, color: '#64748b', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'المرجع' });
         }
         if (Number.isFinite(zone.liquidityLevel)) {
-          series.createPriceLine({ price: zone.liquidityLevel, color: zoneColor, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: 'السيولة' });
+          series.createPriceLine({ price: zone.liquidityLevel, color: zoneColor, lineWidth: 3, lineStyle: 2, axisLabelVisible: true, title: 'السيولة' });
         }
         if (Number.isFinite(zone.retailStop)) {
           series.createPriceLine({ price: zone.retailStop, color: '#d97706', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: 'وقف Retail' });
+        }
+        // سلّم التكرارات: علامة كسر عند كل رد فعل مكسور (لمسة←رد فعل←كسر) — ترى لماذا تأكدت المنطقة
+        const breaks = zone.staircase?.breaks ?? [];
+        if (breaks.length) {
+          createSeriesMarkers(series, breaks.map(b => ({
+            time: b.time as UTCTimestamp,
+            price: b.reactionPrice,
+            position: bullish ? 'belowBar' as const : 'aboveBar' as const,
+            shape: bullish ? 'arrowUp' as const : 'arrowDown' as const,
+            color: zoneColor,
+            size: 1,
+            text: 'كسر'
+          })));
+        }
+        // الكسر النهائي: سهم لحظة التأكيد + خط الرد فعل الأخير
+        if (zone.finalBreak?.breakTime) {
+          createSeriesMarkers(series, [{
+            time: zone.finalBreak.breakTime as UTCTimestamp,
+            price: zone.finalBreak.reactionPrice,
+            position: bullish ? 'belowBar' as const : 'aboveBar' as const,
+            shape: bullish ? 'arrowUp' as const : 'arrowDown' as const,
+            color: zoneColor,
+            size: 2,
+            text: 'التأكيد'
+          }]);
+          if (Number.isFinite(zone.finalBreak.reactionPrice)) {
+            series.createPriceLine({ price: zone.finalBreak.reactionPrice, color: zoneColor, lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: 'الرد فعل' });
+          }
+        }
+        // حدود منطقة Premium (حدود بنفسجية متقطعة)
+        const pr = zone.premium;
+        if (pr && Number.isFinite(pr.low) && Number.isFinite(pr.high)) {
+          series.createPriceLine({ price: pr.high, color: '#7c3aed', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: 'Premium' });
+          series.createPriceLine({ price: pr.low, color: '#7c3aed', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
         }
         // خط الاتجاه إن وجد — من نقاطه الفعلية داخل النافذة
         const tp = zone.trendline?.points ?? [];
@@ -169,6 +203,12 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
           if (pts.length >= 2) {
             const line = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 2 });
             line.setData(pts);
+            // إسقاط متقطع من آخر نقطة إلى قيمة الإسقاط الحقيقية عند لحظة الكشف
+            const proj = zone.trendline?.projected;
+            if (Number.isFinite(proj) && candles[nearest].time >= pts[pts.length - 1].time) {
+              const projLine = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1, lineStyle: 2 });
+              projLine.setData([{ time: pts[pts.length - 1].time, value: tp[tp.length - 1].price }, { time: candles[nearest].time as UTCTimestamp, value: proj }]);
+            }
           }
         }
         if (!disposed) { setLoaded(true); setLoading(false); }
