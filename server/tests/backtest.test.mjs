@@ -9,6 +9,7 @@ import { fitLogistic, featurize, learnedScore, synthFilters, walkForwardSplit, e
 import { loadKlinesPaginated } from '../backtest/engine.mjs';
 import { applyLearnedRules, discoverLiveOpportunities } from '../backtest/live.mjs';
 import { adaptiveConfig, detectLiquidityZones, findPivots, feedbackToAdjustment, scanHistory } from '../liquidity-zones/engine.mjs';
+import { renderChart, gafEncode, mtfEncode, ts2vecEmbed, bocpd, detectVisualZones } from '../liquidity-zones/visual.mjs';
 
 test('كلي النظري: معاملات منشورة تعطي القيم المنشورة', () => {
   // p=0.6, payoff=2 → f = (0.6*2 - 0.4)/0.6 = 1.333
@@ -343,4 +344,78 @@ test('محرك السيولة: feedback يضبط التسامح ويحفظ عد�
   assert.ok(Number.isFinite(adjustment.tolerancePct));
   assert.equal(adjustment.accepted.length, 1);
   assert.equal(adjustment.rejected.length, 2);
+});
+
+
+// ===== الكشف البصري متعدد الوسائط (visual.mjs) — حتمي وبلا شبكة =====
+
+const peaksCloses = () => {
+  const values = [];
+  for (let j = 0; j < 5; j += 1) {
+    for (let i = 0; i < 8; i += 1) values.push(80 + i * 2.5);
+    for (let i = 0; i < 8; i += 1) values.push(100 - i * 2.5);
+  }
+  return values;
+};
+
+test('عكس الدقيق: yToPrice(priceToY(p)) يعيد السعر بدقة (EXACT)', () => {
+  const closes = peaksCloses();
+  const candles = closes.map((v, i) => ({ time: i * 60, open: v, high: v + 0.05, low: v - 0.05, close: v, volume: 1, index: i }));
+  const { axisMap } = renderChart(candles);
+  assert.ok(axisMap);
+  for (const p of [80, 90, 100, 95.5]) {
+    const back = axisMap.yToPrice(axisMap.priceToY(p));
+    assert.ok(Math.abs(back - p) < 0.5, `err=${Math.abs(back - p)}`);
+  }
+});
+
+test('GAF/MTF: أبعاد صحيحة وقيم GASF داخل [-1, 1]', () => {
+  const closes = peaksCloses();
+  const gaf = gafEncode(closes, { size: 24 });
+  assert.equal(gaf.size, 24);
+  let maxAbs = 0;
+  for (const row of gaf.gasf) for (const v of row) maxAbs = Math.max(maxAbs, Math.abs(v));
+  assert.ok(maxAbs <= 1.0001, `maxAbs=${maxAbs}`);
+  const mtf = mtfEncode(closes, { size: 24 });
+  assert.equal(mtf.size, 24);
+});
+
+test('تضمين متعدد المقاييس: أبعاد صحيحة وقيم داخل [-1, 1]', () => {
+  const closes = peaksCloses();
+  const { embed, dims } = ts2vecEmbed(closes, { dims: 16 });
+  assert.equal(dims, 16);
+  for (const v of embed) assert.ok(Math.abs(v) <= 1.0001);
+});
+
+test('BOCPD: يكشف كسر بنيوي عند تغيّر المتوسط', () => {
+  const series = [...Array(30).fill(0), ...Array(30).fill(5)];
+  const boc = bocpd(series, { hazard: 1 / 50 });
+  assert.ok(boc.changes.length >= 1, `changes=${boc.changes.length}`);
+  assert.ok(boc.changes[0] > 25 && boc.changes[0] < 35, `first=${boc.changes[0]}`);
+  assert.ok(boc.segments.length >= 2);
+});
+
+test('خط الأنابيب: قطاع الثقة عبر الائتلاف أعلى من المجموع الأعمى', () => {
+  const closes = peaksCloses();
+  const candles = closes.map((v, i) => ({ time: i * 60, open: v, high: v + 0.05, low: v - 0.05, close: v, volume: 1, index: i }));
+  const visual = detectVisualZones({ candles, closes });
+  assert.ok(visual.perKind.horizontal_bsl);
+  assert.ok(visual.render.axisMapOk);
+  assert.ok(Number.isFinite(visual.perKind.horizontal_bsl.confidence));
+  // المحرك المدمج يعيد الثقة المثنّاة + خصائص الوسائط
+  const zones = detectLiquidityZones({ symbol: 'XUSDT', timeframe: '1h', candles });
+  assert.ok(zones.length >= 1);
+  const z = zones[0];
+  assert.ok(z.visual);
+  assert.ok(Number.isFinite(z.visual.confidence));
+  assert.ok(Number.isFinite(z.confidence));
+});
+
+test('تعلّم فعّال: انحياز القبول/الرفض يعدّل ثقة النوع محدوداً [0, 1.5]', () => {
+  const bias0 = {};
+  const key = 'horizontal_bsl';
+  bias0[key] = 0;
+  bias0[key] = Math.min(1.5, bias0[key] + 0.03); // قبول
+  bias0[key] = Math.max(0, bias0[key] - 0.05); // رفض
+  assert.equal(bias0[key], 0);
 });

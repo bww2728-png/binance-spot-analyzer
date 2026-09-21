@@ -1,4 +1,6 @@
-/*
+import { detectVisualZones } from './visual.mjs';
+
+/**
  * محرك مستقل لمناطق السيولة وفق تعريف المشروع:
  * Reference level منفصل عن Liquidity/Stop level.
  * لا يستخدم بيانات مستقبلية عند إنشاء الحالة التاريخية؛ pivot لا يدخل إلا بعد rightBars.
@@ -193,11 +195,16 @@ function makeZone(symbol, timeframe, kind, cluster, state, candles, endIndex, ex
   };
 }
 
-export function detectLiquidityZones({ symbol, timeframe, candles: input, endIndex, tolerancePct } = {}) {
+export function detectLiquidityZones({ symbol, timeframe, candles: input, endIndex, tolerancePct, biasPerKind = {} } = {}) {
   const candles = input ?? [];
   const end = endIndex ?? candles.length - 1;
   if (candles.length < 40 || end < 20) return [];
   const cfg = adaptiveConfig(candles, end);
+  // ائتلاف الوسائط البصرية: رندر + CNN + GAF/MTF + تضمين + BOCPD — حتمي
+  let visual = null;
+  try {
+    visual = detectVisualZones({ candles: candles.slice(0, end + 1), closes: candles.slice(0, end + 1).map(c => c.close), biasPerKind });
+  } catch { /* الوسائط البصرية اختيارية — لا تكسر المحاكاة */ }
   const pivots = findPivots(candles, { endIndex: end });
   const tol = tolerancePct ?? cfg.tolerancePct;
   const zones = [];
@@ -233,14 +240,33 @@ export function detectLiquidityZones({ symbol, timeframe, candles: input, endInd
   addTrendline(lows, 'trendline_ssl');
   return zones
     .sort((a, b) => b.confidence - a.confidence || b.createdAt - a.createdAt)
-    .map(z => ({ ...z, confidence: Number(z.confidence.toFixed(4)) }));
+    .map(z => {
+      if (!visual?.perKind?.[z.kind]) return { ...z, confidence: Number(z.confidence.toFixed(4)) };
+      const en = visual.perKind[z.kind];
+      const visualConf = en.confidence * 0.35 + (en.gafDiag ?? 0) * 0.1 + (en.mtfMean ?? 0) * 0.05;
+      const blended = z.confidence * 0.65 + Math.min(visualConf, 0.99) * 0.35; // الائتلاف يثري ولا يستبدل
+      return {
+        ...z,
+        confidence: Number(Math.min(blended, 0.999).toFixed(4)),
+        visual: {
+          confidence: en.confidence,
+          bestPrice: en.bestPrice,
+          bestRow: en.bestRow,
+          gafDiag: en.gafDiag,
+          mtfMean: en.mtfMean,
+          ts2vec: en.ts2vec,
+          segments: visual.segments,
+          regimeChanges: visual.changes
+        }
+      };
+    });
 }
 
-export function scanHistory({ symbol, timeframe, candles: input, step = 1, maxZones = 500 } = {}) {
+export function scanHistory({ symbol, timeframe, candles: input, step = 1, maxZones = 500, biasPerKind = {} } = {}) {
   const candles = input ?? [];
   const out = [];
   for (let end = 40; end < candles.length; end += step) {
-    const current = detectLiquidityZones({ symbol, timeframe, candles, endIndex: end });
+    const current = detectLiquidityZones({ symbol, timeframe, candles, endIndex: end, biasPerKind });
     for (const zone of current) {
       if (zone.state !== 'confirmed' && zone.state !== 'swept') continue;
       const key = `${zone.kind}|${zone.referenceLevel.toPrecision(10)}|${zone.createdAt}`;

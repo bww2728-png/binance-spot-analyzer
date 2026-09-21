@@ -608,7 +608,7 @@ const liquidityState = {
   historyPairsTotal: 0,
   historyResults: [],
   feedback: [],
-  adjustment: { tolerancePct: 0.002, examples: 0 },
+  adjustment: { tolerancePct: 0.002, examples: 0, visualBias: {} },
   updatedAt: null,
   error: null
 };
@@ -789,7 +789,8 @@ const runLiquidityLiveRotation = async () => {
             symbol,
             timeframe,
             candles,
-            tolerancePct: liquidityState.adjustment.tolerancePct
+            tolerancePct: liquidityState.adjustment.tolerancePct,
+            biasPerKind: liquidityState.adjustment.visualBias || {}
           }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex }));
           liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
         } catch { /* زوج/فريم فاشل لا يوقف المحرك المستقل */ }
@@ -823,7 +824,7 @@ const runLiquidityHistoryRotation = async () => {
         try {
           const raw = await db.binance.klines(symbol, timeframe, 1000);
           const candles = normalizeCandles(raw);
-          const zones = scanHistory({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200 });
+          const zones = scanHistory({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200, biasPerKind: liquidityState.adjustment.visualBias || {} });
           liquidityState.historyResults = mergeLiquidityResults(liquidityState.historyResults, zones.map(zone => ({ ...zone, mode: 'history', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex })));
         } catch { /* مستقل */ }
       }
@@ -914,6 +915,12 @@ app.post('/api/liquidity-zones/:id/review', handle(async (req, res) => {
   const feedback = { zoneId: id, symbol: zone.symbol, verdict, note: String(req.body?.note || ''), correction: req.body?.correction ?? null, ts: Date.now() };
   liquidityState.feedback.push(feedback);
   liquidityState.adjustment = feedbackToAdjustment(liquidityState.feedback, liquidityState.adjustment);
+  // تعلّم فعّال من عين المستخدم: كل قبول يرفع انحياز نوع المقطع (+0.03) وكل رفض يخفضه (-0.05) — محدود [0, 1.5]
+  const bias = { ...(liquidityState.adjustment.visualBias || {}) };
+  const kindKey = String(zone.kind || 'horizontal_bsl');
+  const delta = verdict === 'accept' ? 0.03 : verdict === 'reject' ? -0.05 : 0;
+  if (delta) bias[kindKey] = Math.max(0, Math.min(1.5, (bias[kindKey] ?? 0) + delta));
+  liquidityState.adjustment = { ...liquidityState.adjustment, visualBias: bias };
   const updated = { ...zone, review: feedback, reviewVersion: (zone.reviewVersion || 0) + 1 };
   liquidityState.liveResults = liquidityState.liveResults.map(x => x.id === id ? updated : x);
   liquidityState.historyResults = liquidityState.historyResults.map(x => x.id === id ? updated : x);
