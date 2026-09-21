@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
+import ZoneChart from './ZoneChart';
 import { TIMEFRAMES, type LiquidityDetection, type LiquidityZoneEngineStatus } from '../lib/types';
 
 const kindLabel: Record<string, string> = {
@@ -53,14 +54,7 @@ function ZoneCard({ zone, onOpen }: { zone: LiquidityDetection; onOpen: (zone: L
 function ZoneDetail({ zone, onClose, onReviewed }: { zone: LiquidityDetection; onClose: () => void; onReviewed: (zone: LiquidityDetection) => void }) {
   const [note, setNote] = useState(zone.review?.note ?? '');
   const [saving, setSaving] = useState(false);
-  const [chartAt, setChartAt] = useState('');
-  const [chartAfter, setChartAfter] = useState('');
   const [phase, setPhase] = useState<'at' | 'after'>('at');
-  useEffect(() => {
-    const ac = new AbortController();
-    void api.getLiquidityZone(zone.id, ac.signal).then(x => { setChartAt(x.screenshotAt); setChartAfter(x.screenshotAfter); }).catch(() => {});
-    return () => ac.abort();
-  }, [zone.id]);
   const review = async (verdict: 'accept' | 'reject') => {
     setSaving(true);
     try {
@@ -70,8 +64,6 @@ function ZoneDetail({ zone, onClose, onReviewed }: { zone: LiquidityDetection; o
       setSaving(false);
     }
   };
-  const raw = phase === 'after' ? chartAfter : chartAt;
-  const image = raw ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}` : '';
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3" style={{ background: 'rgba(15,23,42,.35)' }} onClick={onClose}>
       <div className="w-full max-w-5xl max-h-[92vh] overflow-auto rounded-2xl p-4" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', boxShadow: 'var(--shadow-lg)' }} onClick={e => e.stopPropagation()}>
@@ -87,10 +79,10 @@ function ZoneDetail({ zone, onClose, onReviewed }: { zone: LiquidityDetection; o
             <div className="flex items-center gap-2">
               <button onClick={() => setPhase('at')} className="px-3 py-1.5 rounded-lg text-[11px]" style={{ background: phase === 'at' ? 'var(--accent-soft)' : 'var(--surface-1)', color: phase === 'at' ? 'var(--accent)' : 'var(--text-2)' }}>عند الكشف</button>
               <button onClick={() => setPhase('after')} className="px-3 py-1.5 rounded-lg text-[11px]" style={{ background: phase === 'after' ? 'var(--accent-soft)' : 'var(--surface-1)', color: phase === 'after' ? 'var(--accent)' : 'var(--text-2)' }}>بعد الكشف</button>
-              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>الشموع حقيقية والمستويات فوقها</span>
+              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>شارت حي تفاعلي من بينانس مباشرة</span>
             </div>
             <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid var(--border-1)' }}>
-              {image ? <img src={image} alt={`شارت ${zone.symbol} ${zone.timeframe} ${phase === 'after' ? 'بعد الكشف' : 'عند الكشف'}`} className="w-full" /> : <div className="h-64 flex items-center justify-center text-sm" style={{ color: 'var(--text-3)' }}>تحميل الصورة…</div>}
+              <ZoneChart zone={zone} phase={phase} height={360} />
             </div>
             <div className="rounded-lg p-2 flex flex-wrap gap-x-4 gap-y-1" style={{ background: 'var(--surface-1)' }}>
               <span className="text-[10px]"><span title="المرجع" style={{ color: '#64748b' }}>— —</span> المرجع (المقاومة/الدعم)</span>
