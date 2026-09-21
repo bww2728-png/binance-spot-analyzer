@@ -4,7 +4,7 @@ import { fetchKlines } from '../lib/binance';
 import type { Candle, LiquidityDetection } from '../lib/types';
 import {
   createChart, createSeriesMarkers, CandlestickSeries, LineSeries,
-  type IChartApi, type ISeriesApi, type UTCTimestamp
+  type IChartApi, type UTCTimestamp
 } from 'lightweight-charts';
 import { CHART_COLORS, HOLLOW_CANDLES } from './MiniChart';
 
@@ -13,37 +13,42 @@ const toBar = (c: Candle) => ({
   open: c.open, high: c.high, low: c.low, close: c.close
 });
 
-const WINDOW = 90;
+const BEFORE = 80;
+const AFTER = 200;
 
-/** حجم الفريم بالثواني — لتنقية نافذة العرض إلى النطاق المطلوب بالضبط */
+/** حجم الفريم بالثواني — لحساب هامش التكبير بعدها */
 const tfSeconds = (tf: string) => {
   const n = parseInt(tf, 10) || 1;
   const u = tf.replace(/[0-9]/g, '');
   return n * ({ m: 60, h: 3600, d: 86400, w: 604800 }[u] ?? 3600);
 };
 
-/** لحظة الاكتشاف بالثواني (تقبل صيغتي ثوانٍ/ملي ثانية) */
+/** مرتكز التحديد على زمن المحور (ثوانٍ) — زمن محور القمة أولاً ولا يُستخدم ساعة الحائط أبداً */
 const anchorSec = (z: LiquidityDetection) => {
-  const v = Math.max(z.confirmedAt || 0, z.createdAt || 0, z.detectedAt || 0);
+  const v = z.createdAt || z.confirmedAt || 0;
   return v > 1e12 ? Math.floor(v / 1000) : Math.floor(v);
 };
 
 /** شارت شموع تفاعلي حقيقي (وليس صورة) — بنفس مكوّن عمود الشارت في لوحة التحليل:
- * lightweight-charts + شموع جوفاء بخلفية بيضاء — بنافذة الزمن الحقيقي للتحديد
- * (عند الكشف: تنتهي عند لحظة الاكتشاف / بعد الكشف: من لحظة الاكتشاف حتى الآن حية)
- * + علامة دائرة عند مكان سعر السيولة على شمعة الاكتشاف
+ * lightweight-charts + شموع جوفاء بخلفية بيضاء.
+ * البيانات تُحمَّل مرة واحدة عند التركيب: 60+ شمعة قبل لحظة التحديد و200 بعد لحظة التحديد
+ * (بزمن المحور الحقيقي) — وتبديل (عند التحديد/بعد التحديد) مجال رؤية فقط فوق نفس البيانات
+ * بدون إعادة تركيب وبدون fetch — فلا يختفي الشارت أبداً.
+ * + علامة دائرة عند سعر السيولة على شمعة التحديد + خطوط المستويات فوق السعر الحقيقي.
  */
 const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone: LiquidityDetection; phase: 'at' | 'after'; height?: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const [ready, setReady] = useState(false);
+  const rangeRef = useRef<{ from: number; at: number; to: number } | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const subscribeKline = useStore(s => s.subscribeKline);
 
   const bullish = zone.kind.includes('ssl');
   const zoneColor = bullish ? '#089981' : '#f23645';
+  // مفتاح بدائي لخط الاتجاه — يمنع الدمار مع تغيّر هوية الكائن في كل استقصاء
+  const trendKey = zone.trendline?.points?.map(p => `${p.time}:${p.price}`).join(',') ?? '';
 
   useEffect(() => {
     const el = containerRef.current;
@@ -58,33 +63,47 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
     });
     const series = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });
     chartRef.current = chart;
-    seriesRef.current = series;
-    setReady(true);
+    setLoaded(false);
+    setFailed(false);
+    setLoading(true);
 
     let disposed = false;
-    const sec = anchorSec(zone);
-    const secMs = sec * 1000;
-    const lowerSec = sec - WINDOW * tfSeconds(zone.timeframe);
+    const pivot = anchorSec(zone);
+    const pivotMs = pivot * 1000;
     let lastSec = 0;
+
+    // جلب مع إعادة محاولة واحدة
+    const fetchRetry = async (limit: number, startTime?: number, endTime?: number): Promise<Candle[]> => {
+      try {
+        return await fetchKlines(zone.symbol, zone.timeframe, limit, startTime, endTime);
+      } catch {
+        return await fetchKlines(zone.symbol, zone.timeframe, limit, startTime, endTime);
+      }
+    };
 
     void (async () => {
       try {
-        const raw = phase === 'at'
-          ? await fetchKlines(zone.symbol, zone.timeframe, WINDOW, undefined, secMs)
-          : await fetchKlines(zone.symbol, zone.timeframe, WINDOW, secMs);
+        // قبل: ينظر للخلف من لحظة التحديد / بعد: من لحظة التحديد للأمام (أحدث بيانات)
+        const settled = await Promise.allSettled([
+          fetchRetry(BEFORE, undefined, pivotMs),
+          fetchRetry(AFTER, pivotMs)
+        ]);
         if (disposed) return;
-        // تنقية النافذة بالضبط (الكاش يوحّد النوافذ المتتالية لنفس العملة/الفريم)
-        const candles = (phase === 'at'
-          ? raw.filter(c => c.time >= lowerSec && c.time <= sec)
-          : raw.filter(c => c.time >= sec));
+        const before = settled[0].status === 'fulfilled' ? settled[0].value : [];
+        const after = settled[1].status === 'fulfilled' ? settled[1].value : [];
+        const map = new Map<number, Candle>();
+        for (const c of before) map.set(c.time, c);
+        for (const c of after) map.set(c.time, c);
+        const candles = Array.from(map.values()).sort((a, b) => a.time - b.time);
         if (!candles.length) { setFailed(true); setLoading(false); return; }
         series.setData(candles.map(toBar));
         lastSec = candles[candles.length - 1].time;
-        // علامة دائرة عند مكان سعر السيولة على شمعة الاكتشاف (أقرب شمعة إلى اللحظة)
+        // شمعة التحديد: أقرب شمعة إلى لحظة التحديد
         let nearest = 0;
         for (let i = 1; i < candles.length; i += 1) {
-          if (Math.abs(candles[i].time - sec) < Math.abs(candles[nearest].time - sec)) nearest = i;
+          if (Math.abs(candles[i].time - pivot) < Math.abs(candles[nearest].time - pivot)) nearest = i;
         }
+        rangeRef.current = { from: candles[0].time, at: candles[nearest].time, to: lastSec };
         if (Number.isFinite(zone.liquidityLevel)) {
           createSeriesMarkers(series, [{
             time: candles[nearest].time as UTCTimestamp,
@@ -118,16 +137,14 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
             line.setData(pts);
           }
         }
-        chart.timeScale().fitContent();
+        if (!disposed) { setLoaded(true); setLoading(false); }
       } catch {
-        if (!disposed) setFailed(true);
-      } finally {
-        if (!disposed) setLoading(false);
+        if (!disposed) { setFailed(true); setLoading(false); }
       }
     })();
 
     const unsub = subscribeKline(zone.symbol, zone.timeframe, (c: Candle) => {
-      if (disposed || phase !== 'after' || c.time < lastSec) return;
+      if (disposed || c.time < lastSec) return;
       series.update(toBar(c));
       lastSec = c.time;
     });
@@ -143,10 +160,23 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
       unsub();
       chart.remove();
       chartRef.current = null;
-      seriesRef.current = null;
-      setReady(false);
     };
-  }, [zone, zone.symbol, zone.timeframe, zone.kind, zone.referenceLevel, zone.liquidityLevel, zone.retailStop, zone.trendline, phase, height, subscribeKline]);
+  }, [zone.id, zone.symbol, zone.timeframe, zone.kind, zone.referenceLevel, zone.liquidityLevel, zone.retailStop, trendKey, height, subscribeKline]);
+
+  // تبديل الطور = مجال رؤية فقط فوق نفس البيانات — بدون rebuild وبدون fetch
+  useEffect(() => {
+    const chart = chartRef.current;
+    const info = rangeRef.current;
+    if (!chart || !info || !loaded) return;
+    const ts = chart.timeScale();
+    if (phase === 'after') {
+      ts.setVisibleRange({ from: info.from as UTCTimestamp, to: info.to as UTCTimestamp });
+    } else {
+      const span = info.to - info.at;
+      const to = info.at + Math.max(Math.round(span * 0.15), tfSeconds(zone.timeframe));
+      ts.setVisibleRange({ from: info.from as UTCTimestamp, to: Math.min(to, info.to) as UTCTimestamp });
+    }
+  }, [phase, loaded, zone.timeframe]);
 
   return (
     <div className="relative">
@@ -157,7 +187,7 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
       {failed && (
         <div className="absolute inset-0 flex items-center justify-center text-xs" style={{ color: 'var(--text-3)' }}>تعذر جلب الشموع لهذه النافذة</div>
       )}
-      {ready && !loading && (
+      {loaded && (
         <div className="absolute top-1 left-1 z-10 num text-[10px] rounded px-1.5 py-0.5" style={{ background: 'rgba(10,14,22,.75)', color: '#e2e8f0', border: '1px solid var(--border-1)' }}>
           {zone.symbol} · {zone.timeframe}
         </div>
