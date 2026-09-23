@@ -1,24 +1,26 @@
 import { memo, useEffect, useRef } from 'react';
 import type { LiquidityDetection } from '../lib/types';
 import {
-  createChart, createSeriesMarkers, CandlestickSeries, LineSeries,
+  createChart, CandlestickSeries, LineSeries,
   type UTCTimestamp
 } from 'lightweight-charts';
 import { CHART_COLORS, HOLLOW_CANDLES } from './MiniChart';
+import { attachZonePrimitive, type ZoneBox } from './ZoneBoxesPrimitive';
 
-/** الشارت المستقل للجولة المخصصة: شموع النافذة كاملة + تراكيب كل المناطق المختارة:
- * دوائر اللمسات (نقاط البناء) بلون النوع، خط الوقف عند مستوى السيولة (وقف الخسائر)
- * — أفقي solid / خط اتجاه dashed — وخط الاتجاه الفعلي وإسقاطه لكل منطقة اتجاه.
- * الرسم التكيفي: عندما تكون المناطق كثيفة (>8) يُخفى التراكيب التحليلية الثقيلة
- * (Premium/المرجع) ليبقى الشارت مقروءاً، وتبقى خطوط الوقف واللمسات والاتجاه دائماً.
+/** الشارت المستقل للجولة المخصصة — الرسم الاحترافي القياسي (TradingView/SMC):
+ * كل منطقة = مستطيل مظلل من أول لمسة حتى آخر لمسة/المسح، حدّ الوقف ضلعه المواجه،
+ * نقاط اللمس دوائر على الحافة، مقطع خط الاتجاه يربط نقاطه فقط (بلا إسقاط لا نهائي).
+ * Premium/المرجع غير مرسومين هنا (في تفاصيل المنطقة). سعر الوقف يظهر على محور السعر
+ * عبر علامة ملونة لأعلى N ثقة (بلا خطوط ممتدة — عبر نقطة سلسلة مخفية الخط).
  */
-const MultiZoneChart = memo(function MultiZoneChart({ candles, zones, height = 420 }: {
+const MultiZoneChart = memo(function MultiZoneChart({ candles, zones, height = 420, showStopPrices = true, stopPriceTop = 12 }: {
   candles: Array<[number, number, number, number, number]>;
   zones: LiquidityDetection[];
   height?: number;
+  showStopPrices?: boolean;
+  stopPriceTop?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const adaptive = zones.length > 8;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -41,93 +43,118 @@ const MultiZoneChart = memo(function MultiZoneChart({ candles, zones, height = 4
     const to = candles[candles.length - 1][0];
     const inRange = (t: number) => t >= from && t <= to;
 
-    let markerCount = 0;
-    const MARKER_CAP = 2000;
-
+    // بنية الصناديق: الامتداد الزمني من أول لمسة إلى آخر لمسة، والمسحوبة حتى شمعة مسحها
+    const boxes: ZoneBox[] = [];
+    const DOTS_CAP = 3000;
+    let dots = 0;
     for (const zone of zones) {
-      if (markerCount >= MARKER_CAP) break;
+      const touches = (zone.touchPoints ?? []).filter(p => inRange(p.time));
+      if (touches.length < 2) continue;
       const bullish = zone.kind.includes('ssl');
-      const color = bullish ? '#089981' : '#f23645';
-      const trendKind = zone.kind.startsWith('trendline');
-      const anchorSec = (() => {
-        const v = zone.createdAt || zone.confirmedAt || 0;
-        const s = v > 1e12 ? Math.floor(v / 1000) : Math.floor(v);
-        if (s >= from && s <= to) return s;
-        return null;
-      })();
-
-      // دوائر اللمسات: نقاط البناء الفعلية (داخل النافذة)
-      const touches = (zone.touchPoints ?? [])
-        .filter(p => inRange(p.time))
-        .map(p => ({
-          time: p.time as UTCTimestamp,
-          price: p.price,
-          position: bullish ? 'atPriceBottom' as const : 'atPriceTop' as const,
-          shape: 'circle' as const,
-          color,
-          size: 1,
-          text: ''
-        }));
-      if (touches.length && markerCount < MARKER_CAP) {
-        createSeriesMarkers(series, touches);
-        markerCount += touches.length;
+      const rgb = bullish ? '8,153,129' : '242,54,69';
+      const confirmed = zone.state === 'confirmed';
+      const alpha = confirmed ? 0.16 : 0.10;
+      const prices = touches.map(p => p.price);
+      const sweptTime = zone.state === 'swept' && zone.sweptAt ? (() => { const s = zone.sweptAt > 1e12 ? Math.floor(zone.sweptAt / 1000) : Math.floor(zone.sweptAt); return inRange(s) ? s : null; })() : null;
+      const timeEnd = sweptTime ?? touches[touches.length - 1].time;
+      if (timeEnd <= touches[0].time) continue;
+      // حد الوقف: مستوى السيولة إن توفر وإلا أقصى/أدنى لمسة
+      const stop = Number.isFinite(zone.liquidityLevel) ? (zone.liquidityLevel as number) : (bullish ? Math.min(...prices) : Math.max(...prices));
+      const priceLow = bullish ? Math.min(...prices) : Math.min(...prices, stop);
+      const priceHigh = bullish ? Math.max(...prices, stop) : Math.max(...prices);
+      const touchDots = [];
+      for (const p of touches) {
+        if (dots >= DOTS_CAP) break;
+        touchDots.push({ time: p.time, price: p.price });
+        dots++;
       }
+      const tl = zone.kind.startsWith('trendline') ? [...(zone.trendline?.points ?? [])].filter(p => inRange(p.time)).sort((a, b) => a.time - b.time).map(p => ({ time: p.time, price: p.price })) : undefined;
+      boxes.push({
+        timeStart: touches[0].time,
+        timeEnd,
+        priceLow,
+        priceHigh,
+        stopPrice: stop,
+        fill: `rgba(${rgb},${alpha})`,
+        edge: `rgba(${rgb},${confirmed ? 0.9 : 0.55})`,
+        edgeWidth: confirmed ? 2 : 1,
+        touches: touchDots,
+        trendline: tl && tl.length >= 2 ? tl : undefined
+      });
+    }
 
-      // خط الوقف عند مستوى السيولة — الأذكى والبارز دائماً (نمط الأفقي solid / الاتجاه dashed)
-      if (Number.isFinite(zone.liquidityLevel)) {
-        series.createPriceLine({
-          price: zone.liquidityLevel,
-          color,
-          lineWidth: 3,
-          lineStyle: trendKind ? 2 : 0,
-          axisLabelVisible: true,
-          title: `وقف ${zone.kind.startsWith('trendline') ? 'اتجاه' : 'أفقي'} ${bullish ? 'SSL' : 'BSL'}`
-        });
+    // الطبقة السفلية: تظليل الصناديق خلف الشموع
+    attachZonePrimitive(series, 'bottom', (ctx, conv) => {
+      for (const b of boxes) {
+        const x1 = conv.tx(b.timeStart);
+        const x2 = conv.tx(b.timeEnd);
+        const y1 = conv.py(b.priceHigh);
+        const y2 = conv.py(b.priceLow);
+        if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+        ctx.fillStyle = b.fill;
+        ctx.fillRect(x1, y1, Math.max(2, x2 - x1), Math.max(1, y2 - y1));
       }
+    });
 
-      // خط الاتجاه الفعلي + إسقاطه المتقطع إلى لحظة الكشف
-      const tp = zone.trendline?.points ?? [];
-      if (tp.length >= 2) {
-        const pts = [...tp]
-          .filter(p => inRange(p.time))
-          .sort((a, b) => a.time - b.time)
-          .map(p => ({ time: p.time as UTCTimestamp, value: p.price }));
-        if (pts.length >= 2) {
-          const line = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: trendKind ? 2 : 1, lineStyle: trendKind ? 0 : 2 });
-          line.setData(pts);
-          if (anchorSec !== null) {
-            const proj = zone.trendline?.projected;
-            if (Number.isFinite(proj) && anchorSec >= pts[pts.length - 1].time) {
-              const projLine = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1, lineStyle: 2 });
-              projLine.setData([{ time: pts[pts.length - 1].time, value: tp[tp.length - 1].price }, { time: anchorSec as UTCTimestamp, value: proj }]);
-            }
+    // الطبقة العلوية: حافة الوقف + نقاط اللمس + مقاطع خط الاتجاه
+    attachZonePrimitive(series, 'top', (ctx, conv) => {
+      ctx.lineJoin = 'round';
+      for (const b of boxes) {
+        const x1 = conv.tx(b.timeStart);
+        const x2 = conv.tx(b.timeEnd);
+        const yStop = conv.py(b.stopPrice);
+        if (x1 == null || x2 == null || yStop == null) continue;
+        // حد الوقف على ضلع الصندوق المواجه
+        ctx.strokeStyle = b.edge;
+        ctx.lineWidth = b.edgeWidth;
+        ctx.beginPath();
+        ctx.moveTo(x1, yStop);
+        ctx.lineTo(x2, yStop);
+        ctx.stroke();
+        // نقاط اللمس
+        ctx.fillStyle = b.edge;
+        for (const p of b.touches) {
+          const px = conv.tx(p.time);
+          const py = conv.py(p.price);
+          if (px == null || py == null) continue;
+          ctx.beginPath();
+          ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // مقطع خط الاتجاه: يربط نقاطه فقط — منتهٍ
+        if (b.trendline) {
+          ctx.strokeStyle = 'rgba(245,158,11,.85)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          let started = false;
+          for (const p of b.trendline) {
+            const px = conv.tx(p.time);
+            const py = conv.py(p.price);
+            if (px == null || py == null) continue;
+            if (!started) { ctx.moveTo(px, py); started = true; }
+            else ctx.lineTo(px, py);
           }
+          ctx.stroke();
         }
       }
+    });
 
-      // التراكيب التحليلية الثقيلة فقط عند القلة (<9 مناطق) لضمان القراءة
-      if (!adaptive) {
-        const pr = zone.premium;
-        if (pr && Number.isFinite(pr.low) && Number.isFinite(pr.high)) {
-          series.createPriceLine({ price: pr.high, color: '#7c3aed', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
-          series.createPriceLine({ price: pr.low, color: '#7c3aed', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
-        }
-        if (Number.isFinite(zone.referenceLevel)) {
-          series.createPriceLine({ price: zone.referenceLevel, color: '#64748b', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
-        }
-        // علامة الاكتشاف عند سعر السيولة على شمعة الكشف
-        if (anchorSec !== null && Number.isFinite(zone.liquidityLevel) && markerCount < MARKER_CAP) {
-          createSeriesMarkers(series, [{
-            time: anchorSec as UTCTimestamp,
-            price: zone.liquidityLevel,
-            position: bullish ? 'atPriceBottom' as const : 'atPriceTop' as const,
-            shape: 'circle' as const,
-            color,
-            size: 2,
-            text: ''
-          }]);
-          markerCount += 1;
-        }
+    // أسعار الوقف على محور السعر: نقطة سلسلة مخفية الخط (لا خط ممتد) لأعلى N ثقة
+    if (showStopPrices) {
+      const top = [...zones]
+        .filter(z => Number.isFinite(z.liquidityLevel))
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, stopPriceTop);
+      for (const z of top) {
+        const bullish = z.kind.includes('ssl');
+        const marker = chart.addSeries(LineSeries, {
+          color: bullish ? '#089981' : '#f23645',
+          lineWidth: 1,
+          lineVisible: false,
+          lastValueVisible: true,
+          priceLineVisible: false
+        });
+        marker.setData([{ time: to as UTCTimestamp, value: z.liquidityLevel as number }]);
       }
     }
 
@@ -142,7 +169,7 @@ const MultiZoneChart = memo(function MultiZoneChart({ candles, zones, height = 4
       ro.disconnect();
       chart.remove();
     };
-  }, [candles, zones, height]);
+  }, [candles, zones, height, showStopPrices, stopPriceTop]);
 
   return (
     <div className="relative">
@@ -152,12 +179,10 @@ const MultiZoneChart = memo(function MultiZoneChart({ candles, zones, height = 4
       )}
       {!!candles.length && (
         <div className="absolute top-1 right-1 z-10 pointer-events-none flex flex-wrap justify-end gap-x-2.5 gap-y-0.5 max-w-[75%] text-[9px] leading-tight rounded px-1.5 py-1" style={{ background: 'rgba(10,14,22,.72)', border: '1px solid var(--border-1)', color: '#e2e8f0' }}>
-          <span><span style={{ color: '#f23645' }}>═</span> وقف BSL</span>
-          <span><span style={{ color: '#089981' }}>═</span> وقف SSL</span>
-          <span><span style={{ color: '#f23645' }}>●</span> <span style={{ color: '#089981' }}>●</span> لمسات (نقاط البناء)</span>
-          <span><span style={{ color: '#f59e0b' }}>━</span> خط اتجاه + إسقاط</span>
-          {!adaptive && <span><span style={{ color: '#7c3aed' }}>– –</span> Premium</span>}
-          {!adaptive && <span><span style={{ color: '#64748b' }}>– –</span> المرجع</span>}
+          <span><span style={{ color: '#f23645' }}>▬</span> BSL</span>
+          <span><span style={{ color: '#089981' }}>▬</span> SSL</span>
+          <span>● نقطة لمس</span>
+          <span><span style={{ color: '#f59e0b' }}>—</span> مقطع اتجاه</span>
         </div>
       )}
     </div>

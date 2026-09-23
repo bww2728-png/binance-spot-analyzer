@@ -162,15 +162,9 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
             text: 'الاكتشاف'
           }]);
         }
-        // خطوط المستويات فوق السعر الحقيقي
-        if (Number.isFinite(zone.referenceLevel)) {
-          series.createPriceLine({ price: zone.referenceLevel, color: '#64748b', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'المرجع' });
-        }
+        // خطوط المستويات: السيولة فقط (أقل عناصر — أوضح تحليلاً)
         if (Number.isFinite(zone.liquidityLevel)) {
           series.createPriceLine({ price: zone.liquidityLevel, color: zoneColor, lineWidth: 3, lineStyle: 2, axisLabelVisible: true, title: 'السيولة' });
-        }
-        if (Number.isFinite(zone.retailStop)) {
-          series.createPriceLine({ price: zone.retailStop, color: '#d97706', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: 'وقف Retail' });
         }
         // سلّم التكرارات: علامة كسر عند كل رد فعل مكسور (لمسة←رد فعل←كسر) — ترى لماذا تأكدت المنطقة
         const breaks = zone.staircase?.breaks ?? [];
@@ -200,13 +194,7 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
             series.createPriceLine({ price: zone.finalBreak.reactionPrice, color: zoneColor, lineWidth: 1, lineStyle: 1, axisLabelVisible: false, title: 'الرد فعل' });
           }
         }
-        // حدود منطقة Premium (حدود بنفسجية متقطعة)
-        const pr = zone.premium;
-        if (pr && Number.isFinite(pr.low) && Number.isFinite(pr.high)) {
-          series.createPriceLine({ price: pr.high, color: '#7c3aed', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Premium أعلى' });
-          series.createPriceLine({ price: pr.low, color: '#7c3aed', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: 'Premium أسفل' });
-        }
-        // خط الاتجاه إن وجد — من نقاطه الفعلية داخل النافذة
+        // خط الاتجاه إن وجد — مقطع منتهٍ يربط نقاطه الفعلية داخل النافذة فقط
         const tp = zone.trendline?.points ?? [];
         if (tp.length >= 2) {
           const pts = tp
@@ -226,12 +214,6 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
               size: 1,
               text: ''
             })));
-            // إسقاط متقطع من آخر نقطة إلى قيمة الإسقاط الحقيقية عند لحظة الكشف
-            const proj = zone.trendline?.projected;
-            if (Number.isFinite(proj) && candles[nearest].time >= pts[pts.length - 1].time) {
-              const projLine = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1, lineStyle: 2 });
-              projLine.setData([{ time: pts[pts.length - 1].time, value: tp[tp.length - 1].price }, { time: candles[nearest].time as UTCTimestamp, value: proj }]);
-            }
           }
         }
         if (!disposed) { setLoaded(true); setLoading(false); }
@@ -258,7 +240,7 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
       chart.remove();
       chartRef.current = null;
     };
-  }, [zone.id, zone.symbol, zone.timeframe, zone.kind, zone.referenceLevel, zone.liquidityLevel, zone.retailStop, trendKey, height, subscribeKline]);
+  }, [zone.id, zone.symbol, zone.timeframe, zone.kind, zone.liquidityLevel, trendKey, height, subscribeKline]);
 
   // تبديل الطور = مجال رؤية فقط فوق نفس البيانات — بدون rebuild وبدون fetch
   useEffect(() => {
@@ -289,15 +271,12 @@ const ZoneChart = memo(function ZoneChart({ zone, phase, height = 360 }: { zone:
           <div className="absolute top-1 left-1 z-10 num text-[10px] rounded px-1.5 py-0.5" style={{ background: 'rgba(10,14,22,.75)', color: '#e2e8f0', border: '1px solid var(--border-1)' }}>
             {zone.symbol} · {zone.timeframe}
           </div>
-          {/* مفتاح الرسم: شرح كل عنصر مرسوم — شفاف للنقر ولا يظهر إلا بعد تحميل البيانات */}
+          {/* مفتاح مصغّر: العناصر الأساسية فقط */}
           <div className="absolute top-1 right-1 z-10 pointer-events-none flex flex-wrap justify-end gap-x-2.5 gap-y-0.5 max-w-[70%] text-[9px] leading-tight rounded px-1.5 py-1" style={{ background: 'rgba(10,14,22,.72)', border: '1px solid var(--border-1)', color: '#e2e8f0' }}>
             <span><span style={{ color: zoneColor }}>●</span> لمسة / اكتشاف</span>
             <span><span style={{ color: zoneColor }}>▲▼</span> كسر تكرار</span>
-            <span><span style={{ color: '#64748b' }}>– –</span> المرجع</span>
             <span><span style={{ color: zoneColor }}>═</span> السيولة</span>
-            <span><span style={{ color: '#d97706' }}>·</span> وقف Retail</span>
-            <span><span style={{ color: '#7c3aed' }}>– –</span> Premium</span>
-            {(zone.trendline?.points?.length ?? 0) >= 2 && <span><span style={{ color: '#f59e0b' }}>—</span> خط الاتجاه</span>}
+            {(zone.trendline?.points?.length ?? 0) >= 2 && <span><span style={{ color: '#f59e0b' }}>—</span> مقطع الاتجاه</span>}
           </div>
         </>
       )}

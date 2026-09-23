@@ -23,10 +23,11 @@ export default function CustomLiquidityScreen() {
   const [candles, setCandles] = useState<Array<[number, number, number, number, number]>>([]);
   const [zones, setZones] = useState<LiquidityDetection[]>([]);
   const [selected, setSelected] = useState<LiquidityDetection | null>(null);
-  // فلاتر الشارت المستقل
+  // فلاتر الشارت المستقل — المسحوبة مخفية افتراضياً
   const [chartKinds, setChartKinds] = useState<Record<string, boolean>>({ horizontal_bsl: true, horizontal_ssl: true, trendline_bsl: true, trendline_ssl: true });
-  const [chartStates, setChartStates] = useState<Record<string, boolean>>({ potential: true, candidate: true, confirmed: true, swept: true });
-  const [cap, setCap] = useState(30);
+  const [chartStates, setChartStates] = useState<Record<string, boolean>>({ potential: true, candidate: true, confirmed: true, swept: false });
+  const [showStopPrices, setShowStopPrices] = useState(true);
+  const [cap, setCap] = useState(0);
   // فلاتر القائمة
   const [listKind, setListKind] = useState('');
   const [listState, setListState] = useState('');
@@ -70,11 +71,13 @@ export default function CustomLiquidityScreen() {
     }
   };
 
-  const chartZones = useMemo(() => [...zones]
-    .filter(z => chartKinds[z.kind] !== false)
-    .filter(z => chartStates[z.state] !== false)
-    .sort((a, b) => b.confidence - a.confidence)
-    .slice(0, Math.max(1, Math.min(60, cap))), [zones, chartKinds, chartStates, cap]);
+  const chartZones = useMemo(() => {
+    const filtered = [...zones]
+      .filter(z => chartKinds[z.kind] !== false)
+      .filter(z => chartStates[z.state] !== false)
+      .sort((a, b) => b.confidence - a.confidence);
+    return cap > 0 ? filtered.slice(0, cap) : filtered;
+  }, [zones, chartKinds, chartStates, cap]);
 
   const listZones = useMemo(() => [...zones]
     .filter(z => !listKind || z.kind === listKind)
@@ -145,14 +148,15 @@ export default function CustomLiquidityScreen() {
               <button key={s} onClick={() => setChartStates(p => ({ ...p, [s]: !p[s] }))} className="px-2 py-1.5 rounded-lg text-[10px]" style={{ background: chartStates[s] !== false ? 'var(--accent-soft)' : 'var(--surface-0)', color: chartStates[s] !== false ? 'var(--accent)' : 'var(--text-3)', border: '1px solid var(--border-1)' }}>{label}</button>
             ))}
             <span className="w-px h-4" style={{ background: 'var(--border-1)' }} />
+            <button onClick={() => setShowStopPrices(p => !p)} className="px-2 py-1.5 rounded-lg text-[10px]" style={{ background: showStopPrices ? 'var(--accent-soft)' : 'var(--surface-0)', color: showStopPrices ? 'var(--accent)' : 'var(--text-3)', border: '1px solid var(--border-1)' }}>أسعار الوقف على المحور</button>
             <label className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--text-3)' }}>أعلى
-              <input type="number" min={1} max={60} value={cap} onChange={e => setCap(parseInt(e.target.value, 10) || 30)} className="w-14 px-1.5 py-1.5 rounded-lg text-[11px] text-center" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }} />
-              ثقة
+              <input type="number" min={0} max={60} value={cap} onChange={e => setCap(parseInt(e.target.value, 10) || 0)} className="w-14 px-1.5 py-1.5 rounded-lg text-[11px] text-center" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }} />
+              ثقة (0 = الكل)
             </label>
             {filteredKinds === 0 && <span className="text-[10px]" style={{ color: 'var(--down)' }}>فعّل نوعاً واحداً على الأقل</span>}
           </div>
           <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid var(--border-1)' }}>
-            <MultiZoneChart candles={candles} zones={chartZones} height={420} />
+            <MultiZoneChart candles={candles} zones={chartZones} height={420} showStopPrices={showStopPrices} />
           </div>
         </div>
       )}
