@@ -851,7 +851,15 @@ app.post('/api/liquidity-zones/run-custom', handle(async (req, res) => {
   const raw = await loadKlinesPaginated(db, symbol, timeframe, 5000, { startTime: fromTs, endTime: toTs, maxPages: 8 });
   const candles = normalizeCandles(raw);
   const results = scanHistory({ symbol, timeframe, candles, step: 1, maxZones: 1000 });
-  res.json({ ok: true, symbol, timeframe, fromTs, toTs, results });
+  // شموع نفس النافذة (مضغوطة) للشارت المستقل — بلا إعادة جلب من العميل
+  const candlesCompact = candles.map(c => [c.time, c.open, c.high, c.low, c.close]);
+  res.json({ ok: true, symbol, timeframe, fromTs, toTs, results, candles: candlesCompact });
+}));
+
+// العملات الحلال غير الباركود (أهداف الدوران) لملء قائمة اختيار العملة في الجولة المخصصة
+app.get('/api/symbols/targets', handle(async (_req, res) => {
+  const targets = await resolveTargets();
+  res.json({ targets });
 }));
 
 // حالة الباك تيست في الذاكرة (النمط نفسه: حالة خادم بسيطة)

@@ -299,10 +299,13 @@ const sbApi = {
   runLiquidityZones(): Promise<{ ok: boolean; started: boolean }> {
     return fetch(`${BASE}/liquidity-zones/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>);
   },
-  runCustomLiquidityZones(opts: { symbol: string; timeframe: string; fromTs: number; toTs: number }): Promise<{ ok: boolean; results: LiquidityDetection[] }> {
+  runCustomLiquidityZones(opts: { symbol: string; timeframe: string; fromTs: number; toTs: number }): Promise<{ ok: boolean; symbol: string; timeframe: string; fromTs: number; toTs: number; results: LiquidityDetection[]; candles: Array<[number, number, number, number, number]> }> {
     return fetch(`${BASE}/liquidity-zones/run-custom`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts)
-    }).then(j<{ ok: boolean; results: LiquidityDetection[] }>);
+    }).then(j<{ ok: boolean; symbol: string; timeframe: string; fromTs: number; toTs: number; results: LiquidityDetection[]; candles: Array<[number, number, number, number, number]> }>);
+  },
+  getLiquidityTargets(signal?: AbortSignal): Promise<{ targets: string[] }> {
+    return fetch(`${BASE}/symbols/targets`, { signal }).then(j<{ targets: string[] }>);
   }
 };
 
@@ -423,6 +426,8 @@ const restApi = {
     }).then(j<{ ok: boolean; started: boolean; symbol: string; timeframe: string }>),
   getLiveOpportunities: (signal?: AbortSignal) =>
     fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>),
+  getLiquidityTargets: (signal?: AbortSignal) =>
+    fetch(`${BASE}/symbols/targets`, { signal }).then(j<{ targets: string[] }>),
   getLiquidityZoneStatus: (signal?: AbortSignal) =>
     fetch(`${BASE}/liquidity-zones/status`, { signal }).then(j<LiquidityZoneEngineStatus>),
   getLiquidityZones: (opts: { mode: 'live' | 'history'; symbol?: string; timeframe?: string; kind?: string; limit?: number; offset?: number } = { mode: 'live' }, signal?: AbortSignal) => {
@@ -441,7 +446,7 @@ const restApi = {
   runLiquidityZones: () =>
     fetch(`${BASE}/liquidity-zones/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>) ,
   runCustomLiquidityZones: (opts: { symbol: string; timeframe: string; fromTs: number; toTs: number }) =>
-    fetch(`${BASE}/liquidity-zones/run-custom`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) }).then(j<{ ok: boolean; results: LiquidityDetection[] }>)
+    fetch(`${BASE}/liquidity-zones/run-custom`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) }).then(j<{ ok: boolean; symbol: string; timeframe: string; fromTs: number; toTs: number; results: LiquidityDetection[]; candles: Array<[number, number, number, number, number]> }>)
 };
 
 export const api = useSupabase ? sbApi : restApi;

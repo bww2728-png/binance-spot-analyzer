@@ -8,6 +8,7 @@ import CaseLedger from './components/CaseLedger';
 import AutoHistory from './components/AutoHistory';
 import BacktestScreen from './components/BacktestScreen';
 import LiquidityZonesScreen from './components/LiquidityZonesScreen';
+import CustomLiquidityScreen from './components/CustomLiquidityScreen';
 import Toasts from './components/Toasts';
 
 export default function App() {
@@ -19,7 +20,7 @@ export default function App() {
     const onHash = () => {
       const h = location.hash.replace('#/', '');
       const target = h === 'history' ? 'autoHistory' : h;
-      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones'] as const).includes(target as never) && target !== screen) {
+      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity'] as const).includes(target as never) && target !== screen) {
         setScreen(target as never);
       }
     };
@@ -53,6 +54,7 @@ export default function App() {
     { id: 'autoHistory', label: 'السجل الآلي', shortLabel: 'السجل', count: null },
     { id: 'backtest', label: 'الباك تيست والفرص', shortLabel: 'الباك', count: null },
     { id: 'liquidityZones', label: 'مناطق السيولة', shortLabel: 'السيولة', count: null },
+    { id: 'customLiquidity', label: 'جولة مخصصة', shortLabel: 'جولة', count: null },
     { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
     { id: 'settings', label: 'الإعدادات والفلاتر', shortLabel: 'الإعدادات', count: null }
   ] as const;
@@ -133,6 +135,7 @@ export default function App() {
         {screen === 'autoHistory' && <AutoHistory />}
         {screen === 'backtest' && <BacktestScreen />}
         {screen === 'liquidityZones' && <LiquidityZonesScreen />}
+        {screen === 'customLiquidity' && <CustomLiquidityScreen />}
         {screen === 'dashboard' && <Dashboard />}
         {screen === 'settings' && <SettingsPanel />}
       </main>
