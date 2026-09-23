@@ -862,6 +862,115 @@ app.get('/api/symbols/targets', handle(async (_req, res) => {
   res.json({ targets });
 }));
 
+// ═══ مساعد قراءة السوق — حتمي بالكامل من أرقام محرك مناطق السيولة (بلا أي توليد حر) ═══
+
+function findStructure(candles) {
+  const highs = [], lows = [];
+  for (let i = 2; i < candles.length - 2; i += 1) {
+    const c = candles[i];
+    if (c.high > candles[i - 1].high && c.high > candles[i - 2].high && c.high >= candles[i + 1].high && c.high >= candles[i + 2].high) highs.push(c);
+    if (c.low < candles[i - 1].low && c.low < candles[i - 2].low && c.low <= candles[i + 1].low && c.low <= candles[i + 2].low) lows.push(c);
+  }
+  let direction = 'محايد';
+  const steps = [];
+  if (highs.length >= 2 && lows.length >= 2) {
+    const hUp = highs[highs.length - 1].high > highs[highs.length - 2].high;
+    const lUp = lows[lows.length - 1].low > lows[lows.length - 2].low;
+    direction = hUp && lUp ? 'صاعد' : !hUp && !lUp ? 'هابط' : 'عرضي';
+    steps.push(`آخر قمتين: ${highs[highs.length - 2].high.toPrecision(7)} ثم ${highs[highs.length - 1].high.toPrecision(7)} (${hUp ? 'صاعدتان' : 'هابطتان'})`);
+    steps.push(`آخر قاعين: ${lows[lows.length - 2].low.toPrecision(7)} ثم ${lows[lows.length - 1].low.toPrecision(7)} (${lUp ? 'صاعدان' : 'هابطان'})`);
+  } else {
+    steps.push(`الشموع غير كافية لهيكلة واضحة (لدينا ${candles.length} شمعة)`);
+  }
+  // آخر كسر بنيوي: إغلاق فوق آخر قمة مسجلة أو تحت آخر قاع مسجل بعدها
+  let lastBreak = null;
+  if (highs.length && lows.length) {
+    const lastPivotTime = Math.max(highs[highs.length - 1].time, lows[lows.length - 1].time);
+    for (let i = candles.length - 1; i >= 0; i -= 1) {
+      const c = candles[i];
+      if (c.time <= lastPivotTime) break;
+      if (c.close > highs[highs.length - 1].high) { lastBreak = `إغلاق فوق آخر قمة (${highs[highs.length - 1].high.toPrecision(7)})`; break; }
+      if (c.close < lows[lows.length - 1].low) { lastBreak = `إغلاق تحت آخر قاع (${lows[lows.length - 1].low.toPrecision(7)})`; break; }
+    }
+  }
+  return { direction, lastBreak, steps };
+}
+
+function activeZonesMap(zones, lastPrice) {
+  const active = zones.filter(z => z.state !== 'swept' && Number.isFinite(z.liquidityLevel));
+  const above = active.filter(z => z.liquidityLevel > lastPrice).sort((a, b) => a.liquidityLevel - b.liquidityLevel);
+  const below = active.filter(z => z.liquidityLevel < lastPrice).sort((a, b) => b.liquidityLevel - a.liquidityLevel);
+  const sweptRecent = zones.filter(z => z.state === 'swept');
+  const rejections = zones.reduce((n, z) => n + (z.touches || 0), 0);
+  return { above, below, sweptRecent, rejections };
+}
+
+function baseCaseRange(candles, direction, nearestLevel) {
+  const last = candles[candles.length - 1];
+  const s14 = candles.slice(-14);
+  const atr = s14.reduce((n, c) => n + (c.high - c.low), 0) / s14.length;
+  const dirSign = direction === 'صاعد' ? 1 : direction === 'هابط' ? -1 : 0;
+  let low = last.close - Math.max(0.2, 0.5 - 0.5 * dirSign) * atr;
+  let high = last.close + Math.max(0.2, 0.5 + 0.5 * dirSign) * atr;
+  // القيد بالمنطقة النشطة: النطاق لا يتجاوز أقرب مستوى سيولة في اتجاه القراءة
+  let capped = null;
+  if (Number.isFinite(nearestLevel)) {
+    if (dirSign >= 0 && nearestLevel > last.close && nearestLevel < high) { high = nearestLevel; capped = nearestLevel; }
+    if (dirSign <= 0 && nearestLevel < last.close && nearestLevel > low) { low = nearestLevel; capped = nearestLevel; }
+  }
+  return { low, high, atr, capped };
+}
+
+app.get('/api/market-read', handle(async (req, res) => {
+  const symbol = String(req.query.symbol || '').toUpperCase().trim();
+  const timeframes = String(req.query.timeframes || '15m,1h,4h').split(',').map(t => t.toLowerCase().trim()).filter(t => ALL_TIMEFRAMES.includes(t)).slice(0, 6);
+  if (!/^[A-Z0-9]{4,20}$/.test(symbol)) return res.status(400).json({ error: 'رمز غير صالح' });
+  if (!timeframes.length) return res.status(400).json({ error: 'فريمات غير صالحة' });
+  const reads = [];
+  for (const timeframe of timeframes) {
+    try {
+      const raw = await loadKlinesPaginated(db, symbol, timeframe, 300, { maxPages: 2 });
+      const candles = normalizeCandles(raw);
+      if (candles.length < 30) continue;
+      const zones = scanHistory({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200 });
+      const lastPrice = candles[candles.length - 1].close;
+      const structure = findStructure(candles);
+      const map = activeZonesMap(zones, lastPrice);
+      const nearest = map.above[0] || map.below[0] || null;
+      const nearestLevel = nearest ? nearest.liquidityLevel : null;
+      const baseCase = baseCaseRange(candles, structure.direction, nearestLevel);
+      const steps = [...structure.steps];
+      if (structure.lastBreak) steps.push(`آخر كسر بنيوي: ${structure.lastBreak}`);
+      steps.push(`مناطق نشطة فوق السعر: ${map.above.length}${map.above[0] ? ` (أقربها ${map.above[0].liquidityLevel.toPrecision(7)} — ${map.above[0].kind})` : ''}`);
+      steps.push(`مناطق نشطة تحت السعر: ${map.below.length}${map.below[0] ? ` (أقربها ${map.below[0].liquidityLevel.toPrecision(7)} — ${map.below[0].kind})` : ''}`);
+      steps.push(`انزلاقات مسحوبة حديثاً: ${map.sweptRecent.length} | إجمالي لمسات المناطق: ${map.rejections}`);
+      steps.push(`السلوك المرجعي للإغلاق الحالي: ${baseCase.low.toPrecision(7)} ← ${baseCase.high.toPrecision(7)}${baseCase.capped != null ? ' (مقيّد بأقرب سيولة)' : ''} | ATR≈${baseCase.atr.toPrecision(4)}`);
+      const biasScore = map.below.reduce((n, z) => n + z.confidence, 0) - map.above.reduce((n, z) => n + z.confidence, 0);
+      reads.push({
+        symbol, timeframe, lastPrice,
+        direction: structure.direction, lastBreak: structure.lastBreak,
+        above: map.above.slice(0, 3).map(z => ({ id: z.id, kind: z.kind, level: z.liquidityLevel, confidence: z.confidence, touches: z.touches, state: z.state })),
+        below: map.below.slice(0, 3).map(z => ({ id: z.id, kind: z.kind, level: z.liquidityLevel, confidence: z.confidence, touches: z.touches, state: z.state })),
+        sweptCount: map.sweptRecent.length, rejections: map.rejections,
+        baseCase: { low: baseCase.low, high: baseCase.high, atr: baseCase.atr, capped: baseCase.capped },
+        biasScore, steps
+      });
+    } catch { /* فريم غير متاح لهذه العملة — يُتخطى */ }
+  }
+  if (!reads.length) return res.status(404).json({ error: 'لا بيانات كافية لهذه العملة/الفريمات' });
+  const bullish = reads.filter(r => r.direction === 'صاعد').length;
+  const bearish = reads.filter(r => r.direction === 'هابط').length;
+  const zonesBelow = reads.reduce((n, r) => n + r.below.reduce((m, z) => m + z.confidence, 0), 0);
+  const zonesAbove = reads.reduce((n, r) => n + r.above.reduce((m, z) => m + z.confidence, 0), 0);
+  const net = zonesBelow - zonesAbove + (bullish - bearish) * 0.5;
+  const bias = net > 1 ? 'شرائي' : net < -1 ? 'بيعي' : 'محايد';
+  res.json({
+    ok: true, symbol, bias, net: Number(net.toFixed(2)),
+    summary: `تحيّز ${bias} — هيكلة ${reads.filter(r => r.direction !== 'محايد').map(r => `${r.timeframe}: ${r.direction}`).join(' · ') || 'غير محسومة'}`,
+    reads
+  });
+}));
+
 // حالة الباك تيست في الذاكرة (النمط نفسه: حالة خادم بسيطة)
 const backtestState = {
   busy: false, startedAt: null, lastRunAt: null, pairsDone: 0, pairsTotal: 0,

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { ZoneCard, ZoneDetail, kindLabel, stateLabel, pct } from './ZoneCards';
 import MultiZoneChart from './MultiZoneChart';
+import MarketReadPanel from './MarketReadPanel';
 import { TIMEFRAMES, type LiquidityDetection } from '../lib/types';
 
 const isoDay = (d: Date) => {
@@ -123,6 +124,9 @@ export default function CustomLiquidityScreen() {
       </div>
 
       {error && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{error}</div>}
+
+      {/* مساعد قراءة السوق — حتمي من أرقام محرك مناطق السيولة */}
+      <MarketReadPanel symbol={runInfo?.symbol ?? symbol} currentTimeframe={timeframe} />
 
       {runInfo && (
         <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">

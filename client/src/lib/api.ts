@@ -306,6 +306,9 @@ const sbApi = {
   },
   getLiquidityTargets(signal?: AbortSignal): Promise<{ targets: string[] }> {
     return fetch(`${BASE}/symbols/targets`, { signal }).then(j<{ targets: string[] }>);
+  },
+  getMarketRead(symbol: string, timeframes: string, signal?: AbortSignal): Promise<MarketReadResponse> {
+    return fetch(`${BASE}/market-read?symbol=${encodeURIComponent(symbol)}&timeframes=${encodeURIComponent(timeframes)}`, { signal }).then(j<MarketReadResponse>);
   }
 };
 
@@ -428,6 +431,8 @@ const restApi = {
     fetch(`${BASE}/live/opportunities`, { signal }).then(j<LiveOpportunitiesResponse>),
   getLiquidityTargets: (signal?: AbortSignal) =>
     fetch(`${BASE}/symbols/targets`, { signal }).then(j<{ targets: string[] }>),
+  getMarketRead: (symbol: string, timeframes: string, signal?: AbortSignal) =>
+    fetch(`${BASE}/market-read?symbol=${encodeURIComponent(symbol)}&timeframes=${encodeURIComponent(timeframes)}`, { signal }).then(j<MarketReadResponse>),
   getLiquidityZoneStatus: (signal?: AbortSignal) =>
     fetch(`${BASE}/liquidity-zones/status`, { signal }).then(j<LiquidityZoneEngineStatus>),
   getLiquidityZones: (opts: { mode: 'live' | 'history'; symbol?: string; timeframe?: string; kind?: string; limit?: number; offset?: number } = { mode: 'live' }, signal?: AbortSignal) => {
@@ -448,5 +453,18 @@ const restApi = {
   runCustomLiquidityZones: (opts: { symbol: string; timeframe: string; fromTs: number; toTs: number }) =>
     fetch(`${BASE}/liquidity-zones/run-custom`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) }).then(j<{ ok: boolean; symbol: string; timeframe: string; fromTs: number; toTs: number; results: LiquidityDetection[]; candles: Array<[number, number, number, number, number]> }>)
 };
+
+export interface MarketReadZone { id: string; kind: string; level: number; confidence: number; touches: number; state: string; }
+export interface MarketReadPerTf {
+  symbol: string; timeframe: string; lastPrice: number;
+  direction: string; lastBreak: string | null;
+  above: MarketReadZone[]; below: MarketReadZone[];
+  sweptCount: number; rejections: number;
+  baseCase: { low: number; high: number; atr: number; capped: number | null };
+  biasScore: number; steps: string[];
+}
+export interface MarketReadResponse {
+  ok: boolean; symbol: string; bias: string; net: number; summary: string; reads: MarketReadPerTf[];
+}
 
 export const api = useSupabase ? sbApi : restApi;
