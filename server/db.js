@@ -425,7 +425,16 @@ const db = {
       return rest(`/events_log?${q}`);
     },
     get: (id) => rest(`/events_log?id=eq.${Number(id)}&select=*&limit=1`).then(rows => rows[0] ?? null),
-    create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' })
+    create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
+    /** سجل أحداث الفرص الحية (نشر + حسم) — التاريخ الدائم للوحة التحكم */
+    liveOppEvents: (sinceTs, limit = 2000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'in.(live_opportunity,live_opportunity_closed)');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      q.set('order', 'ts.desc,id.desc');
+      q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      return rest(`/events_log?${q}`);
+    }
   }
 };
 

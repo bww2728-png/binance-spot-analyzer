@@ -494,7 +494,9 @@ export interface BuyOpportunity {
   profile: { poc: number; vah: number; val: number } | null;
   segmentKey: string;
   calibratedWinRate: number;
+  wilsonLB?: number;
   segmentTrades: number;
+  tier?: "qualified" | "probationary" | null;
   distancePct: number;
   reasons: string[];
   outcome: "target" | "stop" | null;
@@ -534,7 +536,39 @@ export interface BuyCalibrationSegment {
   wins: number;
   winRate: number | null;
   smoothedWinRate: number;
+  wilsonLB?: number;
+  tier?: "qualified" | "probationary" | "weak";
   avgRR: number | null;
+}
+
+/** حدث تاريخي لفرصة حية (من سجل الأحداث الدائم — يغذي لوحة التحكم) */
+export interface BuyHistoryEvent {
+  kind: "published";
+  ts: number;
+  id: string | null;
+  symbol: string;
+  timeframe: string | null;
+  tier: "qualified" | "probationary" | null;
+  segmentKey: string | null;
+  entry: number | null;
+  stop: number | null;
+  tp: number | null;
+  rr: number | null;
+  composite: number | null;
+  calibratedWinRate: number | null;
+  detectedAt: number | null;
+  outcome: "target" | "stop" | null;
+  resolvedAt: number | null;
+  durationMs: number | null;
+  mfeR: number | null;
+  maeR: number | null;
+}
+
+export interface BuyHistoryResponse {
+  days: number;
+  timeline: BuyHistoryEvent[];
+  active: { id: string; symbol: string; timeframe: string; tier: string | null; detectedAt: number }[];
+  generatedAt: number;
 }
 
 export interface BuyFeed {

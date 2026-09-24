@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -468,6 +468,8 @@ const liveOpportunitiesApi = {
     fetch(`${BASE}/live-opportunities/calibration`, { signal }).then(j<BuyFeed['calibration']>),
   getBuyHistory: (signal?: AbortSignal) =>
     fetch(`${BASE}/live-opportunities/history`, { signal }).then(j<{ opportunities: BuyOpportunity[]; total: number }>),
+  getBuyHistoryEvents: (days: number, signal?: AbortSignal) =>
+    fetch(`${BASE}/live-opportunities/history?days=${days}`, { signal }).then(j<BuyHistoryResponse>),
   runBuyScan: () =>
     fetch(`${BASE}/live-opportunities/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
   runBuyCalibration: (body?: { symbols?: string[]; timeframes?: string[] }) =>

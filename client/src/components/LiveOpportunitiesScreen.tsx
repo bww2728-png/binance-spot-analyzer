@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
 import type { BuyFeed, BuyOpportunity, BuyWatchRow, BuyCalibrationSegment } from '../lib/types';
 import type { LiveOppTickRow, LiveWatchTickRow } from '../lib/binance';
+import LiveDashboard from './LiveDashboard';
 import { TIMEFRAMES } from '../lib/types';
 
 /**
@@ -60,7 +61,7 @@ export default function LiveOpportunitiesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [tfFilter, setTfFilter] = useState('');
   const [scopeFilter, setScopeFilter] = useState<'all' | 'halal'>('halal');
-  const [section, setSection] = useState<'opps' | 'watch' | 'results' | 'rejected'>('opps');
+  const [section, setSection] = useState<'opps' | 'dashboard' | 'watch' | 'results' | 'rejected'>('opps');
   const [chartId, setChartId] = useState<string | null>(null);
   const [busyMsg, setBusyMsg] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -167,7 +168,7 @@ export default function LiveOpportunitiesScreen() {
           <h2 className="text-lg font-bold" style={{ color: 'var(--text-1)' }}>الفرص الحية — دخول شراء</h2>
           <p className="text-[11px] mt-1" style={{ color: 'var(--text-3)' }}>
             مناطق SSL من محرك مناطق السيولة (قمم/قيعان) ← انتظار سويب ← تأكيد بالأوردر فلو ← خطة كاملة.
-            تُنشر فقط الفرص التي بلغت شريحتها المعايَرة {pct(targetRate)} أو أكثر.
+            الفرص تُنشر بطبقتين شفافتين: «مؤهلة» (شريحتها مثبتة إحصائياً بـ{pct(targetRate)}+) و«تحت التجربة» (إعداد تقنياً سليم، شريحته لم تُثبت بعد) — ونتائج كل فرصة تُغذّي ترقية شريحتها تلقائياً.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -251,10 +252,13 @@ export default function LiveOpportunitiesScreen() {
       {/* الأقسام */}
       <div className="flex flex-wrap items-center gap-2">
         <button onClick={() => setSection('opps')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'opps' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'opps' ? 'var(--accent)' : 'var(--text-2)' }}>الفرص المنشورة ({opportunities.length})</button>
+        <button onClick={() => setSection('dashboard')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'dashboard' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'dashboard' ? 'var(--accent)' : 'var(--text-2)' }}>لوحة التحكم</button>
         <button onClick={() => setSection('watch')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'watch' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'watch' ? 'var(--accent)' : 'var(--text-2)' }}>قيد المراقبة ({feed?.watchingTotal ?? 0})</button>
         <button onClick={() => setSection('results')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'results' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'results' ? 'var(--accent)' : 'var(--text-2)' }}>المعايرة والنتائج ({segments.length})</button>
         <button onClick={() => setSection('rejected')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'rejected' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'rejected' ? 'var(--accent)' : 'var(--text-2)' }}>لم تجتز البوابات ({rejected.length})</button>
       </div>
+
+      {section === 'dashboard' && <LiveDashboard refreshKey={Math.floor(now / 60_000)} />}
 
       {section === 'opps' && (
         <>
@@ -424,6 +428,11 @@ function OpportunityCard({ op, now, targetRate, onChart, tick }: { op: BuyOpport
           <span className="font-bold num text-[14px]" style={{ color: 'var(--text-1)' }}>{op.symbol}</span>
           <span className="px-2 py-0.5 rounded-md text-[10px] num" style={{ background: 'var(--surface-0)', color: 'var(--text-2)' }}>{op.timeframe}</span>
           <span className="px-2 py-0.5 rounded-md text-[10px]" style={{ background: 'var(--up-soft)', color: 'var(--up)' }}>شراء</span>
+          {op.tier && (
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold" style={{ background: op.tier === 'qualified' ? 'var(--up-soft)' : 'var(--warn-soft)', color: op.tier === 'qualified' ? 'var(--up)' : '#b45309' }} title={`الشريحة ${op.segmentKey} — نسبة معايَرة ${pct(op.calibratedWinRate)} من ${op.segmentTrades} صفقة${op.wilsonLB != null ? ` · حد Wilson ${pct(op.wilsonLB)}` : ''}`}>
+              {op.tier === 'qualified' ? 'مؤهلة' : 'تحت التجربة'} {pct(op.calibratedWinRate)}
+            </span>
+          )}
           {tick && <span className="text-[10px]" style={{ color: 'var(--up)' }} title="بث لحظي كل ثانية">●</span>}
         </div>
         <span className="num font-bold text-[13px]" style={{ color: outcomeColor }}>

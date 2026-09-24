@@ -447,16 +447,38 @@ export function calibrateSweeps({
 }
 
 /**
- * تجميع صفقات إلى شرائح (فريم × فئة الثقة) مع تمليس بايزي (سابق 0.5 بوزن 4).
+ * تجميع صفقات إلى شرائح (فريم × فئة الثقة) — تقدير إحصائي احترافي للعينات الصغيرة:
  *
- * لكل شريحة تُشغَّل شبكة R:R، ويُختار **أنسب R:R** لها:
- *   1) الأعلى R:R بين المؤهَّلة (نسبة مُعايَرة ≥ targetWinRate وعيّنة كافية) — أفضل عائد مقبول
- *   2) وإلا الأعلى نسبة نجاح (لتُعرض الشريحة كما هي وتُستبعد من النشر)
- * هذا يجعل الشرائح المنشورة قابلة للتحقق تاريخياً بدل تثبيت هدف واحد لكل الأسواق.
+ * 1) Empirical-Bayes: الـprior ليس 0.5 ثابتاً بل المعدل العالمي لكل الصفقات (partial pooling) —
+ *    الشرائح الصغيرة تنكمش نحو معدل السوق العام، والكبيرة تحتفظ بشخصيتها.
+ * 2) الحكم على الشريحة بـ**الحد الأدنى لفاصل Wilson (95%)** — المعيار المعتمد للعينات الصغيرة
+ *    (Brown, Cai & DasGupta 2001) بدل النقطة الخام: 8/11 (72%) حدّها الأدنى ~45% (غير مثبتة).
+ * 3) تصنيف ثلاثي لكل شريحة:
+ *      qualified    — مثبتة إحصائياً: posterior ≥ targetWinRate وWilsonLB ≥ 0.5 وn ≥ minTrades
+ *      probationary — غير مثبتة لكن ليست أسوأ من الصدفة: posterior ≥ 0.5 (تُنشر بشارة شفافة)
+ *      weak         — أسوأ من الصدفة إحصائياً (لا تُنشر)
  */
+function wilsonLowerBound(wins, n, z = 1.96) {
+  if (!n) return 0;
+  const p = wins / n;
+  const denom = 1 + z * z / n;
+  const centre = p + z * z / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p) + z * z / (4 * n)) / n);
+  return Math.max(0, (centre - margin) / denom);
+}
+
 export function summarizeSegments(trades, {
-  prior = 0.5, priorWeight = 4, targetWinRate = 0.6, minTrades = 12
+  prior = null, priorWeight = 6, targetWinRate = 0.6, minTrades = 8
 } = {}) {
+  // الـprior العالمي: المعدل العام لكل الصفقات الممرَّرة (empirical Bayes)
+  let totalWins = 0, total = 0;
+  for (const t of trades ?? []) {
+    if (t.win !== 0 && t.win !== 1) continue;
+    total += 1;
+    if (t.win === 1) totalWins += 1;
+  }
+  const globalPrior = prior ?? (total > 0 ? totalWins / total : 0.5);
+
   const map = new Map();
   for (const t of trades ?? []) {
     if (t.win !== 0 && t.win !== 1) continue;
@@ -472,19 +494,26 @@ export function summarizeSegments(trades, {
     }
   }
 
+  const classify = (r, posterior) =>
+    (posterior >= targetWinRate && wilsonLowerBound(r.wins, r.trades) >= 0.5 && r.trades >= minTrades)
+      ? 'qualified'
+      : (posterior >= 0.5 ? 'probationary' : 'weak');
+
   const out = [];
   for (const [key, byRR] of map) {
     const variants = [...byRR.entries()].map(([minRR, r]) => {
       const raw = r.trades ? r.wins / r.trades : null;
-      const smoothed = (r.wins + prior * priorWeight) / (r.trades + priorWeight);
+      const smoothed = (r.wins + globalPrior * priorWeight) / (r.trades + priorWeight);
       return {
         minRR,
         trades: r.trades,
         wins: r.wins,
         winRate: raw == null ? null : Number(raw.toFixed(3)),
         smoothedWinRate: Number(smoothed.toFixed(3)),
+        wilsonLB: Number(wilsonLowerBound(r.wins, r.trades).toFixed(3)),
         avgRR: r.rrCount ? Number((r.rrSum / r.rrCount).toFixed(2)) : null,
-        qualified: smoothed >= targetWinRate && r.trades >= minTrades
+        tier: classify(r, smoothed),
+        qualified: smoothed >= targetWinRate && wilsonLowerBound(r.wins, r.trades) >= 0.5 && r.trades >= minTrades
       };
     });
     // المؤهَّلة: الأعلى R:R (أفضل عائد محقَّق تاريخياً) — وإلا الأقوى نسبةً

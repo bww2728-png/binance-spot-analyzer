@@ -30,8 +30,9 @@ const DEFAULT_CONFIG = {
   verifyConcurrency: 6,       // تحقق شبكي متوازٍ للمرشحين
   maxKlineSubs: 900,          // سقف اشتراكات الشموع عبر البث (حد بينانس 1024/اتصال)
   maxFlowSubs: 80,            // سقف اشتراكات aggTrade (تدفق حي)
-  calibrationMs: 60 * 60 * 1000,
+  calibrationMs: 6 * 60 * 60 * 1000,
   maxVerifyPerCycle: 12,
+  promoteLiveTrades: 20,      // عتبة الترقية الحية: نتائج فعلية قبل ترقية شريحة تجريبية
   maxTrackAtr: 6,
   maxStopAtr: 3,
   freshnessBars: 6,
@@ -49,7 +50,7 @@ const DEFAULT_CONFIG = {
   maxBars: 96,
   maxReclaimBars: 6,
   calibration: {
-    symbols: 24, timeframes: null, bars: 1000, batch: 5, sleepMs: 200, maxPages: 2,
+    symbols: 96, timeframes: null, bars: 2000, batch: 5, sleepMs: 200, maxPages: 3,
     concurrency: 4,
     minDepthAtr: 0.15, maxDepthAtr: 3, maxRangePos: 0.8, minBuyRatioPct: 48,
     requireSessionPrime: false,
@@ -87,6 +88,7 @@ export function createLiveOpportunityEngine(deps) {
 
   const trackers = new Map();          // key → حالة
   const opportunities = new Map();     // publishKey → فرصة منشورة
+  const liveStats = new Map();         // مفتاح شريحة → {trades, wins} من النتائج الحية (ترقية champion-challenger)
   const history = [];                  // فرص محسومة/قديمة (محدودة)
   const segments = new Map();          // مفتاح شريحة → إحصاء
   const rejected = [];                 // مرشحون لم يجتازوا البوابات/الشريحة (شفافية)
@@ -257,12 +259,23 @@ export function createLiveOpportunityEngine(deps) {
       rr: plan.rr, sessionTier: session.tier, locationState: location.state,
       composite, minRR: planMinRR, minComposite: cfg.minComposite
     });
-    const segmentOk = segment != null && segment.smoothedWinRate >= cfg.targetWinRate;
+    // البوابة الإحصائية بطبقتين: شريحة مثبتة (qualified) أو تحت التجربة (probationary) تنشر؛
+    // weak أو غائبة تُرفض بسبب صريح. النتائج الحية للشريحة تدعم الترقية (champion-challenger).
+    const live = liveStats.get(segment?.key ?? '') ?? { trades: 0, wins: 0 };
+    const liveN = live.trades;
+    const liveWr = liveN > 0 ? live.wins / liveN : null;
+    const effectiveTier = segment?.tier === 'probationary'
+      && liveN >= cfg.promoteLiveTrades && liveWr != null && liveWr >= cfg.targetWinRate
+      ? 'qualified' // ترقية حية: الشريحة التجريبية أثبتت نفسها في التداول الفعلي
+      : segment?.tier ?? null;
+    const segmentOk = effectiveTier === 'qualified' || effectiveTier === 'probationary';
 
     if (!gate.pass || !segmentOk) {
       const segReason = segment == null
-        ? 'لا شريحة معايَرة مؤهَّلة بعد — شغّل المعايرة'
-        : `الشريحة ${segment.key} دون الهدف (${(segment.smoothedWinRate * 100).toFixed(1)}% من ${segment.trades} صفقة)`;
+        ? 'لا شريحة معايَرة — بانتظار اكتمال المعايرة'
+        : effectiveTier == null
+          ? `الشريحة ${segment.key} ضعيفة إحصائياً (${(segment.smoothedWinRate * 100).toFixed(1)}% منكمشة من ${segment.trades} صفقة — دون 50%)`
+          : `الشريحة ${segment.key} ${effectiveTier === 'probationary' ? 'تحت التجربة' : 'غير مؤهلة'} (${(segment.smoothedWinRate * 100).toFixed(1)}% · حد Wilson ${(segment.wilsonLB * 100).toFixed(0)}% من ${segment.trades} صفقة)`;
       rejected.push({
         symbol, timeframe: zone.timeframe, zoneId: zone.id, at: now(),
         composite, flowScore: flow.score, rr: plan.rr,
@@ -302,7 +315,9 @@ export function createLiveOpportunityEngine(deps) {
       profile: profile ? { poc: profile.poc, vah: profile.vah, val: profile.val } : null,
       segmentKey: segment.key,
       calibratedWinRate: segment.smoothedWinRate,
+      wilsonLB: segment.wilsonLB,
       segmentTrades: segment.trades,
+      tier: effectiveTier,
       planMinRR,
       distancePct: Number((((Number(price) - Number(zone.referenceLevel)) / Number(zone.referenceLevel)) * 100).toFixed(3)),
       reasons: [
@@ -350,6 +365,13 @@ export function createLiveOpportunityEngine(deps) {
         op.outcome = 'target';
         op.outcomeAt = now();
         op.outcomePrice = px;
+      }
+      // تغذية راجعة حية لشريحة الفرصة (champion-challenger) — تُستخدم في الترقية التلقائية
+      if (op.segmentKey) {
+        const st2 = liveStats.get(op.segmentKey) ?? { trades: 0, wins: 0 };
+        st2.trades += 1;
+        if (op.outcome === 'target') st2.wins += 1;
+        liveStats.set(op.segmentKey, st2);
       }
     }
     // ترحيل المحسوم إلى السجل

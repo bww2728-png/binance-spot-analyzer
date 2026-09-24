@@ -1243,8 +1243,60 @@ app.get('/api/live-opportunities/calibration', handle(async (_req, res) => {
   res.json(liveOppEngine.getCalibration());
 }));
 
-app.get('/api/live-opportunities/history', handle(async (_req, res) => {
-  res.json(liveOppEngine.getHistory());
+// السجل التاريخي: بلا days → الذاكرة (توافق قديم)؛ مع days → الأحداث الدائمة من events_log
+// (يغذي لوحة التحكم: تقويم/ساعات/KPIs/جدول — والنتائج تُدمج على أحداث النشر)
+app.get('/api/live-opportunities/history', handle(async (req, res) => {
+  if (req.query.days === undefined) {
+    res.json(liveOppEngine.getHistory());
+    return;
+  }
+  const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
+  const sinceTs = Date.now() - days * 86_400_000;
+  const rows = await db.events.liveOppEvents(sinceTs).catch(() => []);
+  const events = [];
+  for (const r of rows) {
+    let meta = {};
+    try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
+    const o = meta.opportunity ?? {};
+    events.push({
+      kind: r.type === 'live_opportunity' ? 'published' : 'resolved',
+      ts: r.ts, id: o.id ?? null,
+      symbol: o.symbol ?? r.symbol, timeframe: o.timeframe ?? null,
+      tier: o.tier ?? null, segmentKey: o.segmentKey ?? null,
+      entry: o.entry ?? null, stop: o.stop ?? null, tp: o.tp ?? null,
+      rr: o.rr ?? null, composite: o.composite ?? null,
+      calibratedWinRate: o.calibratedWinRate ?? null,
+      detectedAt: o.detectedAt ?? (r.type === 'live_opportunity' ? r.ts : null),
+      outcome: r.type === 'live_opportunity_closed' ? (o.outcome ?? null) : null,
+      resolvedAt: r.type === 'live_opportunity_closed' ? (o.outcomeAt ?? r.ts) : null,
+      durationMs: r.type === 'live_opportunity_closed' && o.outcomeAt && o.detectedAt
+        ? Math.max(0, o.outcomeAt - o.detectedAt) : null,
+      mfeR: o.mfeR ?? null, maeR: o.maeR ?? null
+    });
+  }
+  const resolvedById = new Map(events.filter(e => e.kind === 'resolved' && e.id).map(e => [e.id, e]));
+  const timeline = [];
+  for (const e of events) {
+    if (e.kind !== 'published') continue;
+    const r = resolvedById.get(e.id);
+    timeline.push({
+      ...e,
+      outcome: r?.outcome ?? null,
+      resolvedAt: r?.resolvedAt ?? null,
+      durationMs: r?.durationMs ?? null,
+      mfeR: Math.max(e.mfeR ?? 0, r?.mfeR ?? 0) || null,
+      maeR: Math.min(e.maeR ?? 0, r?.maeR ?? 0) || null
+    });
+  }
+  timeline.sort((a, b) => b.ts - a.ts);
+  res.json({
+    days,
+    timeline,
+    active: liveOppEngine.getFeed().opportunities.map(o => ({
+      id: o.id, symbol: o.symbol, timeframe: o.timeframe, tier: o.tier ?? null, detectedAt: o.detectedAt
+    })),
+    generatedAt: Date.now()
+  });
 }));
 
 app.post('/api/live-opportunities/run', handle(async (_req, res) => {

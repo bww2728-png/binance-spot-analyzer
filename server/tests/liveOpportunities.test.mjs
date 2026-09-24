@@ -533,25 +533,42 @@ test('summarizeSegments: نسبة نجاح + تمليس بايزي + بناء ا
     { timeframe: '5m', band: 'b3', win: 1, rr: 2.5, minRR: 2 },
     { timeframe: '5m', band: 'b3', win: 0, rr: 2, minRR: 2 }
   ];
-  const rows = summarizeSegments(trades, { minTrades: 2 });
+  // prior صريح 0.5 لاختبار الانكماش (الافتراضي empirical-Bayes يساوي معدل العينة نفسها هنا)
+  const rows = summarizeSegments(trades, { minTrades: 2, prior: 0.5 });
   const exact = rows.find(r => r.key === '5m|all|b3');
   const general = rows.find(r => r.key === '5m|all|all');
   assert.equal(exact.trades, 3);
   assert.equal(exact.wins, 2);
   assert.equal(exact.winRate, 0.667);
   assert.ok(exact.smoothedWinRate < exact.winRate, 'التمليس يسحب العينة الصغيرة نحو السابق');
+  // الافتراضي empirical-Bayes: الـprior العالمي = معدل الصفقات الممرَّرة نفسها
+  const eb = summarizeSegments(trades, { minTrades: 2 });
+  assert.equal(eb.find(r => r.key === '5m|all|b3').smoothedWinRate, 0.667, 'الانكماش نحو المعدل العالمي للعينة = المعدل نفسه');
   assert.ok(general, 'الشريحة العامة مبنية أيضاً');
 });
 
-test('summarizeSegments: تختار الأعلى R:R بين المؤهَّلة (≥60% وعيّنة كافية)', () => {
-  // هدف قريب 1.2R: نسبة عالية · هدف بعيد 2.5R: نسبة عالية أيضاً → يُختار الأبعد (أفضل عائد)
+test('summarizeSegments: تختار الأعلى R:R بين المؤهَّلة (posterior≥60% وWilsonLB≥50% وعيّنة كافية)', () => {
+  // هدف قريب 1.2R: 75% (WilsonLB≈53% مؤهَّل) · هدف بعيد 2.5R: 80% (WilsonLB≈58% مؤهَّل) → الأبعد
   const trades = [];
   for (let i = 0; i < 20; i += 1) {
     trades.push({ timeframe: '1h', band: 'b3', win: i < 15 ? 1 : 0, rr: 1.2, minRR: 1.2 }); // 75%
-    trades.push({ timeframe: '1h', band: 'b3', win: i < 14 ? 1 : 0, rr: 2.5, minRR: 2.5 }); // 70%
+    trades.push({ timeframe: '1h', band: 'b3', win: i < 16 ? 1 : 0, rr: 2.5, minRR: 2.5 }); // 80%
   }
   const seg = summarizeSegments(trades, { minTrades: 12, targetWinRate: 0.6 }).find(r => r.key === '1h|all|b3');
   assert.equal(seg.minRR, 2.5, 'اختار الهدف الأبعد لأنه ما زال مؤهَّلاً');
+  assert.ok(seg.smoothedWinRate >= 0.6);
+  assert.equal(seg.tier, 'qualified', 'مثبتة إحصائياً (WilsonLB≥50%)');
+});
+
+test('summarizeSegments: 70% بعيّنة صغيرة = probationary (WilsonLB دون 50%)', () => {
+  const trades = [];
+  for (let i = 0; i < 20; i += 1) {
+    trades.push({ timeframe: '1h', band: 'b3', win: i < 14 ? 1 : 0, rr: 2, minRR: 2 }); // 70% فقط
+  }
+  const seg = summarizeSegments(trades, { minTrades: 12, targetWinRate: 0.6 }).find(r => r.key === '1h|all|b3');
+  assert.equal(seg.qualified, false, '14/20 غير مثبتة إحصائياً');
+  assert.equal(seg.tier, 'probationary', 'تُنشر تحت التجربة بشفافية');
+  assert.ok(seg.wilsonLB < 0.5);
   assert.ok(seg.smoothedWinRate >= 0.6);
 });
 
