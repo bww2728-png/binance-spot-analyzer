@@ -10,7 +10,7 @@ import BacktestScreen from './components/BacktestScreen';
 import LiquidityZonesScreen from './components/LiquidityZonesScreen';
 import CustomLiquidityScreen from './components/CustomLiquidityScreen';
 import LiveOpportunitiesScreen from './components/LiveOpportunitiesScreen';
-import Toasts from './components/Toasts';
+import NotificationCenter from './components/NotificationCenter';
 
 export default function App() {
   const screen = useStore(s => s.screen);
@@ -21,7 +21,7 @@ export default function App() {
     const onHash = () => {
       const h = location.hash.replace('#/', '');
       const target = h === 'history' ? 'autoHistory' : h;
-      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities'] as const).includes(target as never) && target !== screen) {
+      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities', 'notifications'] as const).includes(target as never) && target !== screen) {
         setScreen(target as never);
       }
     };
@@ -32,6 +32,7 @@ export default function App() {
   const analyses = useStore(s => s.analyses);
   const cases = useStore(s => s.cases);
   const refreshCases = useStore(s => s.refreshCases);
+  const unreadNotifications = useStore(s => s.unreadNotifications);
 
   // حالة اتصال السوق الحية: هل وصل أي سعر خلال آخر 10 ثوانٍ؟
   const prices = useStore(s => s.prices);
@@ -55,6 +56,7 @@ export default function App() {
     { id: 'autoHistory', label: 'السجل الآلي', shortLabel: 'السجل', count: null },
     { id: 'backtest', label: 'الباك تيست والفرص', shortLabel: 'الباك', count: null },
     { id: 'liveOpportunities', label: 'الفرص الحية', shortLabel: 'حية', count: null },
+    { id: 'notifications', label: 'الإشعارات', shortLabel: 'الإشعارات', count: unreadNotifications },
     { id: 'liquidityZones', label: 'مناطق السيولة', shortLabel: 'السيولة', count: null },
     { id: 'customLiquidity', label: 'جولة مخصصة', shortLabel: 'جولة', count: null },
     { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
@@ -141,9 +143,9 @@ export default function App() {
         {screen === 'customLiquidity' && <CustomLiquidityScreen />}
         {screen === 'dashboard' && <Dashboard />}
         {screen === 'settings' && <SettingsPanel />}
+        {screen === 'notifications' && <NotificationCenter />}
       </main>
       {chartModal && <ChartModal />}
-      <Toasts />
     </div>
   );
 }

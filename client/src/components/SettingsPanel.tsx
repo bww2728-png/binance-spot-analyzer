@@ -1,19 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
-import { requestNotificationPermission } from '../lib/notifications';
 import { factsForSymbol } from '../lib/shariah';
 import type { ShariahResearchStatus } from '../lib/types';
 import Toggle from './ui/Toggle';
 
 const QUOTES = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH'];
-
-const PERM_BADGE: Record<string, { cls: string; text: string }> = {
-  granted: { cls: 'badge-up', text: 'ممنوح ✓' },
-  denied: { cls: 'badge-down', text: 'مرفوض — فعّله من إعدادات المتصفح' },
-  default: { cls: 'badge-warn', text: 'غير مطلوب بعد' },
-  unsupported: { cls: 'badge-neutral', text: 'غير مدعوم في هذا المتصفح' }
-};
 
 export default function SettingsPanel() {
   const settings = useStore(s => s.settings);
@@ -21,12 +13,6 @@ export default function SettingsPanel() {
   const analyses = useStore(s => s.analyses);
   const barcodeScans = useStore(s => s.barcodeScans);
   const lastSync = useStore(s => s.lastSync);
-
-  const [notifPerm, setNotifPerm] = useState<NotificationPermission | 'unsupported'>(
-    'Notification' in window ? Notification.permission : 'unsupported'
-  );
-
-  const perm = PERM_BADGE[notifPerm];
 
   /* ---- التصنيف الشرعي ---- */
   const shariah = useStore(s => s.shariah);
@@ -88,14 +74,6 @@ export default function SettingsPanel() {
             <div className="flex items-center gap-2.5 text-[13px]" style={{ color: 'var(--text-2)' }}>
               الصوت:
               <Toggle on={settings.sound_enabled === 1} label="تفعيل الصوت" onChange={v => void saveSettings({ sound_enabled: v ? 1 : 0 })} />
-            </div>
-            <div className="flex items-center gap-2.5 text-[13px]" style={{ color: 'var(--text-2)' }}>
-              إذن إشعارات المتصفح:
-              {notifPerm === 'default' ? (
-                <button className="btn btn-accent !py-1.5" onClick={() => void requestNotificationPermission().then(setNotifPerm)}>طلب الإذن</button>
-              ) : (
-                <span className={`badge ${perm.cls}`}>{perm.text}</span>
-              )}
             </div>
           </div>
         )}

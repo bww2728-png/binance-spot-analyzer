@@ -1,7 +1,6 @@
 import { useStore } from '../store/useStore';
 import type { Analysis } from './types';
 import { isUptrend, isDowntrend } from './sorting';
-import { notifyBrowser, playAlarm, requestNotificationPermission } from './notifications';
 import { api } from './api';
 
 interface ArmState {
@@ -97,10 +96,8 @@ export function startEngine() {
   };
 
   const fire = (st: ReturnType<typeof useStore.getState>, a: Analysis, type: string, message: string) => {
-    const sound = st.settings?.sound_enabled ?? 1;
-    notifyBrowser(`تنبيه ${a.symbol}`, message);
-    if (sound) playAlarm();
-    st.pushToast(message, 'alert');
+    // الإشعار يُسجَّل فقط في مركز الإشعارات (شاشة «الإشعارات») — بلا نوافذ منبثقة أو أصوات
+    st.pushToast(message, 'alert', undefined, { category: 'zones', symbol: a.symbol, severity: 'alert' });
     void api.postEvent(a.symbol, type, message).catch(() => { /* ignore */ });
   };
 
@@ -116,9 +113,6 @@ export function startEngine() {
       }
     }
   });
-
-  // طلب إذن الإشعارات عند بدء التشغيل
-  void requestNotificationPermission();
 
   setInterval(() => { void check().catch(() => { /* ignore */ }); }, 3000);
 }

@@ -5,16 +5,51 @@ import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
 import { queueZoneCapture } from '../lib/autoCapture';
-import { notifyBrowser, playAlarm } from '../lib/notifications';
 import { evaluateShariah } from '../lib/shariah';
 
 const API = '/api';
 
 const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
-export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity' | 'liveOpportunities';
+export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity' | 'liveOpportunities' | 'notifications';
 export type Theme = 'dark' | 'light';
 export type ArchiveSection = 'cases' | 'zones' | 'events';
+
+/* ═══ مركز الإشعارات — المكان الوحيد الذي تظهر فيه الإشعارات (بلا نوافذ منبثقة) ═══ */
+export type NotificationCategory = 'zones' | 'liveOpps' | 'shariah' | 'system' | 'actions';
+export type NotificationSeverity = 'info' | 'alert' | 'error';
+export interface AppNotification {
+  id: number;
+  ts: number;
+  category: NotificationCategory;
+  severity: NotificationSeverity;
+  symbol: string | null;
+  text: string;
+  action?: { label: string; onClick: () => void };
+  read: boolean;
+}
+
+const NOTIF_STORAGE_KEY = 'app_notifications_v1';
+const NOTIF_CAP = 500;
+let toastId = 0;
+
+function loadStoredNotifications(): AppNotification[] {
+  try {
+    const raw = localStorage.getItem(NOTIF_STORAGE_KEY);
+    if (!raw) return [];
+    const rows = JSON.parse(raw) as AppNotification[];
+    if (!Array.isArray(rows)) return [];
+    // الإجراءات (الدوال) لا تنجو من التخزين — تُساق وتُعلَّم السجلات المقروءة
+    return rows.slice(0, NOTIF_CAP).map(r => ({ ...r, action: undefined }));
+  } catch { return []; }
+}
+
+function saveStoredNotifications(rows: AppNotification[]) {
+  try {
+    const plain = rows.slice(0, NOTIF_CAP).map(r => ({ ...r, action: undefined }));
+    localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(plain));
+  } catch { /* التخزين ممتلئ أو محجوب — الإشعارات تبقى في الذاكرة */ }
+}
 
 function initialTheme(): Theme {
   // الأولوية للاختيار المحفوظ من زر التبديل، والافتراضي أبيض
@@ -39,7 +74,11 @@ interface StoreState {
   settings: Settings | null;
   screen: Screen;
   chartModal: { symbol: string; tfLower: string | null; tfUpper: string | null } | null;
-  toasts: { id: number; text: string; kind: 'info' | 'alert'; action?: { label: string; onClick: () => void } }[];
+  notifications: AppNotification[];
+  unreadNotifications: number;
+  markAllNotificationsRead: () => void;
+  clearNotifications: () => void;
+  markNotificationRead: (id: number) => void;
   streams: BinanceStreams | null;
   soundEnabled: boolean;
   syncing: boolean;
@@ -70,8 +109,8 @@ interface StoreState {
   deleteShariah: (symbol: string) => Promise<void>;
   saveSettings: (patch: Partial<Settings>) => Promise<void>;
   toggleTheme: () => void;
-  pushToast: (text: string, kind?: 'info' | 'alert', action?: { label: string; onClick: () => void }) => void;
-  dismissToast: (id: number) => void;
+  pushToast: (text: string, kind?: 'info' | 'alert', action?: { label: string; onClick: () => void }, meta?: { category?: NotificationCategory; symbol?: string; severity?: NotificationSeverity }) => void;
+  deleteNotification: (id: number) => void;
   subscribePrice: (symbol: string) => void;
   unsubscribePrice: (symbol: string) => void;
   subscribeKline: (symbol: string, interval: string, cb: (candle: Candle, closed: boolean) => void) => () => void;
@@ -79,7 +118,6 @@ interface StoreState {
 }
 
 let streams: BinanceStreams | null = null;
-let toastId = 0;
 let symbolsChannelStarted = false;
 const priceUnsubs = new Map<string, () => void>();
 /* تجميع نبضات الأسعار: الكتابة إلى خريطة مؤقتة ودفعة set() واحدة كل 600ms
@@ -95,12 +133,11 @@ function alertIfHaramFollowed(symbol: string, verdict: string) {
   if (!followed || verdict !== 'haram' || haramAlerted.has(symbol)) return;
   haramAlerted.add(symbol);
   const id = followed.id;
-  notifyBrowser(`تنبيه شرعي: ${symbol}`, 'تغيّر التصنيف إلى «حرام» — يُقترح الإزالة من اللوحة');
-  playAlarm(2);
   useStore.getState().pushToast(
     `${symbol}: تغيّر تصنيفها الشرعي إلى «حرام» حسب البيانات — يُقترح إزالتها من لوحة المتابعة`,
     'alert',
-    { label: 'إزالة من اللوحة', onClick: () => void useStore.getState().deleteAnalysis(id) }
+    { label: 'إزالة من اللوحة', onClick: () => void useStore.getState().deleteAnalysis(id) },
+    { category: 'shariah', symbol, severity: 'alert' }
   );
 }
 
@@ -118,12 +155,13 @@ export const useStore = create<StoreState>((set, get) => ({
     // افتتاح مباشر على التبويب من الرابط (#/history مثلاً) — الافتراضي اللوحة
     const h = location.hash.replace('#/', '');
     if (h === 'history') return 'autoHistory';
-    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities'] as const).includes(h as Screen)
+    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities', 'notifications'] as const).includes(h as Screen)
       ? h as Screen
       : 'board';
   })(),
   chartModal: null,
-  toasts: [],
+  notifications: ((): AppNotification[] => loadStoredNotifications())(),
+  unreadNotifications: ((): number => loadStoredNotifications().filter(n => !n.read).length)(),
   streams: null,
   soundEnabled: true,
   syncing: false,
@@ -200,7 +238,7 @@ export const useStore = create<StoreState>((set, get) => ({
         await get().syncSymbols();
       }
     } catch (e) {
-      get().pushToast(`تعذر جلب قائمة العملات المخزنة: ${String(e)}`, 'alert');
+      get().pushToast(`تعذر جلب قائمة العملات المخزنة: ${String(e)}`, 'alert', undefined, { category: 'system', severity: 'error' });
     }
     // قناة التحديث الآني: بث WebSocket + احتياطي دوري (الثنائي يضمن الوصول دائماً)
     if (!symbolsChannelStarted) {
@@ -210,9 +248,18 @@ export const useStore = create<StoreState>((set, get) => ({
         else if (msg.type === 'zones_changed' || msg.type === 'zones_auto_updated') void get().refreshZoneCounts();
         else if (msg.type === 'zones_auto_updated' && msg.symbol) queueZoneCapture(String(msg.symbol));
         else if (msg.type === 'zone_near' && msg.zone && msg.symbol) {
-          get().pushToast(`ⓘ ${msg.symbol}: السعر يقترب من منطقة ${msg.zone.type}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert');
+          get().pushToast(`${msg.symbol}: السعر يقترب من منطقة ${msg.zone.type}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert', undefined, { category: 'zones', symbol: String(msg.symbol), severity: 'alert' });
         } else if (msg.type === 'zone_swept' && msg.zone && msg.symbol) {
-          get().pushToast(`⚡ ${msg.symbol}: سحب سيولة ${msg.zone.type} عند ${msg.zone.price}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert');
+          get().pushToast(`${msg.symbol}: سحب سيولة ${msg.zone.type} عند ${msg.zone.price}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert', undefined, { category: 'zones', symbol: String(msg.symbol), severity: 'alert' });
+        } else if (msg.type === 'live_opportunity_new' && msg.opportunity) {
+          const o = msg.opportunity as { symbol: string; timeframe: string; entry: number; stop: number; tp: number; rr: number; composite: number };
+          get().pushToast(`فرصة شراء ${o.symbol} (${o.timeframe}) — دخول ${o.entry} · وقف ${o.stop} · هدف ${o.tp} · R:R ${o.rr} · درجة ${o.composite}`, 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: 'alert' });
+        } else if (msg.type === 'live_sweep_detected' && msg.symbol) {
+          get().pushToast(`${msg.symbol} (${msg.timeframe}): سويب سيولة بيعية مكتشف — بانتظار الاستعادة`, 'info', undefined, { category: 'liveOpps', symbol: String(msg.symbol) });
+        } else if (msg.type === 'live_opportunity_closed' && msg.opportunity) {
+          const o = msg.opportunity as { symbol: string; timeframe: string; outcome: string };
+          const win = o.outcome === 'target';
+          get().pushToast(`نتيجة فرصة ${o.symbol} (${o.timeframe}): ${win ? 'وصلت الهدف' : 'ضربت الوقف'}`, win ? 'info' : 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: win ? 'info' : 'alert' });
         }
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));
@@ -246,13 +293,14 @@ export const useStore = create<StoreState>((set, get) => ({
       if (newBases.length > 0) {
         const shown = newBases.slice(0, 8).join('، ');
         get().pushToast(
-          `أُضيفت ${newBases.length} عملة جديدة إلى القائمة: ${shown}${newBases.length > 8 ? '…' : ''}`
+          `أُضيفت ${newBases.length} عملة جديدة إلى القائمة: ${shown}${newBases.length > 8 ? '…' : ''}`,
+          'info', undefined, { category: 'system' }
         );
       } else if (!opts?.silent) {
-        get().pushToast('القائمة محدثة بالفعل — لا عملات جديدة');
+        get().pushToast('القائمة محدثة بالفعل — لا عملات جديدة', 'info', undefined, { category: 'system' });
       }
     } catch (e) {
-      if (!opts?.silent) get().pushToast(`تعذر تحديث القائمة: ${String(e)}`, 'alert');
+      if (!opts?.silent) get().pushToast(`تعذر تحديث القائمة: ${String(e)}`, 'alert', undefined, { category: 'system', severity: 'error' });
     }
   },
 
@@ -267,9 +315,9 @@ export const useStore = create<StoreState>((set, get) => ({
         fetch(`${API}/symbols/meta`).then(x => x.ok ? x.json() : { last_updated: Date.now() })
       ]);
       set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? Date.now() });
-      get().pushToast(`تم تحديث القائمة: ${r.saved}/${r.total} زوج`);
+      get().pushToast(`تم تحديث القائمة: ${r.saved}/${r.total} زوج`, 'info', undefined, { category: 'system' });
     } catch (e) {
-      get().pushToast(`فشل تحديث القائمة من بينانس: ${String(e)}`, 'alert');
+      get().pushToast(`فشل تحديث القائمة من بينانس: ${String(e)}`, 'alert', undefined, { category: 'system', severity: 'error' });
     } finally {
       set({ syncing: false });
     }
@@ -394,12 +442,55 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ theme });
   },
 
-  pushToast: (text, kind = 'info', action) => {
+  /** تسجيل إشعار في مركز الإشعارات — المكان الوحيد الذي يظهر فيه (بلا نوافذ منبثقة) */
+  pushToast: (text, kind = 'info', action, meta) => {
     const id = ++toastId;
-    set((st) => ({ toasts: [...st.toasts, { id, text, kind, action }] }));
-    setTimeout(() => get().dismissToast(id), 12000);
+    if (toastId > 1_000_000) toastId = 1; // تجنب تضخم المعرّف عبر الجلسات الطويلة
+    const notification: AppNotification = {
+      id,
+      ts: Date.now(),
+      category: meta?.category ?? 'actions',
+      severity: meta?.severity ?? (kind === 'alert' ? 'alert' : 'info'),
+      symbol: meta?.symbol?.toUpperCase() ?? null,
+      text,
+      action,
+      read: false
+    };
+    set((st) => {
+      const notifications = [notification, ...st.notifications].slice(0, NOTIF_CAP);
+      saveStoredNotifications(notifications);
+      return {
+        notifications,
+        unreadNotifications: notifications.filter(n => !n.read).length
+      };
+    });
   },
-  dismissToast: (id) => set((st) => ({ toasts: st.toasts.filter(t => t.id !== id) })),
+  /** حذف إشعار واحد من جدول المركز */
+  deleteNotification: (id) => set((st) => {
+    const notifications = st.notifications.filter(n => n.id !== id);
+    saveStoredNotifications(notifications);
+    return { notifications, unreadNotifications: notifications.filter(n => !n.read).length };
+  }),
+
+  markAllNotificationsRead: () => set((st) => {
+    if (st.unreadNotifications === 0) return st;
+    const notifications = st.notifications.map(n => (n.read ? n : { ...n, read: true }));
+    saveStoredNotifications(notifications);
+    return { notifications, unreadNotifications: 0 };
+  }),
+
+  clearNotifications: () => {
+    saveStoredNotifications([]);
+    set({ notifications: [], unreadNotifications: 0 });
+  },
+
+  markNotificationRead: (id) => set((st) => {
+    const target = st.notifications.find(n => n.id === id);
+    if (!target || target.read) return st;
+    const notifications = st.notifications.map(n => (n.id === id ? { ...n, read: true } : n));
+    saveStoredNotifications(notifications);
+    return { notifications, unreadNotifications: notifications.filter(n => !n.read).length };
+  }),
 
   subscribePrice: (symbol) => {
     const s = get().streams;

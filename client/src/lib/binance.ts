@@ -282,7 +282,7 @@ export interface KlineMsg {
    ============================================================ */
 
 export interface SymbolsUpdateMsg {
-  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | string;
+  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | 'live_opportunity_new' | 'live_sweep_detected' | 'live_opportunity_closed' | string;
   total?: number;
   changed?: number;
   new_bases?: string[];
@@ -290,6 +290,9 @@ export interface SymbolsUpdateMsg {
   symbol?: string;
   zone?: import('./types').LiquidityZone;
   price?: number;
+  timeframe?: string;
+  at?: number;
+  opportunity?: { id: string; symbol: string; timeframe: string; entry: number; stop: number; tp: number; rr: number; composite: number; outcome?: string };
 }
 
 /** اتصال WebSocket بنفس أصل الخادم (مسار /ws) مع إعادة اتصال تلقائي */
