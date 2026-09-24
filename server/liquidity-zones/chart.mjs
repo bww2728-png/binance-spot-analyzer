@@ -27,7 +27,10 @@ export const renderZoneChart = (zone, candles, markerIndex) => {
   const stop = num(zone.retailStop);
   const fib = zone.premium?.fib || null;
   const fibVals = fib ? [fib.low, fib.high].filter(Number.isFinite) : [];
-  const lvlVals = [ref, liq, stop, ...fibVals].filter(Number.isFinite);
+  const extra = (Array.isArray(zone.extraLevels) ? zone.extraLevels : [])
+    .map(l => ({ price: num(l?.price), label: String(l?.label ?? ''), color: String(l?.color ?? '#0ea5e9'), dash: String(l?.dash ?? 'stroke-dasharray="6 4"') }))
+    .filter(l => Number.isFinite(l.price));
+  const lvlVals = [ref, liq, stop, ...fibVals, ...extra.map(l => l.price)].filter(Number.isFinite);
   const lows = list.map(c => Math.min(c.low, ...lvlVals));
   const highs = list.map(c => Math.max(c.high, ...lvlVals));
   const pMin = Math.min(...lows);
@@ -123,6 +126,7 @@ export const renderZoneChart = (zone, candles, markerIndex) => {
     ${hLine(ref, '#64748b', 3, 'stroke-dasharray="8 8"', 'المرجع')}
     ${hLine(liq, color, 4, 'stroke-dasharray="3 7"', 'السيولة')}
     ${hLine(stop, '#d97706', 3, 'stroke-dasharray="2 5"', 'وقف Retail')}
+    ${extra.map(l => hLine(l.price, l.color, 3, l.dash, l.label)).join('')}
     ${markerLine}${liqMarker}${trend}
     <text x="${left}" y="28" font-family="Arial" font-size="20" font-weight="700" fill="#0f172a">${escapeSvg(title)}</text>
     <text x="${left}" y="48" font-family="Arial" font-size="13" fill="#475569">${escapeSvg(detLine)}</text>

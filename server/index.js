@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
 import { researchSymbol } from './research.mjs';
-import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES } from './liquidity/engine.mjs';
+import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES, bookSignals } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
 import { runPairBacktest, learnOnTrades, loadKlinesPaginated } from './backtest/engine.mjs';
 import { discoverLiveOpportunities } from './backtest/live.mjs';
@@ -22,6 +22,7 @@ import {
   adaptiveConfig
 } from './liquidity-zones/engine.mjs';
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
+import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1217,6 +1218,126 @@ app.get('/api/live/opportunities', handle(async (_req, res) => {
     updatedAt: liveState.updatedAt,
     error: liveState.error
   });
+}));
+
+// ═══ محرك «الفرص الحية» — دخول شراء عبر سويب مناطق SSL + أدوات الأوردر فلو ═══
+// مصدر المناطق: مخزون محرك مناطق السيولة الحي (بلا إعادة كشف). التتبع مستمر بلا انقطاع،
+// والترتيب من الفريم الأدق (1m) صعوداً — عرض أولاً بأول. البوابة الأخيرة: شريحة معايرة ≥ 60%.
+
+const readLiveCalibration = async () => {
+  try {
+    const rows = await db.events.list({ type: 'live_calibration', limit: 1 });
+    const row = rows?.[0];
+    if (!row) return null;
+    const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
+    return { at: Number(row.ts) || null, trades: meta?.trades ?? 0, segments: meta?.segments ?? [] };
+  } catch {
+    return null;
+  }
+};
+
+const liveOppEngine = createLiveOpportunityEngine({
+  // نداء واحد لكل أسعار السوق ثم فلترة محلية: طلب الأزواج دفعةً واحدة يفشل بسبب
+  // رموز غير مدعومة على المضيف المتاح (HTTP 400)، بينما النداء الشامل ينجح دائماً.
+  fetchPrices: async (symbols) => {
+    const all = await db.binance.allTickerPrices().catch(() => null);
+    if (all && Object.keys(all).length) {
+      const out = {};
+      for (const s of symbols) if (Number.isFinite(all[s])) out[s] = all[s];
+      return out;
+    }
+    return db.binance.tickerPrices(symbols).catch(() => ({}));
+  },
+  fetchRawKlines: (symbol, timeframe, limit) => db.binance.klines(symbol, timeframe, limit),
+  fetchBookSignals: (symbol) => bookSignals(symbol),
+  zoneSource: () => liquidityState.liveResults,
+  resolveTargets: () => resolveTargets(),
+  readCalibration: readLiveCalibration,
+  broadcast: (msg) => broadcast(msg),
+  persist: (row) => saveLiquidityEvent(
+    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : 'live_opportunity',
+    { symbol: row?.symbol || 'GLOBAL' },
+    row?.type === 'live_calibration'
+      ? `معايرة الفرص الحية: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
+      : row?.closed
+        ? `نتيجة فرصة ${row.symbol} ${row.timeframe}: ${row.outcome === 'target' ? 'وصل الهدف' : 'ضرب الوقف'}`
+        : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
+    { opportunity: row }
+  ),
+  log: console
+});
+setTimeout(() => liveOppEngine.start(), 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
+
+app.get('/api/live-opportunities', handle(async (req, res) => {
+  const scope = String(req.query.scope || '').trim();
+  const tf = String(req.query.timeframe || '').trim();
+  const feed = liveOppEngine.getFeed();
+  const filter = (list) => list.filter(o => (!tf || o.timeframe === tf));
+  res.json({
+    ...feed,
+    scope: scope || feed.scope,
+    opportunities: filter(feed.opportunities),
+    total: filter(feed.opportunities).length,
+    watching: filter(feed.watching),
+    watchingTotal: filter(feed.watching).length
+  });
+}));
+
+app.get('/api/live-opportunities/status', handle(async (_req, res) => {
+  res.json(liveOppEngine.getStatus());
+}));
+
+app.get('/api/live-opportunities/calibration', handle(async (_req, res) => {
+  res.json(liveOppEngine.getCalibration());
+}));
+
+app.get('/api/live-opportunities/history', handle(async (_req, res) => {
+  res.json(liveOppEngine.getHistory());
+}));
+
+app.post('/api/live-opportunities/run', handle(async (_req, res) => {
+  res.json({ ok: true, started: true });
+  void liveOppEngine.runCycle().catch(() => undefined);
+}));
+
+app.post('/api/live-opportunities/calibrate', handle(async (req, res) => {
+  const symbols = Array.isArray(req.body?.symbols) && req.body.symbols.length
+    ? req.body.symbols.map(s => String(s).toUpperCase().trim()).filter(s => /^[A-Z0-9]{4,20}$/.test(s))
+    : null;
+  const timeframes = Array.isArray(req.body?.timeframes) && req.body.timeframes.length
+    ? req.body.timeframes.map(t => String(t).toLowerCase().trim()).filter(t => ALL_TIMEFRAMES.includes(t))
+    : null;
+  res.json({ ok: true, started: true, symbols: symbols?.length ?? null, timeframes: timeframes?.length ?? null });
+  void liveOppEngine.runCalibration({ symbols, timeframes }).catch(() => undefined);
+}));
+
+// شارت بصري لفرصة: الشموع الحقيقية + خط الدخول/الوقف/الهدف + نقطة السويب
+app.get('/api/live-opportunities/:id/screenshot', handle(async (req, res) => {
+  const op = liveOppEngine.findOpportunity(String(req.params.id));
+  if (!op) return res.status(404).json({ error: 'فرصة غير موجودة' });
+  const raw = await db.binance.klines(op.symbol, op.timeframe, 160);
+  const candles = normalizeCandles(raw);
+  const zoneLike = {
+    symbol: op.symbol,
+    timeframe: op.timeframe,
+    kind: op.kind,
+    state: `فرصة حية · درجة ${op.composite} · R:R ${op.rr}`,
+    referenceLevel: op.referenceLevel,
+    liquidityLevel: op.liquidityLevel,
+    detectedAt: op.detectedAt,
+    extraLevels: [
+      { price: op.entry, label: 'الدخول', color: '#0ea5e9' },
+      { price: op.stop, label: 'الوقف', color: '#dc2626' },
+      { price: op.tp, label: 'الهدف', color: '#16a34a' },
+      { price: op.sweepLow, label: 'قاع السويب', color: '#7c3aed', dash: 'stroke-dasharray="2 6"' }
+    ],
+    reasons: [
+      `دخول ${op.entry} · وقف ${op.stop} · هدف ${op.tp} · R:R ${op.rr}`,
+      `تدفق ${op.flowScore} (${op.flowTier}) · ثقة الشريحة ${(op.calibratedWinRate * 100).toFixed(1)}% من ${op.segmentTrades} صفقة`,
+      ...(op.flowReasons || []).slice(0, 2)
+    ]
+  };
+  res.type('image/svg+xml').send(renderZoneChart(zoneLike, candles, candles.length - 1));
 }));
 
 // جدولة الكشف الآلي: كل عملات لوحة التحليل × كل الفريمات

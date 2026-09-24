@@ -89,6 +89,13 @@ const db = {
       for (const r of rows) out[r.symbol] = Number(r.price);
       return out;
     },
+    /** كل أسعار السوق في نداء واحد — يتفادى فشل الطلب الكبير بسبب رمز واحد غير مدعوم */
+    allTickerPrices: async () => {
+      const rows = await fetchBinanceJson('/api/v3/ticker/price', 15000);
+      const out = {};
+      for (const r of rows) out[r.symbol] = Number(r.price);
+      return out;
+    },
   },
   zones: {
     /** أحدث حالة لكل منطقة يدوية (id) — منطقة محفوظة كحدث نوع liquidity_zone في events_log */

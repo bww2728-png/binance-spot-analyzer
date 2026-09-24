@@ -12,7 +12,7 @@ const API = '/api';
 
 const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
-export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity';
+export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity' | 'liveOpportunities';
 export type Theme = 'dark' | 'light';
 export type ArchiveSection = 'cases' | 'zones' | 'events';
 
@@ -118,7 +118,7 @@ export const useStore = create<StoreState>((set, get) => ({
     // افتتاح مباشر على التبويب من الرابط (#/history مثلاً) — الافتراضي اللوحة
     const h = location.hash.replace('#/', '');
     if (h === 'history') return 'autoHistory';
-    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity'] as const).includes(h as Screen)
+    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities'] as const).includes(h as Screen)
       ? h as Screen
       : 'board';
   })(),

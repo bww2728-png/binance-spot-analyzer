@@ -461,3 +461,120 @@ export interface BacktestStatus {
   customBusy?: boolean;
   error: string | null;
 }
+
+// ═══ واجهة «الفرص الحية» — دخول شراء عبر سويب مناطق SSL + أدوات الأوردر فلو ═══
+
+export interface BuyOpportunity {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  kind: string;
+  zoneId: string;
+  referenceLevel: number;
+  liquidityLevel: number;
+  sweepLow: number;
+  sweepAt: number | null;
+  detectedAt: number;
+  price: number;
+  entry: number;
+  stop: number;
+  tp: number;
+  rr: number;
+  stopAtr: number;
+  targetLabel: string | null;
+  targets: number[];
+  composite: number;
+  flowScore: number;
+  flowTier: "high" | "mid" | "low";
+  flowReasons: string[];
+  zoneConfidence: number;
+  zoneTouches: number;
+  session: "prime" | "normal" | "lull";
+  location: "balance" | "imbalance_up" | "imbalance_down";
+  profile: { poc: number; vah: number; val: number } | null;
+  segmentKey: string;
+  calibratedWinRate: number;
+  segmentTrades: number;
+  distancePct: number;
+  reasons: string[];
+  outcome: "target" | "stop" | null;
+  outcomeAt: number | null;
+  outcomePrice: number | null;
+  rotation: number;
+}
+
+export interface BuyWatchRow {
+  symbol: string;
+  timeframe: string;
+  zoneId: string;
+  kind: string;
+  phase: "idle" | "armed" | "approaching" | "swept" | "reclaimed" | "published" | "invalidated";
+  referenceLevel: number;
+  liquidityLevel: number;
+  toLiquidityAtr: number;
+  attempts: number;
+  staleSweep: boolean;
+  reason: string | null;
+}
+
+export interface BuyRejectedRow {
+  symbol: string;
+  timeframe: string;
+  zoneId: string;
+  at: number;
+  composite?: number;
+  flowScore?: number;
+  rr?: number;
+  reason: string;
+}
+
+export interface BuyCalibrationSegment {
+  key: string;
+  trades: number;
+  wins: number;
+  winRate: number | null;
+  smoothedWinRate: number;
+  avgRR: number | null;
+}
+
+export interface BuyFeed {
+  busy: boolean;
+  cycle: number;
+  scope: string;
+  pairsTotal: number;
+  zonesTracked: number;
+  phases: Record<string, number>;
+  deepScans: number;
+  updatedAt: number | null;
+  error: string | null;
+  opportunities: BuyOpportunity[];
+  total: number;
+  watching: BuyWatchRow[];
+  watchingTotal: number;
+  rejected: BuyRejectedRow[];
+  stats: { published: number; resolved: number; wins: number; losses: number; liveWinRate: number | null };
+  calibration: {
+    at: number | null;
+    busy: boolean;
+    trades: number;
+    samplePairs: number;
+    progress: { done: number; total: number } | null;
+    segments: BuyCalibrationSegment[];
+    error: string | null;
+    targetWinRate: number;
+  };
+}
+
+export interface BuyStatus {
+  busy: boolean;
+  cycle: number;
+  scope: string;
+  pairsTotal: number;
+  zonesTracked: number;
+  phases: Record<string, number>;
+  deepScans: number;
+  bookCalls: number;
+  updatedAt: number | null;
+  error: string | null;
+  calibration: { at: number | null; busy: boolean; trades: number; progress: { done: number; total: number } | null; segments: number; error: string | null };
+}

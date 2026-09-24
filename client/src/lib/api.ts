@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -454,6 +454,27 @@ const restApi = {
     fetch(`${BASE}/liquidity-zones/run-custom`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) }).then(j<{ ok: boolean; symbol: string; timeframe: string; fromTs: number; toTs: number; results: LiquidityDetection[]; candles: Array<[number, number, number, number, number]> }>)
 };
 
+// ==================== الفرص الحية (سويب SSL + أوردر فلو) — مشتركة بين الواجهتين ====================
+const liveOpportunitiesApi = {
+  getBuyFeed: (opts: { timeframe?: string } = {}, signal?: AbortSignal) => {
+    const q = new URLSearchParams();
+    if (opts.timeframe) q.set('timeframe', opts.timeframe);
+    const qs = q.toString();
+    return fetch(`${BASE}/live-opportunities${qs ? `?${qs}` : ''}`, { signal }).then(j<BuyFeed>);
+  },
+  getBuyStatus: (signal?: AbortSignal) =>
+    fetch(`${BASE}/live-opportunities/status`, { signal }).then(j<BuyStatus>),
+  getBuyCalibration: (signal?: AbortSignal) =>
+    fetch(`${BASE}/live-opportunities/calibration`, { signal }).then(j<BuyFeed['calibration']>),
+  getBuyHistory: (signal?: AbortSignal) =>
+    fetch(`${BASE}/live-opportunities/history`, { signal }).then(j<{ opportunities: BuyOpportunity[]; total: number }>),
+  runBuyScan: () =>
+    fetch(`${BASE}/live-opportunities/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
+  runBuyCalibration: (body?: { symbols?: string[]; timeframes?: string[] }) =>
+    fetch(`${BASE}/live-opportunities/calibrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(j<{ ok: boolean; started: boolean; symbols: number | null; timeframes: number | null }>),
+  buyOpportunityChartUrl: (id: string) => `${BASE}/live-opportunities/${encodeURIComponent(id)}/screenshot`
+};
+
 export interface MarketReadZone { id: string; kind: string; level: number; confidence: number; touches: number; state: string; }
 export interface MarketReadPerTf {
   symbol: string; timeframe: string; lastPrice: number;
@@ -467,4 +488,4 @@ export interface MarketReadResponse {
   ok: boolean; symbol: string; bias: string; net: number; summary: string; reads: MarketReadPerTf[];
 }
 
-export const api = useSupabase ? sbApi : restApi;
+export const api = { ...(useSupabase ? sbApi : restApi), ...liveOpportunitiesApi };
