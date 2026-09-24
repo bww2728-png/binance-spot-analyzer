@@ -321,16 +321,33 @@ export function createLiveOpportunityEngine(deps) {
     while (history.length > cfg.historyLimit) history.pop();
   }
 
+  /** سباق مع مهلة: يحمي الدورة من أي نداء معلّق (شبكة/قاعدة بيانات) */
+  const withTimeout = (promise, ms, fallback) => Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms))
+  ]);
+
   /** دورة واحدة كاملة */
+  let lastTargets = null;
   async function runCycle() {
     if (status.busy) return { skipped: true, reason: 'دورة قيد التنفيذ' };
     status.busy = true;
     const started = now();
     try {
-      const targets = await resolveTargets();
+      // حماية من التعليق: الأهداف من الذاكرة عند بطء الاستعلام، والأسعار تُهمل إن تأخرت
+      const targets = await withTimeout(
+        resolveTargets().catch(() => null),
+        30_000,
+        null
+      ) ?? lastTargets ?? [];
+      if (targets.length) lastTargets = targets;
       status.pairsTotal = targets.length;
       status.cycle += 1;
-      const prices = await fetchPrices(targets);
+      const prices = await withTimeout(
+        Promise.resolve(fetchPrices(targets)).catch(() => ({})),
+        45_000,
+        {}
+      );
 
       const allowed = new Set(targets);
       const bySymbol = new Map();
