@@ -12,6 +12,9 @@
 import {
   analyzeCandles, isBullishPair
 } from './structure.mjs';
+import {
+  computeDirectionState, updateWithPrice, classifyChange
+} from './directions.mjs';
 
 const DEFAULT_CONFIG = {
   cycleMs: 20_000,             // دورة فحص احتياطية (المعالجة الأساسية حدث-مدفوعة بإغلاق الشموع)
@@ -95,6 +98,7 @@ export function createStrategyEngine(deps) {
     persist = async () => {},    // كتابة الأحداث الدائمة
     readCalibration = async () => null,
     readPublishedEvents = async () => [],
+    readDirectionEvents = null,
     now = () => Date.now(),
     log = console,
     config = {}
@@ -127,7 +131,13 @@ export function createStrategyEngine(deps) {
   };
   const calibration = { at: null, busy: false, trades: 0, progress: null, segments: [], error: null };
 
-  let cycleTimer = null, tickTimer = null, calibTimer = null, unsubClose = null;
+  /* ---- سجل الاتجاهات الحي (كل العملات — تتبع مستمر بلا انقطاع) ---- */
+  const directions = new Map();      // symbol → { state, since, lastChangeAt, changeCount, transitions[] }
+  const directionQueue = new Set();  // رموز شمعتها الدقيقة أُغلقت — بانتظار إعادة الحساب
+  const dirLastProcessed = new Map();// symbol → openTime آخر شمعة دقيقة حُسِبت
+  let dirBusy = false;
+
+  let cycleTimer = null, tickTimer = null, calibTimer = null, dirPriceTimer = null, unsubClose = null;
   let running = false;
   let lastPrices = {};
   let lastFastAt = 0;
@@ -293,6 +303,148 @@ export function createStrategyEngine(deps) {
     }
   }
 
+  /* ---- سجل الاتجاهات: إعادة حساب عملة واحدة عند إغلاق شمعة دقيقتها ---- */
+  async function recomputeDirection(symbol, force = false) {
+    try {
+      const c1 = await getCandles(symbol, '1m', 720);
+      if (!c1 || c1.length < 120) return;
+      const lastOpen = Number(c1[c1.length - 1].timeMs);
+      if (!force && dirLastProcessed.get(symbol) === lastOpen) return;
+      dirLastProcessed.set(symbol, lastOpen);
+
+      // شموع 5m للتوافق 40m (مخزن حي — بلا طلبات)
+      let c5 = null;
+      const raw5 = market?.getKlines?.(symbol, '5m');
+      if (raw5 && raw5.length >= 60) {
+        c5 = raw5.map(k => ({
+          time: Math.floor(Number(k[0]) / 1000), timeMs: Number(k[0]),
+          open: Number(k[1]), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]), volume: Number(k[5])
+        }));
+      }
+      const price = Number(market?.getPrice?.(symbol)) || Number(c1[c1.length - 1].close);
+      const next = computeDirectionState(c1, { price, candles5m: c5 });
+      clearFailure(`${symbol}|1m|dir`);
+
+      const prevEntry = directions.get(symbol);
+      const prev = prevEntry?.state ?? null;
+      const change = classifyChange(prev, next);
+      const entry = {
+        state: next,
+        since: change && change.kind !== 'init' ? now() : (prevEntry?.since ?? now()),
+        lastChangeAt: change ? now() : (prevEntry?.lastChangeAt ?? null),
+        changeCount: (prevEntry?.changeCount ?? 0) + (change && change.kind !== 'init' ? 1 : 0),
+        transitions: prevEntry?.transitions ?? []
+      };
+      if (change && change.kind !== 'init') {
+        entry.transitions.unshift({ at: now(), kind: change.kind, label: change.label, dir: next.dir, stage: next.stage });
+        if (entry.transitions.length > 12) entry.transitions.pop();
+        void persist({
+          directionEvent: true, symbol, dir: next.dir, prevDir: prev?.dir ?? null,
+          stage: next.stage, label: change.label, kind: change.kind, notify: Boolean(change.notify), at: now()
+        }).catch(() => undefined);
+        if (change.notify) {
+          // إشعار مركزي مصنف (شاشة الإشعارات فقط — بلا نوافذ منبثقة)
+          broadcast({
+            type: 'central_notification', notification: {
+              category: 'strategy2', severity: 'alert', symbol,
+              title: `انقلاب اتجاه ${symbol} — صاعد مؤكد`,
+              body: `${change.label} · المرحلة: ${next.stage}`
+            }
+          });
+        }
+        broadcast({
+          type: 'strategy2_directions',
+          changed: [{ symbol, dir: next.dir, stage: next.stage, dead: next.dead, agreement: next.agreement }]
+        });
+      }
+      directions.set(symbol, entry);
+    } catch (e) {
+      bumpFailure(`${symbol}|1m|dir`, e.message);
+    }
+  }
+
+  /** استهلاك طابور إغلاقات الدقيقة بمزامنة محدودة */
+  async function drainDirectionQueue() {
+    if (dirBusy || !directionQueue.size) return;
+    dirBusy = true;
+    try {
+      const batch = [...directionQueue].slice(0, 24);
+      for (const s of batch) directionQueue.delete(s);
+      await Promise.all(batch.map(s => recomputeDirection(s)));
+    } finally {
+      dirBusy = false;
+      if (directionQueue.size) setImmediate(() => void drainDirectionQueue());
+    }
+  }
+
+  /** تحديث خفيف بالأسعار الحية (الموت/المسافة) — بين إغلاقات الشموع */
+  function refreshDirectionPrices() {
+    if (!directions.size) return;
+    for (const [symbol, entry] of directions) {
+      const px = Number(market?.getPrice?.(symbol));
+      if (!Number.isFinite(px)) continue;
+      const updated = updateWithPrice(entry.state, px);
+      if (updated !== entry.state) {
+        entry.state = updated;
+        if (updated.dead && !entry.deadNotified) {
+          entry.deadNotified = true;
+          broadcast({
+            type: 'strategy2_directions',
+            changed: [{ symbol, dir: updated.dir, stage: updated.stage, dead: true, agreement: updated.agreement }]
+          });
+        }
+      }
+    }
+  }
+
+  function queryDirections({ symbol = '', dir = '', stage = '', dead = '', agreement = '', sort = 'symbol', limit = 500, offset = 0 } = {}) {
+    const sym = String(symbol).trim().toUpperCase();
+    let rows = [];
+    for (const [s, entry] of directions) {
+      const st = entry.state;
+      rows.push({
+        symbol: s,
+        dir: st.dir, dir1m: st.dir1m, dir40m: st.dir40m, agreement: st.agreement,
+        stage: st.stage, stageDetail: st.stageDetail,
+        anchorHigh: st.anchorHigh, anchorLow: st.anchorLow,
+        afterPremium: st.afterPremium,
+        externalNext: st.externalNext, distToExternalPct: st.distToExternalPct,
+        deathLevel: st.deathLevel, dead: st.dead,
+        discountLevel: st.discountLevel, legLow: st.legLow, legHigh: st.legHigh,
+        price: st.price, since: entry.since, lastChangeAt: entry.lastChangeAt,
+        changeCount: entry.changeCount, transitions: entry.transitions
+      });
+    }
+    if (sym) rows = rows.filter(r => r.symbol.includes(sym));
+    if (dir) rows = rows.filter(r => r.dir === dir);
+    if (agreement) rows = rows.filter(r => r.agreement === agreement);
+    if (dead === '1' || dead === 'true') rows = rows.filter(r => r.dead);
+    else if (dead === '0' || dead === 'false') rows = rows.filter(r => !r.dead);
+    if (stage) rows = rows.filter(r => r.stage.includes(stage));
+    if (sort === 'changes') rows.sort((a, b) => b.changeCount - a.changeCount);
+    else if (sort === 'recent') rows.sort((a, b) => (b.lastChangeAt ?? 0) - (a.lastChangeAt ?? 0));
+    else if (sort === 'distance') rows.sort((a, b) => Math.abs(a.distToExternalPct ?? 1e9) - Math.abs(b.distToExternalPct ?? 1e9));
+    else rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    const total = rows.length;
+    const off = Math.max(0, Number(offset) || 0);
+    return { rows: rows.slice(off, off + Math.min(Number(limit) || 500, 1000)), total };
+  }
+
+  function getDirectionsSummary() {
+    const counts = { up: 0, down: 0, range: 0, confirmed: 0, conflicted: 0, dead: 0 };
+    for (const [, entry] of directions) {
+      const st = entry.state;
+      counts[st.dir] = (counts[st.dir] ?? 0) + 1;
+      if (st.agreement === 'confirmed') counts.confirmed += 1;
+      if (st.agreement === 'conflicted') counts.conflicted += 1;
+      if (st.dead) counts.dead += 1;
+    }
+    const stages = {};
+    for (const [, entry] of directions) stages[entry.state.stage] = (stages[entry.state.stage] ?? 0) + 1;
+    return { total: directions.size, ...counts, stages };
+  }
+
+
   /* ---- دورة: فحص إغلاق الشموع عبر المخزن الحي + احتياطي REST ---- */
   async function runCycle() {
     if (status.busy) return { skipped: true };
@@ -307,6 +459,7 @@ export function createStrategyEngine(deps) {
       if (market) {
         const kKeys = [];
         for (const s of symbols) for (const tf of cfg.entryTfs) kKeys.push(`${s}|${tf}`);
+        for (const s of symbols) kKeys.push(`${s}|1m`); // سجل الاتجاهات — شموع الدقيقة لكل العملات
         market.setKlineSubscriptions(kKeys, 'strategy2');
       }
 
@@ -360,6 +513,8 @@ export function createStrategyEngine(deps) {
         op.outcome = 'target2';
       } else if (px >= op.tp1) {
         op.outcome = 'target';
+      } else if (directions.get(op.symbol)?.state?.dead) {
+        op.outcome = 'legDead'; // استراتيجيتك: بلوغ العرض الخارجي = انتهى المشوار — حسم تلقائي
       } else if (ageBars > cfg.maxHoldBars) {
         op.outcome = 'expired';
       }
@@ -503,6 +658,44 @@ export function createStrategyEngine(deps) {
   }
 
   /* ---- الاستمرارية: استعادة + تسوية فجوة ---- */
+
+  /** استرجاع حالات الاتجاه من الأحداث الدائمة عند الإقلاع (آخر حالة لكل رمز) */
+  async function restoreDirections() {
+    try {
+      if (typeof readDirectionEvents !== 'function') return;
+      const rows = await readDirectionEvents();
+      if (!Array.isArray(rows) || !rows.length) return;
+      const latest = new Map(); // symbol → آخر حدث (الأحدث أولاً)
+      for (const r of rows) {
+        if (!r.symbol || latest.has(r.symbol)) continue;
+        latest.set(r.symbol, r);
+      }
+      for (const [symbol, r] of latest) {
+        if (directions.has(symbol)) continue;
+        const state = {
+          dir: r.dir ?? 'range', dir1m: r.dir1m ?? r.dir ?? 'range', dir40m: r.dir40m ?? null,
+          agreement: r.agreement ?? 'single',
+          stage: r.stage ?? 'بانتظار إعادة الحساب', stageDetail: {},
+          anchorHigh: r.anchorHigh ?? null, anchorLow: r.anchorLow ?? null,
+          afterPremium: r.afterPremium ?? null,
+          externalNext: null, distToExternalPct: null,
+          deathLevel: r.deathLevel ?? null, dead: Boolean(r.dead),
+          discountLevel: null, legLow: null, legHigh: null,
+          price: r.price ?? null, atr1m: null
+        };
+        directions.set(symbol, {
+          state, since: r.at ?? now(), lastChangeAt: r.at ?? null,
+          changeCount: 1, transitions: [{ at: r.at ?? now(), kind: 'restored', label: 'استرجاع من السجل الدائم', dir: state.dir, stage: state.stage }],
+          restoredPlaceholder: true
+        });
+        directionQueue.add(symbol); // إعادة حساب فورية بالبيانات الحية عند التوفر
+      }
+      log.log?.(`[strategy2] restored ${latest.size} direction states from events`);
+    } catch (e) {
+      log.warn?.(`[strategy2] direction restore failed: ${e.message}`);
+    }
+  }
+
   async function restoreFromEvents() {
     try {
       const events = await readPublishedEvents();
@@ -659,6 +852,12 @@ export function createStrategyEngine(deps) {
 
   /* ---- إغلاق شمعة → معالجة فورية ---- */
   function onCandleClosed(symbol, tf) {
+    // شموع الدقيقة → طابور إعادة حساب الاتجاه (التتبع المستمر بلا انقطاع)
+    if (tf === '1m') {
+      if (directions.has(symbol) || directionQueue.size < 1200) directionQueue.add(symbol);
+      void drainDirectionQueue();
+      return;
+    }
     if (!cfg.entryTfs.includes(tf)) return;
     const t = now();
     if (t - lastFastAt < 800) return;
@@ -673,10 +872,14 @@ export function createStrategyEngine(deps) {
     void (async () => {
       await loadCalibration();
       await restoreFromEvents();
+      await restoreDirections();
       await reconcileGap();
     })();
     cycleTimer = setInterval(() => { void runCycle(); }, cfg.cycleMs);
     tickTimer = setInterval(tickFeed, cfg.tickMs);
+    // تحديث خفيف بالأسعار الحية لكل الاتجاهات (الموت/المسافة) كل 5 ثوانٍ
+    dirPriceTimer = setInterval(refreshDirectionPrices, 5_000);
+    if (dirPriceTimer.unref) dirPriceTimer.unref();
     calibTimer = setInterval(() => { void runCalibration(); }, cfg.calibrationMs);
     if (cycleTimer.unref) cycleTimer.unref();
     if (tickTimer.unref) tickTimer.unref();
@@ -689,13 +892,15 @@ export function createStrategyEngine(deps) {
     if (cycleTimer) clearInterval(cycleTimer);
     if (tickTimer) clearInterval(tickTimer);
     if (calibTimer) clearInterval(calibTimer);
+    if (dirPriceTimer) clearInterval(dirPriceTimer);
     if (unsubClose) { unsubClose(); unsubClose = null; }
-    cycleTimer = tickTimer = calibTimer = null;
+    cycleTimer = tickTimer = calibTimer = dirPriceTimer = null;
   }
 
   return {
     start, stop, runCycle, runCalibration, restoreFromEvents, reconcileGap,
     getFeed, getStatus, getHistory, getCalibration, queryFeed,
-    _internals: { opportunities, segments, liveStats, rejected, failures, status, calibration, cfg, lastProcessed }
+    queryDirections, getDirectionsSummary,
+    _internals: { opportunities, segments, liveStats, rejected, failures, status, calibration, cfg, lastProcessed, directions }
   };
 }

@@ -1255,17 +1255,40 @@ const strategy2Engine = createStrategyEngine({
   market: marketStreams,
   readCalibration: readStrategy2Calibration,
   readPublishedEvents: readStrategy2PublishedEvents,
+  readDirectionEvents: async () => {
+    try {
+      const rows = await db.events.strategy2DirectionEvents(0, 2000);
+      return rows.map(r => {
+        let meta = {};
+        try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
+        const o = meta.opportunity ?? {};
+        return { ...o, symbol: o.symbol || r.symbol, at: o.at ?? r.ts };
+      }).filter(e => e.symbol);
+    } catch {
+      return [];
+    }
+  },
   broadcast: (msg) => broadcast(msg),
-  persist: (row) => saveLiquidityEvent(
-    row?.closed ? 'strategy2_resolved' : row?.type === 'strategy2_calibration' ? 'strategy2_calibration' : 'strategy2_published',
-    { symbol: row?.symbol || 'GLOBAL' },
-    row?.type === 'strategy2_calibration'
-      ? `معايرة استراتيجيتي: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
-      : row?.closed
-        ? `نتيجة فرصة ${row.symbol} ${row.tf}: ${row.outcome === 'target' ? 'وصل الهدف' : row.outcome === 'target2' ? 'وصل الهدف الثاني' : row.outcome === 'invalidated' ? 'فشل نقطة الدخول' : 'ضرب الوقف'}`
-        : `فرصة استراتيجيتي ${row.symbol} ${row.tf} — نموذج ${row.model} / R:R ${row.rr}`,
-    { opportunity: row }
-  ),
+  persist: (row) => {
+    if (row?.directionEvent) {
+      return saveLiquidityEvent(
+        'strategy2_direction',
+        { symbol: row.symbol },
+        `${row.symbol}: ${row.label} — المرحلة: ${row.stage}`,
+        { opportunity: row }
+      );
+    }
+    return saveLiquidityEvent(
+      row?.closed ? 'strategy2_resolved' : row?.type === 'strategy2_calibration' ? 'strategy2_calibration' : 'strategy2_published',
+      { symbol: row?.symbol || 'GLOBAL' },
+      row?.type === 'strategy2_calibration'
+        ? `معايرة استراتيجيتي: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
+        : row?.closed
+          ? `نتيجة فرصة ${row.symbol} ${row.tf}: ${row.outcome === 'target' ? 'وصل الهدف' : row.outcome === 'target2' ? 'وصل الهدف الثاني' : row.outcome === 'invalidated' ? 'فشل نقطة الدخول' : row.outcome === 'legDead' ? 'موت المشوار — بلوغ العرض الخارجي' : 'ضرب الوقف'}`
+          : `فرصة استراتيجيتي ${row.symbol} ${row.tf} — نموذج ${row.model} / R:R ${row.rr}`,
+      { opportunity: row }
+    );
+  },
   log: console
 });
 setTimeout(() => strategy2Engine.start(), 95_000); // بعد محرك الفرص الأول (اشتراكات WS متسلسلة)
@@ -1283,6 +1306,23 @@ app.get('/api/strategy2/feed', handle(async (req, res) => {
 
 app.get('/api/strategy2/status', handle(async (_req, res) => {
   res.json(strategy2Engine.getStatus());
+}));
+
+// سجل الاتجاهات الحي لكل العملات — فلترة وترتيب على الخادم قبل أي قص
+app.get('/api/strategy2/directions', handle(async (req, res) => {
+  const q = {
+    symbol: req.query.symbol, dir: req.query.dir, stage: req.query.stage,
+    dead: req.query.dead, agreement: req.query.agreement,
+    sort: req.query.sort, limit: req.query.limit, offset: req.query.offset
+  };
+  const { rows, total } = strategy2Engine.queryDirections(q);
+  res.json({
+    summary: strategy2Engine.getDirectionsSummary(),
+    directions: rows,
+    total,
+    filtered: total !== rows.length,
+    updatedAt: Date.now()
+  });
 }));
 
 app.get('/api/strategy2/calibration', handle(async (_req, res) => {

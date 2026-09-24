@@ -445,7 +445,16 @@ const db = {
       return rest(`/events_log?${q}`);
     },
     /** آخر معايرة محفوظة للمحرك الثاني */
-    strategy2Calibration: () => rest('/events_log?type=eq.strategy2_calibration&select=*&order=ts.desc&limit=1')
+    strategy2Calibration: () => rest('/events_log?type=eq.strategy2_calibration&select=*&order=ts.desc&limit=1'),
+    /** أحداث تغيّر الاتجاهات (انقلاب/مرحلة/موت مشوار) — التاريخ الدائم للاتجاهات */
+    strategy2DirectionEvents: (sinceTs = 0, limit = 2000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'eq.strategy2_direction');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      q.set('order', 'ts.desc,id.desc');
+      q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      return rest(`/events_log?${q}`);
+    }
   }
 };
 

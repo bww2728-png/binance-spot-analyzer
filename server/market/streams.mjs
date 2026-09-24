@@ -6,8 +6,9 @@
  *  - <sym>@aggTrade   → كل الصفقات → CVD حي + فقاعات + آيسبرغ (بدون REST ولا توقف)
  *
  * حدود بينانس الرسمية ويُصمَّم حولها:
- *  - 1024 stream لكل اتصال (سقفنا العملي 900 + تقسيم تلقائي لاتصالات إضافية)
- *  - 5 رسائل تحكم/ثانية (تجميع SUBSCRIBE/UNSUBSCRIBE في دفعات كل 300ms)
+ *  - 1024 stream لكل اتصال (سقفنا العملي 900) → **توزيع تلقائي على عدة اتصالات** عند الحاجة
+ *    (لا قص صامت: كل stream مطلوب يُشترك فعلاً — المالك ثابت عبر إعادة الاتصال)
+ *  - 5 رسائل تحكم/ثانية لكل اتصال (طوابير تحكم مستقلة لكل اتصال، تجميع كل 300ms)
  *  - ping كل 3 دقائق (حزمة ws ترد بـpong تلقائياً) + فحص حياة: بلا رسائل 90 ث → قطع وإعادة
  *  - قطع إجباري بعد 24 ساعة → إعادة اتصال استباقية عند 23.5 ساعة
  *  - 300 محاولة اتصال/5 د → تراجع أُسّي 2s→30s فقط
@@ -43,8 +44,9 @@ export function createMarketStreams({
     reconcileBatch: 20,
     tradeWindowMs: 10 * 60_000,
     maxTradesPerSymbol: 4000,
-    aggTradeSubLimit: 80,
-    klineSubLimit: 900,
+    aggTradeSubLimit: 0,          // 0 = بلا قص (التوزيع على الاتصالات يتكفل بالحدود)
+    klineSubLimit: 0,             // 0 = بلا قص — كل المطلوب يُشترك فعلاً عبر اتصالات إضافية
+    maxConns: 8,
     ...config
   };
 
@@ -56,17 +58,19 @@ export function createMarketStreams({
   let candleCloseHandlers = new Set();
 
   /* ---- الاشتراكات المطلوبة (مستأجرون متعددون: محرك الفرص + محرك الاستراتيجية) ----
-   * كل مستهلك يسجّل طلباته بمفتاح tenant، والاتحاد يُشترك به فعلياً بحد أقصى عادل.
-   * key → Set (أول مستأجر يملك السهم) — setKlineSubscriptions يبقى توافقاً قديماً (tenant=default). */
+   * كل مستهلك يسجّل طلباته بمفتاح tenant، والاتحاد يُشترك به فعلياً موزعاً على الاتصالات. */
   const klineWants = new Map();      // tenant → Set("SYM|tf")
   const flowWants = new Map();       // tenant → Set(symbol)
   let wantedKlines = new Set();      // الاتحاد الفعلي
   let wantedFlow = new Set();
-  let activeKlines = new Set();
-  let activeFlow = new Set();
 
-  /* ---- الاتصالات ---- */
-  let conns = [];                    // { ws, streams:Set, hostIndex, keepAlive, lifetimeTimer, lastMsgAt }
+  /* ---- الاتصالات المُوزَّعة ----
+   * connOwned(id → Set) يبقى عبر إعادة الاتصال — streamOwner(stream → id) لاصق بلا churn.
+   * كل اتصال طوابير تحكم مستقلة (حد 5 رسالة/ث لكل اتصال من بينانس). */
+  let conns = [];                    // { id, ws, active:Set, pendingSubs, pendingUnsubs, controlTimer, keepAlive, lifetimeTimer, lastMsgAt }
+  const connOwned = new Map();       // id → Set(streamName)
+  const streamOwner = new Map();     // streamName → connId
+  let nextConnId = 1;
   let hostIndex = 0;
   let attempt = 0;
   let started = false;
@@ -75,11 +79,6 @@ export function createMarketStreams({
   let lastMessageAt = null;
   let startedAt = null;
   let reconcileTimer = null;
-
-  /* ---- تجميع رسائل التحكم (حد 5/ث) ---- */
-  let controlTimer = null;
-  const pendingSubs = new Set();
-  const pendingUnsubs = new Set();
 
   const tfFromStream = (streamName) => {
     const i = streamName.indexOf('@kline_');
@@ -90,20 +89,35 @@ export function createMarketStreams({
     return i > 0 ? streamName.slice(0, i).toUpperCase() : null;
   };
 
-  /* ================= الاتصالات ================= */
+  /* ================= الاتصالات المُوزَّعة ================= */
 
-  function openConn() {
+  function ownedCapacity() {
+    let cap = 0;
+    for (const id of connOwned.keys()) cap += cfg.maxStreamsPerConn;
+    return cap;
+  }
+
+  function openConn(id) {
     if (stopped) return;
     const host = WS_HOSTS[hostIndex % WS_HOSTS.length];
-    const ws = new WebSocket(`${host}/stream?streams=!miniTicker@arr`);
+    // الاتصال الأول يحمل أسعار السوق الإجمالية في URL — البقية تتصل عاراة وتشترك بطلباتها
+    const url = id === 1 ? `${host}/stream?streams=!miniTicker@arr` : `${host}/stream`;
+    const ws = new WebSocket(url);
     const conn = {
+      id,
       ws,
-      streams: new Set(['!miniTicker@arr']),
-      hostIndex: hostIndex % WS_HOSTS.length,
+      active: new Set(id === 1 ? ['!miniTicker@arr'] : []),
+      pendingSubs: new Set(),
+      pendingUnsubs: new Set(),
+      controlTimer: null,
       keepAlive: null,
       lifetimeTimer: null,
       lastMsgAt: now()
     };
+    if (!connOwned.has(id)) {
+      connOwned.set(id, new Set(id === 1 ? ['!miniTicker@arr'] : []));
+      if (id === 1) streamOwner.set('!miniTicker@arr', 1);
+    }
     ws.on('open', () => {
       attempt = 0;
       conn.lastMsgAt = now();
@@ -116,10 +130,12 @@ export function createMarketStreams({
       conn.lifetimeTimer = setTimeout(() => {
         try { ws.terminate(); } catch { /* ignore */ }
       }, cfg.proactiveReconnectMs);
-      // إعادة اشتراك كل المطلوب بعد فتح الاتصال
-      for (const s of [...wantedKlines].map(klineStreamOf)) scheduleControl('sub', s);
-      for (const s of [...wantedFlow].map(aggStreamOf)) scheduleControl('sub', s);
-      log.log?.(`[market-streams] connected: ${host} (${conn.streams.size} streams)`);
+      // إعادة اشتراك ما يملكه هذا الاتصال فقط (وليس كل المطلوب عالمياً)
+      const owned = connOwned.get(id) ?? new Set();
+      for (const s of owned) {
+        if (!conn.active.has(s)) scheduleOn(conn, 'sub', s);
+      }
+      log.log?.(`[market-streams] connected: ${host} shard#${id} (${owned.size} owned streams)`);
     });
     ws.on('message', (buf) => {
       conn.lastMsgAt = now();
@@ -132,14 +148,15 @@ export function createMarketStreams({
     ws.on('close', () => {
       clearInterval(conn.keepAlive);
       clearTimeout(conn.lifetimeTimer);
+      if (conn.controlTimer) { clearTimeout(conn.controlTimer); conn.controlTimer = null; }
       conns = conns.filter(c => c !== conn);
       if (stopped) return;
-      // تراجع أُسّي مع تدوير النقطة — ثم إعادة فتح وإعادة اشتراك كل المطلوب
+      // تراجع أُسّي مع تدوير النقطة — ثم إعادة فتح نفس الشارد باشتراكاته المحفوظة
       attempt += 1;
       hostIndex = (hostIndex + 1) % WS_HOSTS.length;
       const delay = Math.min(cfg.reconnectMaxMs, cfg.reconnectBaseMs * 2 ** Math.min(attempt, 5));
-      log.warn?.(`[market-streams] connection lost — reconnect in ${delay}ms (attempt ${attempt})`);
-      setTimeout(() => { if (!stopped) openConn(); }, delay);
+      log.warn?.(`[market-streams] shard#${id} lost — reconnect in ${delay}ms (attempt ${attempt})`);
+      setTimeout(() => { if (!stopped && connOwned.has(id)) openConn(id); }, delay);
     });
     conns.push(conn);
     return conn;
@@ -260,25 +277,24 @@ export function createMarketStreams({
     };
   }
 
-  /* ================= إدارة الاشتراكات ================= */
+  /* ================= طوابير التحكم لكل اتصال (حد 5/ث لكل اتصال) ================= */
 
-  function scheduleControl(op, streamName) {
-    (op === 'sub' ? pendingSubs : pendingUnsubs).add(streamName);
-    if (controlTimer) return;
-    controlTimer = setTimeout(() => {
-      controlTimer = null;
-      flushControl('sub');
-      flushControl('unsub');
+  function scheduleOn(conn, op, streamName) {
+    (op === 'sub' ? conn.pendingSubs : conn.pendingUnsubs).add(streamName);
+    if (conn.controlTimer) return;
+    conn.controlTimer = setTimeout(() => {
+      conn.controlTimer = null;
+      flushOn(conn, 'sub');
+      flushOn(conn, 'unsub');
     }, cfg.controlBatchMs);
   }
 
-  function flushControl(op) {
-    const bag = op === 'sub' ? pendingSubs : pendingUnsubs;
+  function flushOn(conn, op) {
+    if (conn.ws.readyState !== WebSocket.OPEN) return; // on open يُعاد الإرسال تلقائياً
+    const bag = op === 'sub' ? conn.pendingSubs : conn.pendingUnsubs;
     if (!bag.size) return;
     const names = [...bag];
     bag.clear();
-    const conn = conns.find(c => c.ws.readyState === WebSocket.OPEN);
-    if (!conn) return; // ستُعاد الاشتراكات عند open تلقائياً
     for (let i = 0; i < names.length; i += cfg.controlBatchSize) {
       const batch = names.slice(i, i + cfg.controlBatchSize);
       try {
@@ -287,42 +303,61 @@ export function createMarketStreams({
           params: batch,
           id: Date.now() + i
         }));
+        for (const s of batch) {
+          if (op === 'sub') conn.active.add(s);
+          else conn.active.delete(s);
+        }
       } catch { /* onclose يتبع */ }
     }
   }
 
-  /** الفرق بين المطلوب والمشترك — بلا تكرار ولا رسائل زائدة */
-  function syncKlineSubs() {
-    const list = [...wantedKlines].slice(0, cfg.klineSubLimit);
-    const target = new Set(list);
-    for (const key of activeKlines) {
-      if (!target.has(key)) {
-        activeKlines.delete(key);
-        scheduleControl('unsub', klineStreamOf(key));
-      }
-    }
-    for (const key of target) {
-      if (!activeKlines.has(key)) {
-        activeKlines.add(key);
-        scheduleControl('sub', klineStreamOf(key));
-      }
-    }
+  /* ================= المزامنة المُوزَّعة — لا قص صامت ================= */
+
+  /** كل الستريمات المطلوبة فعلاً (بلا أي قص) — التوزيع على الاتصالات يتكفل بالحدود */
+  function desiredStreams() {
+    const out = ['!miniTicker@arr'];
+    for (const key of wantedKlines) out.push(klineStreamOf(key));
+    for (const sym of wantedFlow) out.push(aggStreamOf(sym));
+    return out;
   }
 
-  function syncFlowSubs() {
-    const target = new Set([...wantedFlow].slice(0, cfg.aggTradeSubLimit));
-    for (const sym of activeFlow) {
-      if (!target.has(sym)) {
-        activeFlow.delete(sym);
-        trades.delete(sym); // تحرير الذاكرة فور إلغاء الاشتراك
-        scheduleControl('unsub', aggStreamOf(sym));
-      }
+  function syncSubs() {
+    if (!started || stopped) return;
+    const desired = desiredStreams();
+    const desiredSet = new Set(desired);
+
+    // 1) تحرير ملاك الستريمات غير المطلوبة
+    for (const s of [...streamOwner.keys()]) {
+      if (desiredSet.has(s)) continue;
+      const id = streamOwner.get(s);
+      streamOwner.delete(s);
+      connOwned.get(id)?.delete(s);
+      const conn = conns.find(c => c.id === id);
+      if (conn) { scheduleOn(conn, 'unsub', s); }
     }
-    for (const sym of target) {
-      if (!activeFlow.has(sym)) {
-        activeFlow.add(sym);
-        scheduleControl('sub', aggStreamOf(sym));
+
+    // 2) فتح اتصالات إضافية عند الحاجة (سقف 900/اتصال — حد بينانس 1024)
+    while (desired.length > ownedCapacity() && connOwned.size < cfg.maxConns) {
+      openConn(nextConnId);
+      nextConnId += 1;
+    }
+
+    // 3) إسناد الستريمات غير المملوكة — لاصقة (الجديد يذهب لأول اتصال به مساحة)
+    for (const s of desired) {
+      if (streamOwner.has(s)) continue;
+      let conn = conns.find(c => (connOwned.get(c.id)?.size ?? 0) < cfg.maxStreamsPerConn);
+      if (!conn) {
+        if (connOwned.size >= cfg.maxConns) {
+          log.warn?.(`[market-streams] max conns reached (${cfg.maxConns}) — cannot subscribe ${s}`);
+          continue;
+        }
+        openConn(nextConnId);
+        nextConnId += 1;
+        conn = conns[conns.length - 1];
       }
+      connOwned.get(conn.id).add(s);
+      streamOwner.set(s, conn.id);
+      scheduleOn(conn, 'sub', s);
     }
   }
 
@@ -364,7 +399,7 @@ export function createMarketStreams({
       started = true;
       stopped = false;
       startedAt = now();
-      openConn();
+      syncSubs(); // يفتح الاتصالات المطلوبة ويوزع الاشتراكات
       reconcileTimer = setInterval(reconcileTick, cfg.reconcileMs);
       if (reconcileTimer.unref) reconcileTimer.unref();
     },
@@ -395,14 +430,14 @@ export function createMarketStreams({
       const prev = klineWants.get(tenant);
       if (prev && prev.size === next.size && [...next].every(k => prev.has(k))) return;
       klineWants.set(tenant, next);
-      // الاتحاد عبر المستأجرين — مع أولوية طلب الأول (أقدم مستأجر يفوز عند التجاوز)
+      // الاتحاد عبر المستأجرين — يُشترك به كله موزعاً (بلا قص)
       const merged = [];
       const seen = new Set();
       for (const set of klineWants.values()) {
         for (const k of set) if (!seen.has(k)) { seen.add(k); merged.push(k); }
       }
       wantedKlines = new Set(merged);
-      syncKlineSubs();
+      syncSubs();
     },
     setAggTradeSubscriptions(symbols, tenant = 'default') {
       const next = new Set(symbols ?? []);
@@ -415,7 +450,7 @@ export function createMarketStreams({
         for (const s of set) if (!seen.has(s)) { seen.add(s); merged.push(s); }
       }
       wantedFlow = new Set(merged);
-      syncFlowSubs();
+      syncSubs();
     },
     onCandleClose(cb) {
       candleCloseHandlers.add(cb);
@@ -429,7 +464,7 @@ export function createMarketStreams({
       return {
         connected: conns.some(c => c.ws.readyState === WebSocket.OPEN),
         connections: conns.length,
-        streams: conns.reduce((a, c) => a + c.streams.size, 0),
+        streams: conns.reduce((a, c) => a + c.active.size, 0),
         klineSubs: wantedKlines.size,
         aggTradeSubs: wantedFlow.size,
         priceSymbols: prices.size,

@@ -741,3 +741,49 @@ export interface Strategy2HistoryResponse {
   active: { id: string; symbol: string; tf: string; tier: string | null; detectedAt: number }[];
   generatedAt: number;
 }
+
+/* ═══ سجل الاتجاهات الحي لكل العملات (فريم الدقيقة + فريمه الأكبر ×8) ═══ */
+
+export interface Strategy2DirectionRow {
+  symbol: string;
+  dir: 'up' | 'down' | 'range';
+  dir1m: 'up' | 'down' | 'range';
+  dir40m: 'up' | 'down' | 'range' | null;
+  agreement: 'confirmed' | 'conflicted' | 'single';
+  stage: string;
+  stageDetail: Record<string, unknown>;
+  anchorHigh: number | null;
+  anchorLow: number | null;
+  afterPremium: boolean | null;
+  externalNext: number | null;
+  distToExternalPct: number | null;
+  deathLevel: number | null;
+  dead: boolean;
+  discountLevel: number | null;
+  legLow: number | null;
+  legHigh: number | null;
+  price: number | null;
+  since: number;
+  lastChangeAt: number | null;
+  changeCount: number;
+  transitions: { at: number; kind: string; label: string; dir: string; stage: string }[];
+}
+
+export interface Strategy2DirectionsSummary {
+  total: number;
+  up: number;
+  down: number;
+  range: number;
+  confirmed: number;
+  conflicted: number;
+  dead: number;
+  stages: Record<string, number>;
+}
+
+export interface Strategy2DirectionsResponse {
+  summary: Strategy2DirectionsSummary;
+  directions: Strategy2DirectionRow[];
+  total: number;
+  filtered: boolean;
+  updatedAt: number;
+}

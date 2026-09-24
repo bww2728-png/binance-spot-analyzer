@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
 import LiveDashboard from './LiveDashboard';
-import type { BuyHistoryResponse, Strategy2Feed, Strategy2Opportunity } from '../lib/types';
+import type { BuyHistoryResponse, Strategy2DirectionsResponse, Strategy2DirectionRow, Strategy2Feed, Strategy2Opportunity } from '../lib/types';
 
 /* ═══ الفرص الحية — استراتيجيتي (محرك SMC مستقل) ═══
  * تبويبات: الفرص (جدول شامل) · قيد التتبع (مراحل الانتظار) · لوحة التحكم · المرفوضة.
@@ -27,6 +27,7 @@ const TIER_BADGE: Record<string, { label: string; color: string }> = {
 };
 
 const HTF_LABEL: Record<string, string> = { up: 'صاعد', down: 'هابط', range: 'عرضي' };
+const htfColor = (d: string | null | undefined) => (d === 'up' ? 'var(--up)' : d === 'down' ? 'var(--down)' : 'var(--text-2)');
 
 /** تصنيف المسافة: قريب/متوسط/بعيد من الهدف الأول */
 function distanceBand(d: number | null | undefined): { label: string; color: string } {
@@ -37,7 +38,7 @@ function distanceBand(d: number | null | undefined): { label: string; color: str
   return { label: 'بعيدة', color: 'var(--down)' };
 }
 
-type Tab = 'feed' | 'tracking' | 'dashboard' | 'rejected';
+type Tab = 'feed' | 'directions' | 'tracking' | 'dashboard' | 'rejected';
 
 export default function StrategyScreen() {
   const [tab, setTab] = useState<Tab>('feed');
@@ -56,6 +57,82 @@ export default function StrategyScreen() {
   const [sort, setSort] = useState('recent');
   const debounceRef = useRef<number | null>(null);
   const [symbolInput, setSymbolInput] = useState('');
+
+  // ═══ سجل الاتجاهات الحي (فريم الدقيقة + فريمه الأكبر ×8) ═══
+  const [dirData, setDirData] = useState<Strategy2DirectionsResponse | null>(null);
+  const [dirLoading, setDirLoading] = useState(false);
+  const [dirError, setDirError] = useState<string | null>(null);
+  const [dirSymbolInput, setDirSymbolInput] = useState('');
+  const [dirSymbol, setDirSymbol] = useState('');
+  const [dir, setDir] = useState('');
+  const [dirStage, setDirStage] = useState('');
+  const [dirDead, setDirDead] = useState('');
+  const [dirAgreement, setDirAgreement] = useState('');
+  const [dirSort, setDirSort] = useState('symbol');
+  const [dirExpanded, setDirExpanded] = useState<string | null>(null);
+
+  const loadDirections = useCallback(async (silent = false) => {
+    if (!silent) setDirLoading(true);
+    try {
+      setDirError(null);
+      setDirData(await api.getStrategy2Directions({
+        symbol: dirSymbol || undefined, dir: dir || undefined, stage: dirStage || undefined,
+        dead: dirDead || undefined, agreement: dirAgreement || undefined,
+        sort: dirSort || undefined, limit: 500
+      }));
+    } catch (e) {
+      setDirError(e instanceof Error ? e.message : 'فشل جلب الاتجاهات');
+    } finally {
+      setDirLoading(false);
+    }
+  }, [dirSymbol, dir, dirStage, dirDead, dirAgreement, dirSort]);
+
+  useEffect(() => { if (tab === 'directions') void loadDirections(); }, [tab, loadDirections]);
+  // نبضات الاتجاهات عبر WS — إعادة جلب صامتة (debounce 1 ث) + احتياطي 30 ث
+  const dirDebounceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (tab !== 'directions' || !pulse) return;
+    if (dirDebounceRef.current) window.clearTimeout(dirDebounceRef.current);
+    dirDebounceRef.current = window.setTimeout(() => { void loadDirections(true); }, 1000);
+    return () => { if (dirDebounceRef.current) window.clearTimeout(dirDebounceRef.current); };
+  }, [pulse, tab, loadDirections]);
+  useEffect(() => {
+    if (tab !== 'directions') return;
+    const id = window.setInterval(() => { void loadDirections(true); }, 30_000);
+    return () => window.clearInterval(id);
+  }, [tab, loadDirections]);
+  // بحث الرمز في تبويب الاتجاهات مؤجل
+  useEffect(() => {
+    const id = window.setTimeout(() => setDirSymbol(dirSymbolInput.trim().toUpperCase()), 400);
+    return () => window.clearTimeout(id);
+  }, [dirSymbolInput]);
+
+  // خريطة الاتجاهات الحية — تُلوّن عمود الاتجاه في جدول الفرص لحظياً
+  const dirBySymbol = useMemo(() => {
+    const m = new Map<string, Strategy2DirectionRow>();
+    for (const d of dirData?.directions ?? []) m.set(d.symbol, d);
+    return m;
+  }, [dirData]);
+
+  const exportDirectionsCsv = useCallback(() => {
+    const rows = dirData?.directions ?? [];
+    const header = ['symbol', 'dir8m', 'dir1m', 'dir40m', 'agreement', 'stage', 'afterPremium', 'externalNext', 'distPct', 'deathLevel', 'dead', 'discountLevel', 'price', 'since', 'changeCount'];
+    const lines = [header.join(',')];
+    for (const d of rows) {
+      lines.push([d.symbol, d.dir, d.dir1m, d.dir40m ?? '', d.agreement,
+        `"${d.stage.replace(/"/g, '""')}"`,
+        d.afterPremium == null ? '' : (d.afterPremium ? 'yes' : 'no'),
+        d.externalNext ?? '', d.distToExternalPct ?? '', d.deathLevel ?? '',
+        d.dead ? 'yes' : 'no', d.discountLevel ?? '', d.price ?? '',
+        d.since ? new Date(d.since).toISOString() : '', d.changeCount].join(','));
+    }
+    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'strategy2-directions.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [dirData]);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -188,7 +265,7 @@ export default function StrategyScreen() {
 
       {/* التبويبات */}
       <div className="flex gap-1.5 flex-wrap">
-        {([['feed', `الفرص (${opps.length})`], ['tracking', 'قيد التتبع'], ['dashboard', 'لوحة التحكم'], ['rejected', `المرفوضة (${feed?.rejected.length ?? 0})`]] as [Tab, string][]).map(([t, label]) => (
+        {([['feed', `الفرص (${opps.length})`], ['directions', `الاتجاهات (${dirData?.summary.total ?? 0})`], ['tracking', 'قيد التتبع'], ['dashboard', 'لوحة التحكم'], ['rejected', `المرفوضة (${feed?.rejected.length ?? 0})`]] as [Tab, string][]).map(([t, label]) => (
           <button key={t} onClick={() => setTab(t)} className="text-[12px] font-semibold px-3 py-1.5 rounded-lg"
             style={{
               background: tab === t ? 'var(--accent-soft)' : 'var(--surface-1)',
@@ -253,7 +330,7 @@ export default function StrategyScreen() {
                   </tr>
                 </thead>
                 <tbody>
-                  {opps.map(o => <OppRow key={o.id} o={o} onChart={() => openChart(o.symbol, o.tf, null)} />)}
+                  {opps.map(o => <OppRow key={o.id} o={o} liveDir={dirBySymbol.get(o.symbol)} onChart={() => openChart(o.symbol, o.tf, null)} />)}
                 </tbody>
               </table>
             </div>
@@ -264,6 +341,98 @@ export default function StrategyScreen() {
                   : 'لا فرص منشورة بعد — المحرك يراقب مناطق السيولة ويرصد تكوّن القمم/القيعان المحمية لحظياً.'}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══ تبويب الاتجاهات: سجل حي لكل العملات ═══ */}
+      {tab === 'directions' && (
+        <div className="space-y-3">
+          {/* الملخص العلوي — شرائح نقرتُها تفلتر الجدول */}
+          <div className="card p-3 flex flex-wrap items-center gap-2">
+            <DirChip label={`الكل (${dirData?.summary.total ?? 0})`} active={!dir && !dirDead && !dirAgreement} onClick={() => { setDir(''); setDirDead(''); setDirAgreement(''); }} color="var(--text-2)" />
+            <DirChip label={`صاعد (${dirData?.summary.up ?? 0})`} active={dir === 'up'} onClick={() => setDir(dir === 'up' ? '' : 'up')} color="var(--up)" />
+            <DirChip label={`هابط (${dirData?.summary.down ?? 0})`} active={dir === 'down'} onClick={() => setDir(dir === 'down' ? '' : 'down')} color="var(--down)" />
+            <DirChip label={`عرضي (${dirData?.summary.range ?? 0})`} active={dir === 'range'} onClick={() => setDir(dir === 'range' ? '' : 'range')} color="var(--text-2)" />
+            <DirChip label={`متعارض (${dirData?.summary.conflicted ?? 0})`} active={dirAgreement === 'conflicted'} onClick={() => setDirAgreement(dirAgreement === 'conflicted' ? '' : 'conflicted')} color="var(--warn)" />
+            <DirChip label={`مشوار مات (${dirData?.summary.dead ?? 0})`} active={dirDead === '1'} onClick={() => setDirDead(dirDead === '1' ? '' : '1')} color="var(--warn)" />
+            <span className="text-[11px] num mr-auto" style={{ color: 'var(--text-3)' }}>
+              {dirData ? `آخر تحديث ${ago(dirData.updatedAt)}` : ''}
+            </span>
+          </div>
+
+          {/* فلاتر خادمة */}
+          <div className="card p-3 flex flex-wrap items-center gap-2">
+            <input
+              value={dirSymbolInput}
+              onChange={e => setDirSymbolInput(e.target.value)}
+              placeholder="بحث رمز…"
+              className="text-[12px] px-2.5 py-1.5 rounded-lg w-28"
+              style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+            />
+            <select value={dirStage} onChange={e => setDirStage(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+              <option value="">كل المراحل</option>
+              {Object.entries(dirData?.summary.stages ?? {}).sort((a, b) => b[1] - a[1]).map(([ph, c]) => (
+                <option key={ph} value={ph}>{ph} ({c})</option>
+              ))}
+            </select>
+            <select value={dirAgreement} onChange={e => setDirAgreement(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+              <option value="">كل التوافقات</option>
+              <option value="confirmed">مؤكد (8m+40m)</option>
+              <option value="conflicted">متعارض</option>
+              <option value="single">8m فقط</option>
+            </select>
+            <select value={dirDead} onChange={e => setDirDead(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+              <option value="">حالة المشوار: الكل</option>
+              <option value="0">حي</option>
+              <option value="1">مات</option>
+            </select>
+            <select value={dirSort} onChange={e => setDirSort(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+              <option value="symbol">رمزياً</option>
+              <option value="recent">آخر تغيّر</option>
+              <option value="changes">الأكثر تغيّراً</option>
+              <option value="distance">الأقرب للعرض الخارجي</option>
+            </select>
+            <button onClick={exportDirectionsCsv} className="btn text-[12px]">تصدير CSV</button>
+            <span className="text-[11px] num" style={{ color: 'var(--text-3)' }}>
+              {(dirData?.directions.length ?? 0)}{dirData?.filtered ? ` (مفلترة من ${dirData.total})` : ''} صف
+            </span>
+          </div>
+
+          {dirError && <div className="card p-4 text-[12px]" style={{ color: 'var(--down)' }}>{dirError}</div>}
+          {dirLoading && !dirData && <div className="card p-4 text-[12px]" style={{ color: 'var(--text-3)' }}>جارٍ جلب سجل الاتجاهات…</div>}
+
+          {/* الجدول الكامل */}
+          <div className="card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]" style={{ borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border-1)', background: 'var(--surface-0)' }}>
+                    {['الرمز', 'اتجاه 8m (حاكم)', 'اتجاه 40m', 'التوافق', 'المرحلة', 'المرساة المحمية', 'بعد بريميوم؟', 'العرض الخارجي التالي', 'المسافة', 'منذ متى', 'تغيّرات', 'الشارت'].map(h => (
+                      <th key={h} className="text-right px-2.5 py-2 font-bold whitespace-nowrap" style={{ color: 'var(--text-2)' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(dirData?.directions ?? []).map(d => (
+                    <DirRow
+                      key={d.symbol} d={d}
+                      expanded={dirExpanded === d.symbol}
+                      onToggle={() => setDirExpanded(dirExpanded === d.symbol ? null : d.symbol)}
+                      onChart={() => openChart(d.symbol, '1m', null)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {dirData && dirData.directions.length === 0 && !dirLoading && (
+              <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
+                لا صفوف — المحرك يكوّن سجل الاتجاهات من إغلاقات الدقيقة (تكتمل اللقطة بعد أول دورة).
+              </div>
+            )}
+          </div>
+          <div className="text-[11px] px-1" style={{ color: 'var(--text-3)' }}>
+            اتجاه كل عملة حاكم من بنية 8m المجمّعة من الدقيقة، والتوافق من 40m (5m ×8). آلة المراحل: صاعد ← تعدي bsl؟ نعم: ديسكاونت + ssl / لا: ديسكاونت فقط ← ثم بانتظار تأكيد الدخول · هابط: رصد نهاية الهبوط · عرضي: رصد تكوّن هيكل. انقر صف لسجل انتقالاته.
           </div>
         </div>
       )}
@@ -337,7 +506,7 @@ export default function StrategyScreen() {
   );
 }
 
-function OppRow({ o, onChart }: { o: Strategy2Opportunity; onChart: () => void }) {
+function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: Strategy2DirectionRow; onChart: () => void }) {
   const tick = useStore(s => s.strategy2Rows[o.id]);
   const px = tick?.price ?? o.price;
   const tier = TIER_BADGE[o.tier ?? 'probationary'] ?? TIER_BADGE.probationary;
@@ -348,8 +517,9 @@ function OppRow({ o, onChart }: { o: Strategy2Opportunity; onChart: () => void }
       <td className="px-2.5 py-2 font-bold num whitespace-nowrap" style={{ color: 'var(--text-1)' }}>{o.symbol}</td>
       <td className="px-2.5 py-2 num" style={{ color: 'var(--text-3)' }}>{o.tf}</td>
       <td className="px-2.5 py-2 whitespace-nowrap text-[11px]" style={{ color: 'var(--text-2)' }}>{modelLabel}</td>
-      <td className="px-2.5 py-2 text-[11.5px]" style={{ color: o.htfDirection === 'up' ? 'var(--up)' : o.htfDirection === 'down' ? 'var(--down)' : 'var(--text-2)' }}>
-        {HTF_LABEL[o.htfDirection ?? 'range'] ?? '—'}
+      <td className="px-2.5 py-2 text-[11.5px] whitespace-nowrap" style={{ color: htfColor(liveDir?.dir ?? o.htfDirection ?? 'range') }}>
+        {HTF_LABEL[liveDir?.dir ?? o.htfDirection ?? 'range'] ?? '—'}
+        {liveDir?.dead && <span style={{ color: 'var(--warn)' }}> · مات</span>}
       </td>
       <td className="px-2.5 py-2 text-[11.5px]" style={{ color: 'var(--text-3)' }}>
         {o.afterPremium == null ? '—' : o.afterPremium ? 'نعم' : 'لا'}
@@ -376,6 +546,86 @@ function OppRow({ o, onChart }: { o: Strategy2Opportunity; onChart: () => void }
         <button onClick={onChart} className="text-[11px] px-2 py-1 rounded" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت</button>
       </td>
     </tr>
+  );
+}
+
+
+function DirChip({ label, active, onClick, color }: { label: string; active: boolean; onClick: () => void; color: string }) {
+  return (
+    <button onClick={onClick} className="text-[12px] font-semibold px-3 py-1.5 rounded-lg"
+      style={{
+        background: active ? `${color}22` : 'var(--surface-1)',
+        color: active ? color : 'var(--text-2)',
+        border: `1px solid ${active ? color : 'var(--border-1)'}`
+      }}>{label}</button>
+  );
+}
+
+const AGREEMENT_LABEL: Record<string, { label: string; color: string }> = {
+  confirmed: { label: 'مؤكد', color: 'var(--up)' },
+  conflicted: { label: 'متعارض', color: 'var(--warn)' },
+  single: { label: '8m فقط', color: 'var(--text-3)' }
+};
+
+function DirRow({ d, expanded, onToggle, onChart }: { d: Strategy2DirectionRow; expanded: boolean; onToggle: () => void; onChart: () => void }) {
+  const ag = AGREEMENT_LABEL[d.agreement] ?? AGREEMENT_LABEL.single;
+  return (
+    <>
+      <tr onClick={onToggle} style={{ borderBottom: '1px solid var(--border-1)', cursor: 'pointer', background: expanded ? 'var(--surface-0)' : undefined }}>
+        <td className="px-2.5 py-2 font-bold num whitespace-nowrap" style={{ color: 'var(--text-1)' }}>{d.symbol}</td>
+        <td className="px-2.5 py-2 text-[11.5px] font-semibold" style={{ color: htfColor(d.dir) }}>
+          {HTF_LABEL[d.dir] ?? '—'}{d.dead && <span style={{ color: 'var(--warn)' }}> · مات</span>}
+        </td>
+        <td className="px-2.5 py-2 text-[11.5px]" style={{ color: htfColor(d.dir40m) }}>{d.dir40m ? HTF_LABEL[d.dir40m] : '—'}</td>
+        <td className="px-2.5 py-2 whitespace-nowrap">
+          <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: `${ag.color}22`, color: ag.color, border: `1px solid ${ag.color}55` }}>{ag.label}</span>
+        </td>
+        <td className="px-2.5 py-2 text-[11px] max-w-[260px]" style={{ color: 'var(--text-2)' }} title={d.stage}>{d.stage}</td>
+        <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>
+          {d.anchorHigh != null ? `قمة ${fmtPx(d.anchorHigh)}` : d.anchorLow != null ? `قاع ${fmtPx(d.anchorLow)}` : '—'}
+        </td>
+        <td className="px-2.5 py-2 text-[11px]" style={{ color: 'var(--text-3)' }}>{d.afterPremium == null ? '—' : d.afterPremium ? 'نعم' : 'لا'}</td>
+        <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-2)' }}>{fmtPx(d.externalNext)}</td>
+        <td className="px-2.5 py-2 num text-[11px]" style={{ color: d.distToExternalPct != null && Math.abs(d.distToExternalPct) <= 0.75 ? 'var(--up)' : 'var(--text-2)' }}>
+          {d.distToExternalPct != null ? `${d.distToExternalPct > 0 ? '+' : ''}${d.distToExternalPct.toFixed(2)}%` : '—'}
+        </td>
+        <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>{ago(d.since)}</td>
+        <td className="px-2.5 py-2 num text-[11px]" style={{ color: d.changeCount > 2 ? 'var(--warn)' : 'var(--text-2)' }}>{d.changeCount}</td>
+        <td className="px-2.5 py-2">
+          <button onClick={(e) => { e.stopPropagation(); onChart(); }} className="text-[11px] px-2 py-1 rounded" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت</button>
+        </td>
+      </tr>
+      {expanded && (
+        <tr style={{ background: 'var(--surface-0)' }}>
+          <td colSpan={12} className="px-6 py-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] num" style={{ color: 'var(--text-2)' }}>
+              <span>سعر: {fmtPx(d.price)}</span>
+              <span>اتجاه 1m: <b style={{ color: htfColor(d.dir1m) }}>{HTF_LABEL[d.dir1m] ?? '—'}</b></span>
+              <span>ديسكاونت: {fmtPx(d.discountLevel)}</span>
+              <span>نطاق الرِجل: {fmtPx(d.legLow)} → {fmtPx(d.legHigh)}</span>
+              <span>مستوى الموت: {fmtPx(d.deathLevel)}</span>
+            </div>
+            <div className="mt-2 text-[11px] font-bold" style={{ color: 'var(--text-2)' }}>سجل الانتقالات (الأحدث أولاً)</div>
+            {d.transitions.length === 0
+              ? <div className="text-[11px] mt-1" style={{ color: 'var(--text-3)' }}>لا انتقالات مسجلة منذ الإقلاع.</div>
+              : (
+                <div className="mt-1 space-y-0.5">
+                  {d.transitions.map((t, i) => (
+                    <div key={`${t.at}-${i}`} className="flex flex-wrap gap-2 items-baseline text-[11px]">
+                      <span className="num" style={{ color: 'var(--text-3)' }}>{new Date(t.at).toLocaleTimeString('ar')}</span>
+                      <span className="num font-bold" style={{ color: t.kind === 'flip' ? 'var(--accent)' : t.kind === 'dead' ? 'var(--warn)' : 'var(--text-2)' }}>
+                        {t.kind === 'flip' ? 'انقلاب' : t.kind === 'dead' ? 'موت مشوار' : t.kind === 'stage' ? 'مرحلة' : t.kind}
+                      </span>
+                      <span style={{ color: 'var(--text-2)' }}>{t.label}</span>
+                      <span className="num" style={{ color: 'var(--text-3)' }}>{t.stage}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 

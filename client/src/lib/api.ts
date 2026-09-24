@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, Strategy2Feed, Strategy2HistoryResponse } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -492,6 +492,19 @@ const liveOpportunitiesApi = {
   },
   getStrategy2History: (days: number, signal?: AbortSignal) =>
     fetch(`${BASE}/strategy2/history?days=${days}`, { signal }).then(j<Strategy2HistoryResponse>),
+  getStrategy2Directions: (opts: { symbol?: string; dir?: string; stage?: string; dead?: string; agreement?: string; sort?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
+    const qs = new URLSearchParams();
+    if (opts.symbol) qs.set('symbol', opts.symbol);
+    if (opts.dir) qs.set('dir', opts.dir);
+    if (opts.stage) qs.set('stage', opts.stage);
+    if (opts.dead) qs.set('dead', opts.dead);
+    if (opts.agreement) qs.set('agreement', opts.agreement);
+    if (opts.sort) qs.set('sort', opts.sort);
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    if (opts.offset) qs.set('offset', String(opts.offset));
+    const q = qs.toString();
+    return fetch(`${BASE}/strategy2/directions${q ? `?${q}` : ''}`, { signal }).then(j<Strategy2DirectionsResponse>);
+  },
   runStrategy2Scan: () =>
     fetch(`${BASE}/strategy2/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
   runStrategy2Calibration: (body?: { symbols?: string[] }) =>
