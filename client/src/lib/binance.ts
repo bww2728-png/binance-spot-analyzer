@@ -281,8 +281,20 @@ export interface KlineMsg {
    قناة تحديث قائمة الأزواج: بث لحظي من الخادم + احتياطي دوري
    ============================================================ */
 
+/** صف تحديث لحظي لفرصة منشورة (tick كل ثانية من الخادم) */
+export interface LiveOppTickRow {
+  id: string; symbol: string; timeframe: string;
+  price: number; plPct: number; toTpPct: number; toStopPct: number;
+  rNow: number; mfeR: number; maeR: number; ageSec: number; earlyExit?: boolean;
+}
+
+/** صف تحديث لحظي لمنطقة قيد المراقبة */
+export interface LiveWatchTickRow {
+  key: string; symbol: string; timeframe: string; phase: string; toLiquidityAtr: number;
+}
+
 export interface SymbolsUpdateMsg {
-  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | 'live_opportunity_new' | 'live_sweep_detected' | 'live_opportunity_closed' | string;
+  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | 'live_opportunity_new' | 'live_sweep_detected' | 'live_opportunity_closed' | 'live_opportunities_tick' | 'live_calibration_progress' | 'live_calibration_done' | string;
   total?: number;
   changed?: number;
   new_bases?: string[];
@@ -293,6 +305,11 @@ export interface SymbolsUpdateMsg {
   timeframe?: string;
   at?: number;
   opportunity?: { id: string; symbol: string; timeframe: string; entry: number; stop: number; tp: number; rr: number; composite: number; outcome?: string };
+  /* تحديث لحظي للفرص الحية (لقطات كاملة كل ثانية) */
+  opportunities?: LiveOppTickRow[];
+  watching?: LiveWatchTickRow[];
+  /* تقدم المعايرة المتوازية */
+  done?: number;
 }
 
 /** اتصال WebSocket بنفس أصل الخادم (مسار /ws) مع إعادة اتصال تلقائي */

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
+import { useStore } from '../store/useStore';
 import type { BuyFeed, BuyOpportunity, BuyWatchRow, BuyCalibrationSegment } from '../lib/types';
+import type { LiveOppTickRow, LiveWatchTickRow } from '../lib/binance';
 import { TIMEFRAMES } from '../lib/types';
 
 /**
@@ -76,15 +78,21 @@ export default function LiveOpportunitiesScreen() {
 
   useEffect(() => { void load(); }, [load]);
 
-  // تحديث دوري + بث فوري (نفس قناة الخادم الحية)
+  // احتياطي بطيء فقط — التحديث اللحظي يأتي عبر بث tick (كل ثانية) من قناة الخادم
   useEffect(() => {
-    const id = window.setInterval(() => { void load(); }, 8000);
+    const id = window.setInterval(() => { void load(); }, 60_000);
     return () => window.clearInterval(id);
   }, [load]);
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     let ws: WebSocket | null = null;
+    let reloadTimer: number | null = null;
+    // نبضات البث تصل عنقودياً (حتى 30 نبضة سويب في العناقيد) — جلب واحد كل 1.5 ث كحد أقصى
+    const scheduleReload = () => {
+      if (reloadTimer != null) return;
+      reloadTimer = window.setTimeout(() => { reloadTimer = null; void load(); }, 1500);
+    };
     try {
       ws = new WebSocket(`${proto}://${location.host}/ws`);
       ws.onmessage = (ev) => {
@@ -92,12 +100,15 @@ export default function LiveOpportunitiesScreen() {
           const msg = JSON.parse(ev.data as string);
           const t = String(msg?.type ?? '');
           if (t.startsWith('live_opportunity') || t.startsWith('live_sweep') || t.startsWith('live_calibration')) {
-            void load();
+            scheduleReload();
           }
         } catch { /* رسالة غير JSON */ }
       };
     } catch { /* بلا بث — الاعتماد على التحديث الدوري */ }
-    return () => { ws?.close(); };
+    return () => {
+      if (reloadTimer != null) window.clearTimeout(reloadTimer);
+      ws?.close();
+    };
   }, [load]);
 
   useEffect(() => {
@@ -133,6 +144,13 @@ export default function LiveOpportunitiesScreen() {
   const rejected = feed?.rejected ?? [];
   const segments: BuyCalibrationSegment[] = feed?.calibration.segments ?? [];
 
+  /* اللقطة الحية من قناة WebSocket — تُدمج فوق بيانات الجلب */
+  const liveTick = useStore(s => s.liveOppTick);
+  const calibProgress = useStore(s => s.calibrationProgress);
+  const tickOpp = (id: string) => liveTick?.opportunities?.[id] ?? null;
+  const tickWatch = (key: string) => liveTick?.watching?.[key] ?? null;
+  const tickAge = liveTick ? Math.max(0, Math.round((now - liveTick.at) / 1000)) : null;
+
   const byTf = useMemo(() => {
     const map = new Map<string, number>();
     for (const o of opportunities) map.set(o.timeframe, (map.get(o.timeframe) ?? 0) + 1);
@@ -153,6 +171,17 @@ export default function LiveOpportunitiesScreen() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <span
+            className="px-3 py-1.5 rounded-full text-[11px] font-bold"
+            style={{
+              background: tickAge != null && tickAge < 5 ? 'var(--up-soft)' : 'var(--surface-1)',
+              color: tickAge != null && tickAge < 5 ? 'var(--up)' : 'var(--text-3)',
+              border: '1px solid var(--border-1)'
+            }}
+            title="بث WebSocket لحظي من الخادم"
+          >
+            {tickAge != null && tickAge < 5 ? 'بث حي' : 'بلا نبضات'}{tickAge != null ? ` · ${tickAge} ث` : ''}
+          </span>
           <button onClick={() => void runScan()} className="px-4 py-2 rounded-lg text-[12px] font-bold" style={{ background: 'var(--accent)', color: '#fff' }}>دورة مسح الآن</button>
           <button onClick={() => void runCalibration()} className="px-4 py-2 rounded-lg text-[12px] font-bold" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>تشغيل المعايرة</button>
         </div>
@@ -185,7 +214,7 @@ export default function LiveOpportunitiesScreen() {
           <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>المعايرة</div>
           <div className="text-[12px] font-bold" style={{ color: feed?.calibration.busy ? 'var(--accent)' : 'var(--up)' }}>
             {feed?.calibration.busy
-              ? `جارٍ ${feed.calibration.progress ? `${feed.calibration.progress.done}/${feed.calibration.progress.total}` : ''}`
+              ? `جارٍ ${calibProgress ? `${calibProgress.done}/${calibProgress.total}` : feed.calibration.progress ? `${feed.calibration.progress.done}/${feed.calibration.progress.total}` : ''}`
               : feed?.calibration.at ? `جاهزة · ${feed.calibration.trades} صفقة` : 'بانتظار أول معايرة'}
           </div>
           <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>آخر تحديث {ago(feed?.calibration.at, now)}</div>
@@ -235,7 +264,7 @@ export default function LiveOpportunitiesScreen() {
             </div>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
-            {opportunities.map(o => <OpportunityCard key={o.id} op={o} now={now} targetRate={targetRate} onChart={() => setChartId(o.id)} />)}
+            {opportunities.map(o => <OpportunityCard key={o.id} op={o} now={now} targetRate={targetRate} onChart={() => setChartId(o.id)} tick={tickOpp(o.id)} />)}
           </div>
         </>
       )}
@@ -261,7 +290,7 @@ export default function LiveOpportunitiesScreen() {
                   </tr>
                 </thead>
                 <tbody>
-                  {watching.map(w => <WatchRow key={`${w.symbol}|${w.timeframe}|${w.zoneId}`} row={w} />)}
+                  {watching.map(w => <WatchRow key={`${w.symbol}|${w.timeframe}|${w.zoneId}`} row={w} tick={tickWatch(`${w.symbol}|${w.timeframe}|${w.zoneId}`)} />)}
                 </tbody>
               </table>
             </div>
@@ -356,27 +385,38 @@ export default function LiveOpportunitiesScreen() {
   );
 }
 
-function WatchRow({ row }: { row: BuyWatchRow }) {
+function WatchRow({ row, tick }: { row: BuyWatchRow; tick: LiveWatchTickRow | null }) {
+  // الطور اللحظي من البث يتقدم على المرجع الثابت — يُستخدم متى وصلت نبضة أحدث
+  const livePhase = tick?.phase ?? row.phase;
+  const liveAtr = tick?.toLiquidityAtr ?? row.toLiquidityAtr;
   return (
     <tr style={{ borderTop: '1px solid var(--border-1)' }}>
       <td className="px-3 py-2 font-bold num" style={{ color: 'var(--text-1)' }}>{row.symbol}</td>
       <td className="px-3 py-2 num" style={{ color: 'var(--text-3)' }}>{row.timeframe}</td>
-      <td className="px-3 py-2 text-[11px] font-bold" style={{ color: phaseColor[row.phase] ?? 'var(--text-2)' }}>
-        {phaseLabel[row.phase] ?? row.phase}
+      <td className="px-3 py-2 text-[11px] font-bold" style={{ color: phaseColor[livePhase] ?? 'var(--text-2)' }}>
+        {phaseLabel[livePhase] ?? livePhase}
+        {tick && <span className="text-[10px]" style={{ color: 'var(--up)' }} title="تحديث لحظي من البث"> ●</span>}
         {row.staleSweep && <span className="text-[10px]" style={{ color: 'var(--text-3)' }}> · سويب قديم</span>}
       </td>
       <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{fmt(row.referenceLevel)}</td>
       <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{fmt(row.liquidityLevel)}</td>
-      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{row.toLiquidityAtr?.toFixed(2) ?? '—'}</td>
+      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{liveAtr?.toFixed(2) ?? '—'}</td>
       <td className="px-3 py-2 num" style={{ color: row.attempts > 0 ? 'var(--warn)' : 'var(--text-3)' }}>{row.attempts}</td>
       <td className="px-3 py-2 text-[11px]" style={{ color: 'var(--text-3)' }}>{row.reason ?? '—'}</td>
     </tr>
   );
 }
 
-function OpportunityCard({ op, now, targetRate, onChart }: { op: BuyOpportunity; now: number; targetRate: number; onChart: () => void }) {
+function OpportunityCard({ op, now, targetRate, onChart, tick }: { op: BuyOpportunity; now: number; targetRate: number; onChart: () => void; tick: LiveOppTickRow | null }) {
   const rateOk = op.calibratedWinRate >= targetRate;
   const outcomeColor = op.outcome === 'target' ? 'var(--up)' : op.outcome === 'stop' ? 'var(--down)' : 'var(--accent)';
+  // الحالة اللحظية من البث (كل ثانية): السعر الحالي ومسافة الهدف/الوقف وR الحالي
+  const price = tick?.price ?? op.entry;
+  const plPct = tick?.plPct ?? 0;
+  const toTp = tick?.toTpPct ?? 100;
+  const toStop = tick?.toStopPct ?? 100;
+  const rNow = tick?.rNow ?? 0;
+  const plColor = plPct >= 0 ? 'var(--up)' : 'var(--down)';
   return (
     <div className="rounded-xl p-3 space-y-2" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
       <div className="flex items-center justify-between gap-2">
@@ -384,10 +424,29 @@ function OpportunityCard({ op, now, targetRate, onChart }: { op: BuyOpportunity;
           <span className="font-bold num text-[14px]" style={{ color: 'var(--text-1)' }}>{op.symbol}</span>
           <span className="px-2 py-0.5 rounded-md text-[10px] num" style={{ background: 'var(--surface-0)', color: 'var(--text-2)' }}>{op.timeframe}</span>
           <span className="px-2 py-0.5 rounded-md text-[10px]" style={{ background: 'var(--up-soft)', color: 'var(--up)' }}>شراء</span>
+          {tick && <span className="text-[10px]" style={{ color: 'var(--up)' }} title="بث لحظي كل ثانية">●</span>}
         </div>
         <span className="num font-bold text-[13px]" style={{ color: outcomeColor }}>
           {op.outcome === 'target' ? 'وصل الهدف' : op.outcome === 'stop' ? 'ضرب الوقف' : `درجة ${op.composite}`}
         </span>
+      </div>
+
+      {/* الشريط اللحظي: السعر الحالي بين الوقف والهدف */}
+      <div className="rounded-lg px-2.5 py-2 space-y-1.5" style={{ background: 'var(--surface-0)' }}>
+        <div className="flex items-center justify-between text-[11px] num">
+          <span style={{ color: 'var(--down)' }}>وقف {fmt(op.stop)}</span>
+          <span className="font-bold" style={{ color: plColor }}>
+            {fmt(price)} · {plPct >= 0 ? '+' : ''}{plPct.toFixed(2)}%{tick ? ` · ${rNow >= 0 ? '+' : ''}${rNow.toFixed(2)}R` : ''}
+          </span>
+          <span style={{ color: 'var(--up)' }}>هدف {fmt(op.tp)}</span>
+        </div>
+        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--down-soft)', direction: 'ltr' }}>
+          <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, 100 - toTp))}%`, background: 'var(--up)' }} />
+        </div>
+        <div className="flex justify-between text-[10px] num" style={{ color: 'var(--text-3)', direction: 'ltr' }}>
+          <span>{toTp.toFixed(2)}% للهدف</span>
+          <span>{toStop.toFixed(2)}% للوقف</span>
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-2 text-[11px]">
@@ -414,7 +473,15 @@ function OpportunityCard({ op, now, targetRate, onChart }: { op: BuyOpportunity;
         <span>لمسات المنطقة: {op.zoneTouches}</span>
         {op.profile && <span>VAH {fmt(op.profile.vah, 6)} · POC {fmt(op.profile.poc, 6)}</span>}
         <span>قاع السويب {fmt(op.sweepLow)}</span>
+        {tick && <span>MFE {tick.mfeR.toFixed(2)}R · MAE {tick.maeR.toFixed(2)}R</span>}
+        {tick && <span>عمر الصفقة {tick.ageSec < 60 ? `${tick.ageSec} ث` : `${Math.round(tick.ageSec / 60)} د`}</span>}
       </div>
+
+      {tick?.earlyExit && (
+        <div className="rounded-lg px-2.5 py-1.5 text-[11px] font-bold" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>
+          إشارة خروج مبكر: شمعة أُغلقت تحت قاع السويب المحمي
+        </div>
+      )}
 
       <ul className="text-[11px] space-y-0.5 list-disc pr-4" style={{ color: 'var(--text-2)' }}>
         {op.reasons.slice(0, 5).map((r, i) => <li key={i}>{r}</li>)}

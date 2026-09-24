@@ -9,7 +9,6 @@ import { researchSymbol } from './research.mjs';
 import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES, bookSignals } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
 import { runPairBacktest, learnOnTrades, loadKlinesPaginated } from './backtest/engine.mjs';
-import { discoverLiveOpportunities } from './backtest/live.mjs';
 import { regimeGate } from './backtest/regime.mjs';
 import { buildPlan, checkPlan, kellyF, fractionalKelly, positionUnits } from './backtest/risk.mjs';
 import { assembleCase, DECISION_ACTORS } from './cases.mjs';
@@ -23,6 +22,7 @@ import {
 } from './liquidity-zones/engine.mjs';
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
+import { createMarketStreams } from './market/streams.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1148,77 +1148,13 @@ app.post('/api/backtest/run-custom', handle(async (req, res) => {
   })();
 }));
 
-// ==================== محرك الفرص الحية المستقل (يلف بالتوازي — لا يعيق المحركات الأخرى) ====================
-
-const liveState = { busy: false, rotation: 0, pairsDone: 0, pairsTotal: 0, opportunities: [], updatedAt: null, error: null };
-
-// اللفة: كل المستهدفات × كل الفريمات — نفس الوحدات الحية حرفياً (profile + location + candidates + score)
-const runLiveRotation = async () => {
-  if (liveState.busy) return;
-  liveState.busy = true;
-  const liveOut = new Map(); // (رمز|فريم) -> فرق العملة — البناء يُجري تلفزيياً
-  // الترتيب: بترتيب العمل — أول عملة تم العمل عليها أولاً (Map يحترم ترتيب الإلحاق = ترتيب التنفيذ)
-  const rebuild = () => [...liveOut.values()].flat();
-  try {
-    const targets = await resolveTargets();
-    if (!targets.length) { liveState.error = 'لا مستهدفات (لاحلال/لا غير-باركود)'; return; }
-    liveState.rotation += 1;
-    const rotNo = liveState.rotation;
-    liveState.pairsDone = 0;
-    liveState.pairsTotal = targets.length;
-    liveState.error = null;
-    const calibration = await readCalibration();
-    const learnedRules = backtestState.lastRun?.learn?.rules ?? null;
-    // الأسعار الحالية لكل الرموز (نداء واحد) — المسافة الحية من منطقة
-    const prices = await db.binance.tickerPrices(targets).catch(() => ({}));
-    for (const symbol of targets) {
-      for (const tf of ALL_TIMEFRAMES) {
-        try {
-          const r = await discoverLiveOpportunities(db, { symbol, timeframe: tf, calibration, learnedRules, price: prices[symbol] ?? null, capital: 10000 });
-          liveOut.set(`${symbol}|${tf}`, (r.opportunities || []).map(o => ({ ...o, rotation: rotNo })));
-        } catch { /* زوج فاشل لا يوقف اللَّفة */ }
-        await new Promise(r => setTimeout(r, 300));
-      }
-      // تحديث تلفزي: الفرص تظهر فور اكتمال كل عملة (لا انتظار نهاية اللفة)
-      liveState.opportunities = rebuild();
-      liveState.updatedAt = Date.now();
-      liveState.pairsDone += 1;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    liveState.opportunities = rebuild();
-    liveState.updatedAt = Date.now();
-    console.log(`[live] rotation ${rotNo} done: ${liveState.opportunities.length} opportunities | pairs ${liveState.pairsDone}/${liveState.pairsTotal}`);
-    broadcast({ type: 'live_opportunities' });
-    broadcast({ type: 'live_opportunities' });
-  } catch (e) {
-    liveState.error = e.message;
-    console.error('[live] rotation failed:', e.message);
-  } finally {
-    liveState.busy = false;
-  }
-};
-
-// الحلقة المستمرة: تنتهي لفَّة → التالية فوراً (مهلة 5 ثوانٍ فقط — لا مدة زمنية معتبرة)
-const runLiveLoop = async () => {
-  for (;;) {
-    await runLiveRotation();
-    await new Promise(r => setTimeout(r, 5000));
-  }
-};
-setTimeout(() => void runLiveLoop(), 45_000); // يلف بالتوازي مع المحركات الأخرى — ينطلق عند بدء الخادم
-
-app.get('/api/live/opportunities', handle(async (_req, res) => {
-  res.json({
-    busy: liveState.busy,
-    rotation: liveState.rotation,
-    pairsDone: liveState.pairsDone,
-    pairsTotal: liveState.pairsTotal,
-    opportunities: liveState.opportunities.slice(0, 120),
-    total: liveState.opportunities.length,
-    updatedAt: liveState.updatedAt,
-    error: liveState.error
-  });
-}));
+// ═══ طبقة بيانات السوق الحية (WebSocket) — أسعار كل السوق + شموع + تدفق صفقات ═══
+// مصدر واحد لكل المستهلكين: صفر نداءات REST للأسعار، شموع حية، CVD/فقاعات لحظية.
+const marketStreams = createMarketStreams({
+  seedKlines: (symbol, timeframe, limit) => db.binance.klines(symbol, timeframe, limit),
+  log: console
+});
+setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
 
 // ═══ محرك «الفرص الحية» — دخول شراء عبر سويب مناطق SSL + أدوات الأوردر فلو ═══
 // مصدر المناطق: مخزون محرك مناطق السيولة الحي (بلا إعادة كشف). التتبع مستمر بلا انقطاع،
@@ -1252,6 +1188,7 @@ const liveOppEngine = createLiveOpportunityEngine({
   fetchBookSignals: (symbol) => bookSignals(symbol),
   zoneSource: () => liquidityState.liveResults,
   resolveTargets: () => resolveTargets(),
+  market: marketStreams,
   readCalibration: readLiveCalibration,
   broadcast: (msg) => broadcast(msg),
   persist: (row) => saveLiquidityEvent(
@@ -1280,6 +1217,21 @@ app.get('/api/live-opportunities', handle(async (req, res) => {
     total: filter(feed.opportunities).length,
     watching: filter(feed.watching),
     watchingTotal: filter(feed.watching).length
+  });
+}));
+
+// المسار القديم (كان يخدم اللفة القديمة) — يوجَّه الآن لمخزن المحرك الحي نفسه
+app.get('/api/live/opportunities', handle(async (_req, res) => {
+  const feed = liveOppEngine.getFeed();
+  res.json({
+    busy: feed.busy,
+    rotation: feed.cycle,
+    pairsDone: feed.pairsTotal,
+    pairsTotal: feed.pairsTotal,
+    opportunities: feed.opportunities,
+    total: feed.total,
+    updatedAt: feed.updatedAt,
+    error: feed.error
   });
 }));
 

@@ -3,7 +3,7 @@ import { api } from '../lib/api';
 import type { Analysis, BarcodeScan, CaseRow, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
-import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol } from '../lib/binance';
+import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol, type LiveOppTickRow, type LiveWatchTickRow } from '../lib/binance';
 import { queueZoneCapture } from '../lib/autoCapture';
 import { evaluateShariah } from '../lib/shariah';
 
@@ -89,6 +89,9 @@ interface StoreState {
   casesLoaded: boolean;
   caseFilter: string | null;
   archiveSection: ArchiveSection;
+  /* اللقطة الحية للفرص المنشورة والمناطق قيد المراقبة (tick كل ثانية من الخادم عبر WS) */
+  liveOppTick: { at: number; opportunities: Record<string, LiveOppTickRow>; watching: Record<string, LiveWatchTickRow> } | null;
+  calibrationProgress: { done: number; total: number } | null;
 
   init: () => Promise<void>;
   syncSymbols: () => Promise<void>;
@@ -172,6 +175,8 @@ export const useStore = create<StoreState>((set, get) => ({
   casesError: null,
   caseFilter: null,
   archiveSection: 'cases',
+  liveOppTick: null,
+  calibrationProgress: null,
 
   init: async () => {
     if (!streams) {
@@ -260,6 +265,17 @@ export const useStore = create<StoreState>((set, get) => ({
           const o = msg.opportunity as { symbol: string; timeframe: string; outcome: string };
           const win = o.outcome === 'target';
           get().pushToast(`نتيجة فرصة ${o.symbol} (${o.timeframe}): ${win ? 'وصلت الهدف' : 'ضربت الوقف'}`, win ? 'info' : 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: win ? 'info' : 'alert' });
+        } else if (msg.type === 'live_opportunities_tick') {
+          // لقطة كاملة كل ثانية: الصفقات المنشورة + المناطق قيد المراقبة
+          const opportunities: Record<string, LiveOppTickRow> = {};
+          for (const r of msg.opportunities ?? []) opportunities[r.id] = r;
+          const watching: Record<string, LiveWatchTickRow> = {};
+          for (const w of msg.watching ?? []) watching[w.key] = w;
+          set({ liveOppTick: { at: msg.at ?? Date.now(), opportunities, watching } });
+        } else if (msg.type === 'live_calibration_progress') {
+          set({ calibrationProgress: { done: msg.done ?? 0, total: msg.total ?? 0 } });
+        } else if (msg.type === 'live_calibration_done') {
+          set({ calibrationProgress: null });
         }
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));
