@@ -13,7 +13,10 @@ const TIER_STYLE: Record<string, { label: string; color: string }> = {
 
 const OUTCOME_STYLE: Record<string, { label: string; color: string }> = {
   target: { label: 'الهدف', color: '#0a7f6a' },
-  stop: { label: 'الوقف', color: '#dc2626' }
+  target2: { label: 'الهدف الثاني', color: '#0a7f6a' },
+  stop: { label: 'الوقف', color: '#dc2626' },
+  invalidated: { label: 'فشل الدخول', color: '#dc2626' },
+  expired: { label: 'انتهت', color: '#8a8f98' }
 };
 
 const fmt = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(d));
@@ -28,7 +31,13 @@ function csvCell(v: string): string {
   return `"${v.replace(/"/g, '""')}"`;
 }
 
-export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number }) {
+export default function LiveDashboard({ refreshKey = 0, fetchHistory, title = 'لوحة التحكم', csvPrefix = 'live-opportunities' }: {
+  refreshKey?: number;
+  /** مصدر بيانات بديل (لوحة «الفرص الحية — استراتيجيتي») — الافتراضي سجل الفرص القديمة */
+  fetchHistory?: (signal?: AbortSignal) => Promise<BuyHistoryResponse>;
+  title?: string;
+  csvPrefix?: string;
+}) {
   const [history, setHistory] = useState<BuyHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,13 +51,14 @@ export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number 
   const load = useCallback(async () => {
     try {
       setError(null);
-      setHistory(await api.getBuyHistoryEvents(90));
+      const fetcher = fetchHistory ?? ((s?: AbortSignal) => api.getBuyHistoryEvents(90, s));
+      setHistory(await fetcher());
     } catch (e) {
       setError(e instanceof Error ? e.message : 'فشل جلب السجل');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchHistory]);
 
   useEffect(() => { void load(); }, [load, refreshKey]);
   useEffect(() => {
@@ -72,13 +82,13 @@ export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number 
     const now = Date.now();
     const weekAgo = now - 7 * 86_400_000;
     const resolved = all.filter(e => e.outcome != null);
-    const wins = resolved.filter(e => e.outcome === 'target').length;
+    const wins = resolved.filter(e => e.outcome === 'target' || e.outcome === 'target2').length;
     const byTier: Record<string, { n: number; w: number }> = {};
     for (const e of resolved) {
       const t = e.tier ?? 'probationary';
       byTier[t] = byTier[t] ?? { n: 0, w: 0 };
       byTier[t].n += 1;
-      if (e.outcome === 'target') byTier[t].w += 1;
+      if (e.outcome === 'target' || e.outcome === 'target2') byTier[t].w += 1;
     }
     const durations = resolved.map(e => e.durationMs).filter((v): v is number => v != null && v > 0);
     return {
@@ -108,7 +118,7 @@ export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number 
       const k = localDayKey(e.ts);
       const cell = byDay.get(k) ?? { total: 0, target: 0, stop: 0, open: 0 };
       cell.total += 1;
-      if (e.outcome === 'target') cell.target += 1;
+      if (e.outcome === 'target' || e.outcome === 'target2') cell.target += 1;
       else if (e.outcome === 'stop') cell.stop += 1;
       else cell.open += 1;
       byDay.set(k, cell);
@@ -128,7 +138,7 @@ export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number 
     for (const e of all) {
       const h = new Date(e.ts).getHours();
       arr[h].total += 1;
-      if (e.outcome === 'target') arr[h].target += 1;
+      if (e.outcome === 'target' || e.outcome === 'target2') arr[h].target += 1;
     }
     return arr;
   }, [all]);
@@ -152,7 +162,7 @@ export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number 
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `live-opportunities-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `${csvPrefix}-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -162,6 +172,7 @@ export default function LiveDashboard({ refreshKey = 0 }: { refreshKey?: number 
 
   return (
     <div className="space-y-4">
+      {title && <div className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>{title}</div>}
       {/* KPIs */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
         <KpiCard label="إجمالي الفرص (90 يوماً)" value={String(kpis.total)} color="var(--accent)" />

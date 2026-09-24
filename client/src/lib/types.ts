@@ -499,7 +499,7 @@ export interface BuyOpportunity {
   tier?: "qualified" | "probationary" | null;
   distancePct: number;
   reasons: string[];
-  outcome: "target" | "stop" | null;
+  outcome: "target" | "target2" | "stop" | "invalidated" | "expired" | null;
   outcomeAt: number | null;
   outcomePrice: number | null;
   rotation: number;
@@ -557,7 +557,7 @@ export interface BuyHistoryEvent {
   composite: number | null;
   calibratedWinRate: number | null;
   detectedAt: number | null;
-  outcome: "target" | "stop" | null;
+  outcome: "target" | "target2" | "stop" | "invalidated" | "expired" | null;
   resolvedAt: number | null;
   durationMs: number | null;
   mfeR: number | null;
@@ -611,4 +611,133 @@ export interface BuyStatus {
   updatedAt: number | null;
   error: string | null;
   calibration: { at: number | null; busy: boolean; trades: number; progress: { done: number; total: number } | null; segments: number; error: string | null };
+}
+
+/* ═══ الفرص الحية — استراتيجيتي (محرك SMC المستقل) ═══ */
+
+export interface Strategy2Opportunity {
+  id: string;
+  symbol: string;
+  tf: string;
+  model: 1 | 2 | null;
+  htfDirection: 'up' | 'down' | 'range' | null;
+  afterPremium: boolean | null;
+  tier: 'qualified' | 'probationary' | null;
+  segmentKey: string | null;
+  calibratedWinRate: number | null;
+  wilsonLB: number | null;
+  detectedAt: number;
+  entryTimeMs: number;
+  price: number;
+  entry: number;
+  stop: number;
+  tp1: number;
+  tp2: number | null;
+  stopRef: number;
+  rr: number | null;
+  distancePct: number | null;
+  reasons: string[];
+  phase: string;
+  outcome: 'target' | 'target2' | 'stop' | 'invalidated' | 'expired' | null;
+  outcomeAt: number | null;
+  outcomePrice: number | null;
+  mfeR?: number;
+  maeR?: number;
+  restored?: boolean;
+  reconciled?: boolean;
+}
+
+export interface Strategy2TickRow {
+  id: string;
+  symbol: string;
+  tf: string;
+  price: number | null;
+  plPct: number | null;
+  toTp1Pct: number | null;
+  rNow: number | null;
+  mfeR: number;
+  ageSec: number;
+}
+
+export interface Strategy2Segment {
+  key: string;
+  trades: number;
+  wins: number;
+  winRate: number | null;
+  smoothedWinRate: number;
+  wilsonLB: number;
+  avgRR: number | null;
+  tier: 'qualified' | 'probationary' | 'weak';
+}
+
+export interface Strategy2RejectedRow {
+  at: number;
+  symbol?: string;
+  tf?: string;
+  model?: number | null;
+  reason: string;
+}
+
+export interface Strategy2FailureRow {
+  key: string;
+  count: number;
+  last: number | null;
+  message: string | null;
+}
+
+export interface Strategy2Feed {
+  busy: boolean;
+  cycle: number;
+  scope: string;
+  pairsTotal: number;
+  analyzing: number;
+  waitingPhases: Record<string, number>;
+  updatedAt: number | null;
+  error: string | null;
+  opportunities: Strategy2Opportunity[];
+  total: number;
+  filtered?: boolean;
+  rejected: Strategy2RejectedRow[];
+  failures: Strategy2FailureRow[];
+  stats: { published: number; resolved: number; wins: number; losses: number; liveWinRate: number | null; restored: number; reconciled: number };
+  calibration: {
+    at: number | null;
+    busy: boolean;
+    trades: number;
+    progress: { done: number; total: number } | null;
+    segments: Strategy2Segment[];
+    samplePairs?: number;
+    error: string | null;
+    targetWinRate: number;
+  };
+}
+
+export interface Strategy2HistoryEvent {
+  kind: 'published' | 'resolved';
+  ts: number;
+  id: string | null;
+  symbol: string;
+  tf: string | null;
+  model: number | null;
+  htfDirection: string | null;
+  afterPremium: boolean | null;
+  tier: string | null;
+  entry: number | null;
+  stop: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  rr: number | null;
+  detectedAt: number | null;
+  outcome: string | null;
+  resolvedAt: number | null;
+  durationMs: number | null;
+  mfeR: number | null;
+  maeR: number | null;
+}
+
+export interface Strategy2HistoryResponse {
+  days: number;
+  timeline: Strategy2HistoryEvent[];
+  active: { id: string; symbol: string; tf: string; tier: string | null; detectedAt: number }[];
+  generatedAt: number;
 }

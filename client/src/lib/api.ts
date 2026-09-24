@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, Strategy2Feed, Strategy2HistoryResponse } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -474,7 +474,28 @@ const liveOpportunitiesApi = {
     fetch(`${BASE}/live-opportunities/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
   runBuyCalibration: (body?: { symbols?: string[]; timeframes?: string[] }) =>
     fetch(`${BASE}/live-opportunities/calibrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(j<{ ok: boolean; started: boolean; symbols: number | null; timeframes: number | null }>),
-  buyOpportunityChartUrl: (id: string) => `${BASE}/live-opportunities/${encodeURIComponent(id)}/screenshot`
+  buyOpportunityChartUrl: (id: string) => `${BASE}/live-opportunities/${encodeURIComponent(id)}/screenshot`,
+
+  /* ---- الفرص الحية — استراتيجيتي (محرك SMC المستقل) ---- */
+  getStrategy2Feed: (opts: { symbol?: string; tf?: string; model?: string; tier?: string; htfDir?: string; sort?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
+    const qs = new URLSearchParams();
+    if (opts.symbol) qs.set('symbol', opts.symbol);
+    if (opts.tf) qs.set('tf', opts.tf);
+    if (opts.model) qs.set('model', opts.model);
+    if (opts.tier) qs.set('tier', opts.tier);
+    if (opts.htfDir) qs.set('htfDir', opts.htfDir);
+    if (opts.sort) qs.set('sort', opts.sort);
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    if (opts.offset) qs.set('offset', String(opts.offset));
+    const q = qs.toString();
+    return fetch(`${BASE}/strategy2/feed${q ? `?${q}` : ''}`, { signal }).then(j<Strategy2Feed>);
+  },
+  getStrategy2History: (days: number, signal?: AbortSignal) =>
+    fetch(`${BASE}/strategy2/history?days=${days}`, { signal }).then(j<Strategy2HistoryResponse>),
+  runStrategy2Scan: () =>
+    fetch(`${BASE}/strategy2/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
+  runStrategy2Calibration: (body?: { symbols?: string[] }) =>
+    fetch(`${BASE}/strategy2/calibrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(j<{ ok: boolean; started: boolean; symbols: number | null }>)
 };
 
 export interface MarketReadZone { id: string; kind: string; level: number; confidence: number; touches: number; state: string; }

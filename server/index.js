@@ -22,6 +22,7 @@ import {
 } from './liquidity-zones/engine.mjs';
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
+import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams } from './market/streams.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -993,9 +994,10 @@ app.get('/api/backtest/status', handle(async (_req, res) => {
     targets: targets.slice(0, 20),
     customBusy: backtestState.customBusy,
     error: backtestState.error,
-    liveRotation: liveState.rotation,
-    livePairsDone: liveState.pairsDone,
-    livePairsTotal: liveState.pairsTotal
+    // اللفة القديمة أُزيلت — المحرك الحي البديل هو liveOppEngine (إصلاح عطل liveState 500)
+    liveRotation: liveOppEngine?.getStatus?.().cycle ?? null,
+    livePairsDone: liveOppEngine?.getFeed?.().pairsTotal ?? null,
+    livePairsTotal: liveOppEngine?.getFeed?.().pairsTotal ?? null
   });
 }));
 
@@ -1204,6 +1206,152 @@ const liveOppEngine = createLiveOpportunityEngine({
   log: console
 });
 setTimeout(() => liveOppEngine.start(), 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
+
+// ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══
+// هيكل خارجي/داخلي · بريميوم/ديسكاونت · choch up · نموذجا دخول · نقاط فشل موثقة.
+// يشارك طبقة البيانات الحية (tenant مستقل) ويحترم محدد الطلبات الموحد.
+
+const readStrategy2Calibration = async () => {
+  try {
+    const row = await db.events.strategy2Calibration().catch(() => null);
+    if (!row) return null;
+    const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
+    const data = meta?.opportunity ?? meta ?? {};
+    return { at: Number(row.ts) || null, trades: data.trades ?? 0, segments: data.segments ?? [] };
+  } catch {
+    return null;
+  }
+};
+
+const readStrategy2PublishedEvents = async () => {
+  try {
+    const rows = await db.events.strategy2Events(0, 2000);
+    return rows.map(r => {
+      let meta = {};
+      try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
+      const o = meta.opportunity ?? {};
+      return {
+        kind: r.type === 'strategy2_published' ? 'published' : 'resolved',
+        id: o.id ?? null, ts: r.ts, ...o
+      };
+    }).filter(e => e.id);
+  } catch {
+    return [];
+  }
+};
+
+const strategy2Engine = createStrategyEngine({
+  resolveTargets: () => resolveTargets(),
+  fetchRawKlines: (symbol, timeframe, limit, startTime) => db.binance.klines(symbol, timeframe, limit, startTime),
+  fetchPrices: async (symbols) => {
+    const all = await db.binance.allTickerPrices().catch(() => null);
+    if (all && Object.keys(all).length) {
+      const out = {};
+      for (const s of symbols) if (Number.isFinite(all[s])) out[s] = all[s];
+      return out;
+    }
+    return db.binance.tickerPrices(symbols).catch(() => ({}));
+  },
+  market: marketStreams,
+  readCalibration: readStrategy2Calibration,
+  readPublishedEvents: readStrategy2PublishedEvents,
+  broadcast: (msg) => broadcast(msg),
+  persist: (row) => saveLiquidityEvent(
+    row?.closed ? 'strategy2_resolved' : row?.type === 'strategy2_calibration' ? 'strategy2_calibration' : 'strategy2_published',
+    { symbol: row?.symbol || 'GLOBAL' },
+    row?.type === 'strategy2_calibration'
+      ? `معايرة استراتيجيتي: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
+      : row?.closed
+        ? `نتيجة فرصة ${row.symbol} ${row.tf}: ${row.outcome === 'target' ? 'وصل الهدف' : row.outcome === 'target2' ? 'وصل الهدف الثاني' : row.outcome === 'invalidated' ? 'فشل نقطة الدخول' : 'ضرب الوقف'}`
+        : `فرصة استراتيجيتي ${row.symbol} ${row.tf} — نموذج ${row.model} / R:R ${row.rr}`,
+    { opportunity: row }
+  ),
+  log: console
+});
+setTimeout(() => strategy2Engine.start(), 95_000); // بعد محرك الفرص الأول (اشتراكات WS متسلسلة)
+
+app.get('/api/strategy2/feed', handle(async (req, res) => {
+  const feed = strategy2Engine.getFeed();
+  const q = {
+    symbol: req.query.symbol, tf: req.query.tf, model: req.query.model,
+    tier: req.query.tier, htfDir: req.query.htfDir,
+    sort: req.query.sort, limit: req.query.limit, offset: req.query.offset
+  };
+  const { rows, total } = strategy2Engine.queryFeed(q);
+  res.json({ ...feed, opportunities: rows, total, filtered: total !== feed.total });
+}));
+
+app.get('/api/strategy2/status', handle(async (_req, res) => {
+  res.json(strategy2Engine.getStatus());
+}));
+
+app.get('/api/strategy2/calibration', handle(async (_req, res) => {
+  res.json(strategy2Engine.getCalibration());
+}));
+
+app.get('/api/strategy2/history', handle(async (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
+  const sinceTs = Date.now() - days * 86_400_000;
+  const rows = await db.events.strategy2Events(sinceTs).catch(() => []);
+  const events = [];
+  for (const r of rows) {
+    let meta = {};
+    try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
+    const o = meta.opportunity ?? {};
+    events.push({
+      kind: r.type === 'strategy2_published' ? 'published' : 'resolved',
+      ts: r.ts, id: o.id ?? null,
+      symbol: o.symbol ?? r.symbol, tf: o.tf ?? null,
+      model: o.model ?? null, htfDirection: o.htfDirection ?? null,
+      afterPremium: o.afterPremium ?? null,
+      tier: o.tier ?? null, segmentKey: o.segmentKey ?? null,
+      entry: o.entry ?? null, stop: o.stop ?? null, tp1: o.tp1 ?? null, tp2: o.tp2 ?? null,
+      rr: o.rr ?? null,
+      detectedAt: o.detectedAt ?? (r.type === 'strategy2_published' ? r.ts : null),
+      outcome: r.type === 'strategy2_resolved' ? (o.outcome ?? null) : null,
+      resolvedAt: r.type === 'strategy2_resolved' ? (o.outcomeAt ?? r.ts) : null,
+      durationMs: r.type === 'strategy2_resolved' && o.outcomeAt && o.detectedAt
+        ? Math.max(0, o.outcomeAt - o.detectedAt) : null,
+      mfeR: o.mfeR ?? null, maeR: o.maeR ?? null
+    });
+  }
+  const resolvedById = new Map(events.filter(e => e.kind === 'resolved' && e.id).map(e => [e.id, e]));
+  const timeline = [];
+  for (const e of events) {
+    if (e.kind !== 'published') continue;
+    const r = resolvedById.get(e.id);
+    timeline.push({
+      ...e,
+      outcome: r?.outcome ?? null,
+      resolvedAt: r?.resolvedAt ?? null,
+      durationMs: r?.durationMs ?? null,
+      mfeR: Math.max(e.mfeR ?? 0, r?.mfeR ?? 0) || null,
+      maeR: Math.min(e.maeR ?? 0, r?.maeR ?? 0) || null
+    });
+  }
+  timeline.sort((a, b) => b.ts - a.ts);
+  res.json({
+    days,
+    timeline,
+    active: strategy2Engine.getFeed().opportunities.map(o => ({
+      id: o.id, symbol: o.symbol, tf: o.tf, tier: o.tier ?? null, detectedAt: o.detectedAt
+    })),
+    generatedAt: Date.now()
+  });
+}));
+
+app.post('/api/strategy2/run', handle(async (_req, res) => {
+  res.json({ ok: true, started: true });
+  void strategy2Engine.runCycle().catch(() => undefined);
+}));
+
+app.post('/api/strategy2/calibrate', handle(async (req, res) => {
+  const symbols = Array.isArray(req.body?.symbols) && req.body.symbols.length
+    ? req.body.symbols.map(s => String(s).toUpperCase().trim()).filter(s => /^[A-Z0-9]{4,20}$/.test(s))
+    : null;
+  res.json({ ok: true, started: true, symbols: symbols?.length ?? null });
+  void strategy2Engine.runCalibration({ symbols }).catch(() => undefined);
+}));
 
 app.get('/api/live-opportunities', handle(async (req, res) => {
   const scope = String(req.query.scope || '').trim();

@@ -55,9 +55,13 @@ export function createMarketStreams({
   const trades = new Map();          // symbol → [{price, qty, isBuyerMaker, at}]
   let candleCloseHandlers = new Set();
 
-  /* ---- الاشتراكات المطلوبة (يديرها المحرك) ---- */
-  let wantedKlines = new Set();      // "SYM|tf"
-  let wantedFlow = new Set();        // symbol
+  /* ---- الاشتراكات المطلوبة (مستأجرون متعددون: محرك الفرص + محرك الاستراتيجية) ----
+   * كل مستهلك يسجّل طلباته بمفتاح tenant، والاتحاد يُشترك به فعلياً بحد أقصى عادل.
+   * key → Set (أول مستأجر يملك السهم) — setKlineSubscriptions يبقى توافقاً قديماً (tenant=default). */
+  const klineWants = new Map();      // tenant → Set("SYM|tf")
+  const flowWants = new Map();       // tenant → Set(symbol)
+  let wantedKlines = new Set();      // الاتحاد الفعلي
+  let wantedFlow = new Set();
   let activeKlines = new Set();
   let activeFlow = new Set();
 
@@ -386,17 +390,31 @@ export function createMarketStreams({
       }
       return out;
     },
-    setKlineSubscriptions(keys) {
+    setKlineSubscriptions(keys, tenant = 'default') {
       const next = new Set(keys ?? []);
-      if (next.size === wantedKlines.size && [...next].every(k => wantedKlines.has(k))) return;
-      wantedKlines = next;
+      const prev = klineWants.get(tenant);
+      if (prev && prev.size === next.size && [...next].every(k => prev.has(k))) return;
+      klineWants.set(tenant, next);
+      // الاتحاد عبر المستأجرين — مع أولوية طلب الأول (أقدم مستأجر يفوز عند التجاوز)
+      const merged = [];
+      const seen = new Set();
+      for (const set of klineWants.values()) {
+        for (const k of set) if (!seen.has(k)) { seen.add(k); merged.push(k); }
+      }
+      wantedKlines = new Set(merged);
       syncKlineSubs();
     },
-    setAggTradeSubscriptions(symbols) {
+    setAggTradeSubscriptions(symbols, tenant = 'default') {
       const next = new Set(symbols ?? []);
-      let changed = next.size !== wantedFlow.size || [...next].some(s => !wantedFlow.has(s));
-      if (!changed) return;
-      wantedFlow = next;
+      const prev = flowWants.get(tenant);
+      if (prev && prev.size === next.size && [...next].every(s => prev.has(s))) return;
+      flowWants.set(tenant, next);
+      const merged = [];
+      const seen = new Set();
+      for (const set of flowWants.values()) {
+        for (const s of set) if (!seen.has(s)) { seen.add(s); merged.push(s); }
+      }
+      wantedFlow = new Set(merged);
       syncFlowSubs();
     },
     onCandleClose(cb) {

@@ -10,6 +10,7 @@ import BacktestScreen from './components/BacktestScreen';
 import LiquidityZonesScreen from './components/LiquidityZonesScreen';
 import CustomLiquidityScreen from './components/CustomLiquidityScreen';
 import LiveOpportunitiesScreen from './components/LiveOpportunitiesScreen';
+import StrategyScreen from './components/StrategyScreen';
 import NotificationCenter from './components/NotificationCenter';
 
 export default function App() {
@@ -21,7 +22,7 @@ export default function App() {
     const onHash = () => {
       const h = location.hash.replace('#/', '');
       const target = h === 'history' ? 'autoHistory' : h;
-      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities', 'notifications'] as const).includes(target as never) && target !== screen) {
+      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities', 'notifications', 'strategy2'] as const).includes(target as never) && target !== screen) {
         setScreen(target as never);
       }
     };
@@ -56,6 +57,7 @@ export default function App() {
     { id: 'autoHistory', label: 'السجل الآلي', shortLabel: 'السجل', count: null },
     { id: 'backtest', label: 'الباك تيست والفرص', shortLabel: 'الباك', count: null },
     { id: 'liveOpportunities', label: 'الفرص الحية', shortLabel: 'حية', count: null },
+    { id: 'strategy2', label: 'الفرص الحية — استراتيجيتي', shortLabel: 'استراتيجيتي', count: null },
     { id: 'notifications', label: 'الإشعارات', shortLabel: 'الإشعارات', count: unreadNotifications },
     { id: 'liquidityZones', label: 'مناطق السيولة', shortLabel: 'السيولة', count: null },
     { id: 'customLiquidity', label: 'جولة مخصصة', shortLabel: 'جولة', count: null },
@@ -139,6 +141,7 @@ export default function App() {
         {screen === 'autoHistory' && <AutoHistory />}
         {screen === 'backtest' && <BacktestScreen />}
         {screen === 'liveOpportunities' && <LiveOpportunitiesScreen />}
+        {screen === 'strategy2' && <StrategyScreen />}
         {screen === 'liquidityZones' && <LiquidityZonesScreen />}
         {screen === 'customLiquidity' && <CustomLiquidityScreen />}
         {screen === 'dashboard' && <Dashboard />}

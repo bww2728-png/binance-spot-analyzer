@@ -11,7 +11,7 @@ const API = '/api';
 
 const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
-export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity' | 'liveOpportunities' | 'notifications';
+export type Screen = 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity' | 'liveOpportunities' | 'notifications' | 'strategy2';
 export type Theme = 'dark' | 'light';
 export type ArchiveSection = 'cases' | 'zones' | 'events';
 
@@ -92,6 +92,10 @@ interface StoreState {
   /* اللقطة الحية للفرص المنشورة والمناطق قيد المراقبة (tick كل ثانية من الخادم عبر WS) */
   liveOppTick: { at: number; opportunities: Record<string, LiveOppTickRow>; watching: Record<string, LiveWatchTickRow> } | null;
   calibrationProgress: { done: number; total: number } | null;
+  /* نبضة محرك «الفرص الحية — استراتيجيتي» عبر WS (تحديث لحظي للشاشة) */
+  strategy2Pulse: { at: number; kind: string } | null;
+  /* أسعار حية لكل فرصة منشورة من محرك الاستراتيجية (id → صف النبضة) */
+  strategy2Rows: Record<string, { price: number | null; plPct: number | null; rNow: number | null; mfeR: number; ageSec: number }>;
 
   init: () => Promise<void>;
   syncSymbols: () => Promise<void>;
@@ -158,7 +162,7 @@ export const useStore = create<StoreState>((set, get) => ({
     // افتتاح مباشر على التبويب من الرابط (#/history مثلاً) — الافتراضي اللوحة
     const h = location.hash.replace('#/', '');
     if (h === 'history') return 'autoHistory';
-    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities', 'notifications'] as const).includes(h as Screen)
+    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'customLiquidity', 'liveOpportunities', 'notifications', 'strategy2'] as const).includes(h as Screen)
       ? h as Screen
       : 'board';
   })(),
@@ -177,6 +181,8 @@ export const useStore = create<StoreState>((set, get) => ({
   archiveSection: 'cases',
   liveOppTick: null,
   calibrationProgress: null,
+  strategy2Pulse: null,
+  strategy2Rows: {},
 
   init: async () => {
     if (!streams) {
@@ -276,6 +282,22 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ calibrationProgress: { done: msg.done ?? 0, total: msg.total ?? 0 } });
         } else if (msg.type === 'live_calibration_done') {
           set({ calibrationProgress: null });
+        } else if (msg.type === 'strategy2_new' && msg.opportunity) {
+          const o = msg.opportunity as unknown as { symbol: string; tf: string; model: number; entry: number; stop: number; tp1: number; rr: number; htfDirection: string };
+          get().pushToast(`استراتيجيتي — ${o.symbol} (${o.tf}) نموذج ${o.model}: دخول ${o.entry} · وقف ${o.stop} · هدف ${o.tp1} · R:R ${o.rr} · اتجاه HTF ${o.htfDirection === 'up' ? 'صاعد' : o.htfDirection === 'down' ? 'هابط' : 'عرضي'}`, 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: 'alert' });
+          set({ strategy2Pulse: { at: Date.now(), kind: 'new' } });
+        } else if (msg.type === 'strategy2_closed' && msg.opportunity) {
+          const o = msg.opportunity as unknown as { symbol: string; tf: string; outcome: string };
+          const win = o.outcome === 'target' || o.outcome === 'target2';
+          const label = o.outcome === 'target' ? 'وصلت الهدف الأول' : o.outcome === 'target2' ? 'وصلت الهدف الثاني' : o.outcome === 'invalidated' ? 'فشل نقطة الدخول' : o.outcome === 'expired' ? 'انتهت دون حسم' : 'ضربت الوقف';
+          get().pushToast(`استراتيجيتي — نتيجة ${o.symbol} (${o.tf}): ${label}`, win ? 'info' : 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: win ? 'info' : 'alert' });
+          set({ strategy2Pulse: { at: Date.now(), kind: 'closed' } });
+        } else if (msg.type === 'strategy2_tick') {
+          const rows: Record<string, { price: number | null; plPct: number | null; rNow: number | null; mfeR: number; ageSec: number }> = {};
+          for (const r of msg.opportunities ?? []) rows[r.id] = r;
+          set({ strategy2Rows: rows, strategy2Pulse: { at: Date.now(), kind: 'strategy2_tick' } });
+        } else if (msg.type === 'strategy2_state' || msg.type === 'strategy2_calibration_progress' || msg.type === 'strategy2_calibration_done') {
+          set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
         }
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));

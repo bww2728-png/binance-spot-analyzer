@@ -434,7 +434,18 @@ const db = {
       q.set('order', 'ts.desc,id.desc');
       q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
       return rest(`/events_log?${q}`);
-    }
+    },
+    /** أحداث «الفرص الحية — استراتيجيتي» (نشر + حسم) — استمرارية دائمة بلا DDL */
+    strategy2Events: (sinceTs, limit = 2000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'in.(strategy2_published,strategy2_resolved)');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      q.set('order', 'ts.desc,id.desc');
+      q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      return rest(`/events_log?${q}`);
+    },
+    /** آخر معايرة محفوظة للمحرك الثاني */
+    strategy2Calibration: () => rest('/events_log?type=eq.strategy2_calibration&select=*&order=ts.desc&limit=1')
   }
 };
 
