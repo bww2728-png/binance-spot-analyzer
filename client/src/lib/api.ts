@@ -508,7 +508,18 @@ const liveOpportunitiesApi = {
   runStrategy2Scan: () =>
     fetch(`${BASE}/strategy2/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
   runStrategy2Calibration: (body?: { symbols?: string[] }) =>
-    fetch(`${BASE}/strategy2/calibrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(j<{ ok: boolean; started: boolean; symbols: number | null }>)
+    fetch(`${BASE}/strategy2/calibrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(j<{ ok: boolean; started: boolean; symbols: number | null }>),
+  getStrategy2Csse: (symbol?: string, tf?: string, signal?: AbortSignal) => {
+    const qs = new URLSearchParams();
+    if (symbol) qs.set('symbol', symbol);
+    if (tf) qs.set('tf', tf);
+    const q = qs.toString();
+    return fetch(`${BASE}/strategy2/csse${q ? `?${q}` : ''}`, { signal }).then(j<unknown>);
+  },
+  getStrategy2Feedback: (limit = 200, signal?: AbortSignal) =>
+    fetch(`${BASE}/strategy2/feedback?limit=${limit}`, { signal }).then(j<{ id: string; elementId: string; symbol: string; tf: string; verdict: string; reason: string; at: number }[]>),
+  sendStrategy2Feedback: (body: { symbol: string; tf?: string; elementId: string; verdict: 'valid' | 'invalid' | 'note'; reason?: string; revokes?: string }) =>
+    fetch(`${BASE}/strategy2/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j<{ ok: boolean }>)
 };
 
 export interface MarketReadZone { id: string; kind: string; level: number; confidence: number; touches: number; state: string; }

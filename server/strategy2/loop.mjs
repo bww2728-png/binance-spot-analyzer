@@ -15,6 +15,10 @@ import {
 import {
   computeDirectionState, updateWithPrice, classifyChange
 } from './directions.mjs';
+import {
+  createCsseState, updateCsse, sequenceChecklist, serializeCsse,
+  CSSE_VERSION
+} from './csse.mjs';
 
 const DEFAULT_CONFIG = {
   cycleMs: 20_000,             // دورة فحص احتياطية (المعالجة الأساسية حدث-مدفوعة بإغلاق الشموع)
@@ -39,6 +43,9 @@ const DEFAULT_CONFIG = {
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/** إصدار منهجية المعايرة — يُحفظ مع كل معايرة للتتبع والمقارنة عبر الزمن */
+export const CALIB_VERSION = 's2-calib-v1';
 
 /** شرائح الاستراتيجية: (فريم × اتجاه HTF × نموذج) بتمليس بايزي + Wilson — نقية وقابلة للاختبار */
 export function summarizeStrategySegments(trades, { targetWinRate = 0.6, minTrades = 8, priorWeight = 6 } = {}) {
@@ -99,6 +106,7 @@ export function createStrategyEngine(deps) {
     readCalibration = async () => null,
     readPublishedEvents = async () => [],
     readDirectionEvents = null,
+    readFeedbackEvents = null,     // اختياري: أحداث strategy2_feedback الدائمة (تعليق بشري)
     now = () => Date.now(),
     log = console,
     config = {}
@@ -122,6 +130,11 @@ export function createStrategyEngine(deps) {
   const rejected = [];               // شفافية الرفض
   const history = [];
   const seeding = new Set();         // مفاتيح قيد البذر
+  /* ---- ذاكرة الشارت المستمرة CSSE: حالة حية لكل (رمز|فريم) ----
+   * تُحدَّث تدريجياً مع كل تحليل (لا إعادة بناء من الصفر)، وهويات العناصر
+   * حتمية فيُعاد اشتقاقها نفسها بعد أي restart. */
+  const csseStates = new Map();      // "SYM|tf" → حالة CSSE
+  const feedbackByElement = new Map(); // elementId → [تصحيحات بشرية نشطة] (تعليق فقط)
 
   const status = {
     busy: false, cycle: 0, scope: 'halal_no_barcode', pairsTotal: 0,
@@ -152,6 +165,67 @@ export function createStrategyEngine(deps) {
     }
   };
   const clearFailure = (key) => failures.delete(key);
+
+  /* ---- CSSE: تحديث ذاكرة الشارت تدريجياً (لا يكسر الكشف أبداً) ---- */
+  const csseTrack = (symbol, tf, candles, analysis, extra = {}) => {
+    try {
+      const key = `${symbol}|${tf}`;
+      const prev = csseStates.get(key) ?? null;
+      const dirState = directions.get(symbol)?.state ?? null;
+      const next = updateCsse(prev, {
+        symbol, tf, candles, analysis, dirState,
+        outcome: extra.outcome ?? null, now: now()
+      });
+      // إرفاق التصحيحات البشرية النشطة على عناصر هذه الحالة (عرض فقط)
+      if (feedbackByElement.size) {
+        for (const el of next.elements.values()) {
+          const fbs = feedbackByElement.get(el.id);
+          if (fbs?.length) el.feedback = fbs.filter(f => !f.revoked);
+        }
+      }
+      csseStates.set(key, next);
+      // سقف الحالات: الأقدم تحديثاً يُسقط أولاً (الذاكرة محدودة)
+      if (csseStates.size > 600) {
+        let oldest = null, oldestAt = Infinity;
+        for (const [k, v] of csseStates) {
+          if ((v.updatedAt ?? 0) < oldestAt) { oldestAt = v.updatedAt ?? 0; oldest = k; }
+        }
+        if (oldest) csseStates.delete(oldest);
+      }
+      return next;
+    } catch (e) {
+      bumpFailure(`${symbol}|${tf}|csse`, e.message);
+      return null;
+    }
+  };
+
+  const csseOutcome = (symbol, tf, outcome) => {
+    try {
+      const key = `${symbol}|${tf}`;
+      const prev = csseStates.get(key) ?? null;
+      const next = updateCsse(prev, { symbol, tf, candles: [], analysis: null, outcome, now: now() });
+      csseStates.set(key, next);
+    } catch { /* نتيجة CSSE لا تكسر الحسم */ }
+  };
+
+  function getCsse(symbol, tf) {
+    const s = String(symbol ?? '').toUpperCase();
+    const t = String(tf ?? '');
+    if (s && t) {
+      const st = csseStates.get(`${s}|${t}`);
+      return st ? serializeCsse(st) : null;
+    }
+    // ملخص كل الحالات
+    return {
+      version: CSSE_VERSION,
+      states: csseStates.size,
+      keys: [...csseStates.keys()].slice(0, 1000),
+      setups: [...csseStates.values()].reduce((acc, v) => {
+        acc[v.setup.state] = (acc[v.setup.state] ?? 0) + 1;
+        return acc;
+      }, {})
+    };
+  }
 
   /* ---- جلب الشموع: بث حي أولاً ثم REST عبر المحدد ---- */
   async function getCandles(symbol, tf, limit = cfg.analysisWindow) {
@@ -225,6 +299,9 @@ export function createStrategyEngine(deps) {
       }
     }
     const id = `s2:${symbol}:${tf}:${signal.at}`;
+    // قائمة التسلسل من النواة نفسها: ماذا تحقق وماذا لم يتحقق (شفافية القرار)
+    let sequence = [];
+    try { sequence = sequenceChecklist(an); } catch { sequence = []; }
     const opportunity = {
       id, symbol, tf,
       model: signal.model,
@@ -241,10 +318,12 @@ export function createStrategyEngine(deps) {
       rr: signal.rr,
       distancePct: Number((((signal.price - signal.tp1) / signal.tp1) * 100).toFixed(3)),
       reasons: signal.reasons,
+      sequence, setupState: 'OPPORTUNITY',
       phase: 'published',
       outcome: null, outcomeAt: null, outcomePrice: null,
       mfeR: 0, maeR: 0
     };
+    csseOutcome(symbol, tf, { kind: 'published', signal, id });
     opportunities.set(id, opportunity);
     bySymbolTf.set(`${symbol}|${tf}`, opportunity);
     if (opportunities.size > cfg.publishLimit) {
@@ -285,6 +364,8 @@ export function createStrategyEngine(deps) {
       });
       status.analyzing += 1;
       clearFailure(`${symbol}|${tf}|analysis`);
+      // ذاكرة الشارت المستمرة: حدّث الحالة تدريجياً (لا تعيد البناء من الصفر)
+      csseTrack(symbol, tf, candles, an);
 
       // موت المشوار الصاعد: HTF هابط ووصل bsl خارجي → لا شراء
       if (an.upLegDead) {
@@ -456,6 +537,13 @@ export function createStrategyEngine(deps) {
       status.cycle += 1;
       const symbols = targets.slice(0, cfg.maxSymbols);
 
+      // تحديث الأسعار الاحتياطية (REST شامل واحد لكل دورة) — البث الحي أولاً في pxOf،
+      // وهذا الاحتياطي يغطي غياب market أو تأخره. كان موصولاً ولا يُستدعى أبداً.
+      try {
+        const px = await fetchPrices(symbols).catch(() => ({}));
+        if (px && typeof px === 'object') lastPrices = px;
+      } catch { /* الأسعار الاحتياطية اختيارية */ }
+
       if (market) {
         const kKeys = [];
         for (const s of symbols) for (const tf of cfg.entryTfs) kKeys.push(`${s}|${tf}`);
@@ -524,6 +612,7 @@ export function createStrategyEngine(deps) {
         const win = op.outcome === 'target' || op.outcome === 'target2';
         if (win) status.wins += 1; else if (op.outcome === 'stop' || op.outcome === 'invalidated') status.losses += 1;
         status.resolved += 1;
+        csseOutcome(op.symbol, op.tf, { kind: 'resolved', outcome: op.outcome, price: px });
         const sk = op.segmentKey;
         const st2 = liveStats.get(sk) ?? { trades: 0, wins: 0 };
         st2.trades += 1;
@@ -634,8 +723,13 @@ export function createStrategyEngine(deps) {
       calibration.segments = rows;
       calibration.progress = null;
       calibration.samplePairs = all.length;
+      calibration.version = CALIB_VERSION;
       broadcast({ type: 'strategy2_calibration_done', segments: rows.length, trades: calibration.trades });
-      void persist({ type: 'strategy2_calibration', at: calibration.at, trades: calibration.trades, segments: rows }).catch(() => undefined);
+      void persist({
+        type: 'strategy2_calibration', at: calibration.at, trades: calibration.trades,
+        segments: rows, version: CALIB_VERSION, bars: cfg.calibration.bars,
+        entryTfs: cfg.entryTfs, samplePairs: all.length
+      }).catch(() => undefined);
       log.log?.(`[strategy2] calibration: ${rows.length} segments / ${calibration.trades} trades`);
       return { ok: true, segments: rows.length, trades: calibration.trades };
     } catch (e) {
@@ -712,6 +806,7 @@ export function createStrategyEngine(deps) {
           price: e.price ?? e.entry, entry: e.entry, stop: e.stop, tp1: e.tp1 ?? e.tp, tp2: e.tp2 ?? null,
           stopRef: e.stopRef ?? e.stop,
           rr: e.rr ?? null, reasons: e.reasons ?? [],
+          sequence: e.sequence ?? [], setupState: 'OPPORTUNITY',
           restored: true, outcome: null, outcomeAt: null, outcomePrice: null, mfeR: 0, maeR: 0
         };
         if (!Number.isFinite(Number(op.entry)) || !Number.isFinite(Number(op.stop))) continue;
@@ -748,6 +843,7 @@ export function createStrategyEngine(deps) {
           op.outcome = outcome; op.outcomeAt = now(); op.outcomePrice = exitPx;
           op.durationMs = now() - op.detectedAt;
           op.reconciled = true;
+          csseOutcome(op.symbol, op.tf, { kind: 'resolved', outcome, price: exitPx });
           const win = outcome === 'target' || outcome === 'target2';
           if (win) status.wins += 1; else if (outcome === 'stop' || outcome === 'invalidated') status.losses += 1;
           status.resolved += 1; status.reconciled += 1;
@@ -798,7 +894,16 @@ export function createStrategyEngine(deps) {
         at: calibration.at, busy: calibration.busy, trades: calibration.trades,
         progress: calibration.progress, segments: calibration.segments,
         samplePairs: calibration.samplePairs, error: calibration.error,
-        targetWinRate: cfg.targetWinRate
+        targetWinRate: cfg.targetWinRate, version: CALIB_VERSION,
+        bars: cfg.calibration.bars
+      },
+      csse: {
+        version: CSSE_VERSION,
+        tracked: csseStates.size,
+        setups: [...csseStates.values()].reduce((acc, v) => {
+          acc[v.setup.state] = (acc[v.setup.state] ?? 0) + 1;
+          return acc;
+        }, {})
       }
     };
   }
@@ -846,8 +951,59 @@ export function createStrategyEngine(deps) {
       at: calibration.at, busy: calibration.busy, trades: calibration.trades,
       progress: calibration.progress, segments: calibration.segments,
       samplePairs: calibration.samplePairs,
-      targetWinRate: cfg.targetWinRate, minSegmentTrades: cfg.minSegmentTrades
+      targetWinRate: cfg.targetWinRate, minSegmentTrades: cfg.minSegmentTrades,
+      version: CALIB_VERSION, bars: cfg.calibration.bars, entryTfs: cfg.entryTfs
     };
+  }
+
+  /* ---- التصحيح البشري: تعليق مُصدَر قابل للعكس — لا يمس قواعد النواة ---- */
+  function addFeedback({ elementId, symbol, tf, verdict, reason, at, id, revokes } = {}) {
+    const fb = {
+      id: id ?? `fb-${now()}-${Math.floor(Math.random() * 1e6)}`,
+      elementId: String(elementId ?? ''), symbol: String(symbol ?? '').toUpperCase(),
+      tf: String(tf ?? ''), verdict, reason: String(reason ?? '').slice(0, 500),
+      at: Number.isFinite(Number(at)) ? Number(at) : now(),
+      revoked: false, revokes: revokes ?? null, version: 1
+    };
+    if (fb.revokes) {
+      for (const list of feedbackByElement.values()) {
+        for (const f of list) if (f.id === fb.revokes) f.revoked = true;
+      }
+    } else if (fb.elementId) {
+      const list = feedbackByElement.get(fb.elementId) ?? [];
+      list.push(fb);
+      feedbackByElement.set(fb.elementId, list.slice(-20));
+    }
+    return fb;
+  }
+
+  function listFeedback({ limit = 200 } = {}) {
+    const out = [];
+    for (const list of feedbackByElement.values()) out.push(...list);
+    return out.sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).slice(0, Math.min(Number(limit) || 200, 500));
+  }
+
+  async function loadFeedback() {
+    try {
+      if (typeof readFeedbackEvents !== 'function') return;
+      const rows = await readFeedbackEvents();
+      if (!Array.isArray(rows)) return;
+      for (const r of rows) {
+        if (!r || r.revoked) continue;
+        const list = feedbackByElement.get(r.elementId) ?? [];
+        list.push({ ...r, version: 1 });
+        feedbackByElement.set(r.elementId, list.slice(-20));
+      }
+      // الإلغاءات تطبق بعد التحميل
+      for (const r of rows) {
+        if (!r?.revokes) continue;
+        for (const list of feedbackByElement.values()) {
+          for (const f of list) if (f.id === r.revokes) f.revoked = true;
+        }
+      }
+    } catch (e) {
+      log.warn?.(`[strategy2] feedback restore failed: ${e.message}`);
+    }
   }
 
   /* ---- إغلاق شمعة → معالجة فورية ---- */
@@ -871,6 +1027,7 @@ export function createStrategyEngine(deps) {
     if (market?.onCandleClose) unsubClose = market.onCandleClose(onCandleClosed);
     void (async () => {
       await loadCalibration();
+      await loadFeedback();
       await restoreFromEvents();
       await restoreDirections();
       await reconcileGap();
@@ -901,6 +1058,7 @@ export function createStrategyEngine(deps) {
     start, stop, runCycle, runCalibration, restoreFromEvents, reconcileGap,
     getFeed, getStatus, getHistory, getCalibration, queryFeed,
     queryDirections, getDirectionsSummary,
-    _internals: { opportunities, segments, liveStats, rejected, failures, status, calibration, cfg, lastProcessed, directions }
+    getCsse, addFeedback, listFeedback, loadFeedback,
+    _internals: { opportunities, segments, liveStats, rejected, failures, status, calibration, cfg, lastProcessed, directions, csseStates, feedbackByElement }
   };
 }

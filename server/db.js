@@ -446,6 +446,29 @@ const db = {
     },
     /** آخر معايرة محفوظة للمحرك الثاني */
     strategy2Calibration: () => rest('/events_log?type=eq.strategy2_calibration&select=*&order=ts.desc&limit=1'),
+    /** التصحيح البشري لعناصر strategy2 — تعليق مُصدَر قابل للعكس (لا يمس القواعد) */
+    strategy2FeedbackSave: (fb) => rest('/events_log?select=*', {
+      method: 'POST',
+      body: {
+        symbol: String(fb.symbol || 'GLOBAL').toUpperCase(),
+        type: 'strategy2_feedback',
+        message: `${fb.verdict}: ${fb.elementId}`,
+        meta: JSON.stringify(fb),
+        ts: Number(fb.at) || Date.now()
+      },
+      prefer: 'return=representation'
+    }),
+    /** كل تصحيحات strategy2 (بما فيها الإلغاءات) — يطبق المحرك الإلغاء على النسخ */
+    strategy2FeedbackEvents: (sinceTs = 0, limit = 2000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'eq.strategy2_feedback');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      q.set('order', 'ts.asc,id.asc');
+      q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      return rest(`/events_log?${q}`).then(rows => rows.map(r => {
+        try { return JSON.parse(r.meta ?? '{}'); } catch { return null; }
+      }).filter(Boolean));
+    },
     /** أحداث تغيّر الاتجاهات (انقلاب/مرحلة/موت مشوار) — التاريخ الدائم للاتجاهات */
     strategy2DirectionEvents: (sinceTs = 0, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });

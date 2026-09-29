@@ -596,7 +596,20 @@ function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: St
       </td>
       <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>{ago(o.detectedAt)}</td>
       <td className="px-2.5 py-2 text-[11px] max-w-[280px]" style={{ color: 'var(--text-3)' }} title={o.reasons.join(' · ')}>
-        {o.reasons.slice(0, 2).join(' · ')}{o.reasons.length > 2 ? ` +${o.reasons.length - 2}` : ''}
+        <div>{o.reasons.slice(0, 2).join(' · ')}{o.reasons.length > 2 ? ` +${o.reasons.length - 2}` : ''}</div>
+        {o.sequence?.length ? (
+          <div className="mt-1 flex flex-wrap gap-1" title={o.sequence.map(s => `${s.status === 'occurred' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '–' : '…'} ${s.label}`).join(' · ')}>
+            {o.sequence.map(s => (
+              <span key={s.key} className="px-1.5 py-px rounded-full font-semibold" style={{
+                fontSize: 10,
+                background: s.status === 'occurred' ? 'var(--up)' : s.status === 'failed' ? 'var(--down)' : 'transparent',
+                opacity: s.status === 'occurred' || s.status === 'failed' ? 0.16 : 1,
+                color: s.status === 'occurred' ? 'var(--up)' : s.status === 'failed' ? 'var(--down)' : 'var(--text-3)',
+                border: `1px solid ${s.status === 'occurred' ? 'var(--up)' : s.status === 'failed' ? 'var(--down)' : 'var(--border-1)'}`
+              }}>{s.status === 'occurred' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '–' : '…'} {s.label}</span>
+            ))}
+          </div>
+        ) : null}
       </td>
       <td className="px-2.5 py-2">
         <button onClick={onChart} className="text-[11px] px-2 py-1 rounded" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت</button>

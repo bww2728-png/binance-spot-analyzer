@@ -637,6 +637,8 @@ export interface Strategy2Opportunity {
   rr: number | null;
   distancePct: number | null;
   reasons: string[];
+  sequence?: { key: string; label: string; status: 'occurred' | 'not-yet' | 'failed' | 'skipped'; required: boolean; detail?: unknown }[];
+  setupState?: string | null;
   phase: string;
   outcome: 'target' | 'target2' | 'stop' | 'invalidated' | 'expired' | null;
   outcomeAt: number | null;

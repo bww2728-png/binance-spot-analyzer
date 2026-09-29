@@ -1280,6 +1280,7 @@ const strategy2Engine = createStrategyEngine({
   market: marketStreams,
   readCalibration: readStrategy2Calibration,
   readPublishedEvents: readStrategy2PublishedEvents,
+  readFeedbackEvents: () => db.events.strategy2FeedbackEvents(0, 2000).catch(() => []),
   readDirectionEvents: async () => {
     try {
       const rows = await db.events.strategy2DirectionEvents(0, 2000);
@@ -1415,6 +1416,37 @@ app.get('/api/strategy2/history', handle(async (req, res) => {
     })),
     generatedAt: Date.now()
   });
+}));
+
+// ---- ذاكرة الشارت المستمرة CSSE: حالة (رمز|فريم) + عناصر + أحداث + علاقات ----
+app.get('/api/strategy2/csse', handle(async (req, res) => {
+  res.json(strategy2Engine.getCsse(
+    req.query.symbol ? String(req.query.symbol) : undefined,
+    req.query.tf ? String(req.query.tf) : undefined
+  ) ?? { version: 'csse-v1', empty: true });
+}));
+
+// ---- التصحيح البشري: تعليق مُصدَر قابل للعكس على عنصر (لا يمس قواعد النواة) ----
+const FEEDBACK_VERDICTS = ['valid', 'invalid', 'note'];
+app.get('/api/strategy2/feedback', handle(async (req, res) => {
+  res.json(strategy2Engine.listFeedback({ limit: req.query.limit }));
+}));
+
+app.post('/api/strategy2/feedback', handle(async (req, res) => {
+  const symbol = assertSymbol(req.body?.symbol, res);
+  if (!symbol) return;
+  const verdict = FEEDBACK_VERDICTS.includes(req.body?.verdict) ? req.body.verdict : null;
+  if (!verdict) return res.status(400).json({ error: 'verdict يجب أن يكون valid أو invalid أو note' });
+  const elementId = sanitizeText(req.body?.elementId, 200);
+  if (!elementId) return res.status(400).json({ error: 'elementId مطلوب' });
+  const reason = sanitizeText(req.body?.reason, 500);
+  const revokes = req.body?.revokes != null ? sanitizeText(req.body.revokes, 100) : null;
+  const tf = String(req.body?.tf ?? '').slice(0, 8);
+  if (tf && !/^(\d+)(m|h|d|w|M)$/.test(tf)) return res.status(400).json({ error: 'فريم غير مدعوم' });
+  const fb = strategy2Engine.addFeedback({ elementId, symbol, tf, verdict, reason, revokes });
+  await db.events.strategy2FeedbackSave(fb).catch(() => undefined);
+  broadcast({ type: 'strategy2_feedback', feedback: fb });
+  res.json({ ok: true, feedback: fb });
 }));
 
 app.post('/api/strategy2/run', handle(async (_req, res) => {

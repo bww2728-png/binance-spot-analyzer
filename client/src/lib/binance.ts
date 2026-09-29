@@ -294,7 +294,9 @@ export interface LiveWatchTickRow {
 }
 
 export interface SymbolsUpdateMsg {
-  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | 'live_opportunity_new' | 'live_sweep_detected' | 'live_opportunity_closed' | 'live_opportunities_tick' | 'live_calibration_progress' | 'live_calibration_done' | string;
+  type: 'symbols_updated' | 'hello' | 'zones_changed' | 'zone_near' | 'zone_swept' | 'shariah_researched' | 'live_opportunity_new' | 'live_sweep_detected' | 'live_opportunity_closed' | 'live_opportunities_tick' | 'live_calibration_progress' | 'live_calibration_done' | 'strategy2_new' | 'strategy2_closed' | 'strategy2_tick' | 'strategy2_state' | 'strategy2_calibration_progress' | 'strategy2_calibration_done' | 'strategy2_directions' | 'strategy2_feedback' | 'central_notification' | string;
+  feedback?: { id: string; elementId: string; symbol: string; verdict: string };
+  notification?: { category?: string; severity?: string; symbol?: string; title?: string; body?: string };
   total?: number;
   changed?: number;
   new_bases?: string[];

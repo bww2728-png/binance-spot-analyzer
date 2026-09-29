@@ -298,6 +298,16 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ strategy2Rows: rows, strategy2Pulse: { at: Date.now(), kind: 'strategy2_tick' } });
         } else if (msg.type === 'strategy2_state' || msg.type === 'strategy2_calibration_progress' || msg.type === 'strategy2_calibration_done') {
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
+        } else if (msg.type === 'strategy2_directions' && Array.isArray(msg.changed)) {
+          // نبضة اتجاهات: تُحفّز إعادة الجلب الصامتة في تبويب الاتجاهات (debounce 1 ث)
+          set({ strategy2Pulse: { at: Date.now(), kind: 'strategy2_directions' } });
+        } else if (msg.type === 'strategy2_feedback' && msg.feedback) {
+          set({ strategy2Pulse: { at: Date.now(), kind: 'strategy2_feedback' } });
+        } else if (msg.type === 'central_notification' && msg.notification) {
+          const n = msg.notification;
+          const text = [n.title, n.body].filter(Boolean).join(' — ') || 'إشعار';
+          get().pushToast(text, n.severity === 'alert' ? 'alert' : 'info', undefined, { category: 'liveOpps', symbol: n.symbol, severity: n.severity === 'alert' ? 'alert' : 'info' });
+          set({ strategy2Pulse: { at: Date.now(), kind: 'central_notification' } });
         }
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));
