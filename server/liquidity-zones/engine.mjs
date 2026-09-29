@@ -279,9 +279,12 @@ export function detectLiquidityZones({ symbol, timeframe, candles: input, endInd
     const lineAt = (i) => chosen[0].price + slope * (i - chosen[0].index);
     const error = median(chosen.map(p => Math.abs(p.price - lineAt(p.index)) / Math.max(p.atr, 1e-12)));
     if (error > 1.5) return;
-    const cluster = { price: lineAt(end), points: chosen, touches: 3, lastPoint: chosen[2], strength: 0.8 };
+    const projected = lineAt(end);
+    // سعر مستحيل (≤0) من إسقاط خط هابط حاد على عملات رخيصة — يُرفض بدل نشره (25/5406 لقطة سحابية)
+    if (!Number.isFinite(projected) || projected <= 0) return;
+    const cluster = { price: projected, points: chosen, touches: 3, lastPoint: chosen[2], strength: 0.8 };
     const state = stateFor(cluster, candles, kind === 'trendline_bsl' ? 'down' : 'up', end);
-    const trendline = { points: chosen.map(p => ({ time: p.time, price: p.price })), slope, errorAtr: Number(error.toFixed(3)), projected: lineAt(end) };
+    const trendline = { points: chosen.map(p => ({ time: p.time, price: p.price })), slope, errorAtr: Number(error.toFixed(3)), projected };
     zones.push(makeZone(symbol, timeframe, kind, cluster, state, candles, end, { trendline, premium: premiumContext(candles, end) }));
   };
   addTrendline(highs, 'trendline_bsl');

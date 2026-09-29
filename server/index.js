@@ -1974,8 +1974,16 @@ app.use(express.static(distDir, { index: false, setHeaders: (res, filePath) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   }
 } }));
+// robots.txt صريح — كان يسقط في fallback الـSPA ويعيد index.html بـ200 (مضلل للزحف)
+app.get('/robots.txt', (_req, res) => {
+  res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /api/\n');
+});
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    // ملفات ستاتيكية مفقودة (أيقونات/خرائط/نصوص) → 404 بدل صفحة SPA
+    if (/\.(ico|png|jpe?g|svg|txt|xml|map|json|webmanifest)$/i.test(req.path) && req.path !== '/') {
+      return res.status(404).type('text/plain').send('not found');
+    }
     res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile('index.html', { root: distDir });
   } else {
