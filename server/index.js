@@ -460,6 +460,15 @@ const readCalibration = async () => {
   }
 };
 
+// ---- أرشيف المناطق: يجب قبل /:symbol وإلا يبتلعه Express كرمز history (إصلاح ظل التوجيه) ----
+app.get('/api/zones/history', handle(async (req, res) => {
+  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
+  const limit = Math.min(Number(req.query.limit) || 2000, 5000);
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const raw = await db.zones.history({ symbol, limit, offset });
+  res.json({ events: raw, groups: groupZoneHistory(raw), total: raw.length, limit, offset });
+}));
+
 app.get('/api/zones/:symbol', handle(async (req, res) => {
   res.json({ zones: await db.zones.listAll(req.params.symbol) });
 }));
@@ -1743,14 +1752,7 @@ app.post('/api/cases', handle(async (req, res) => {
   res.json({ ok: true, id });
 }));
 
-// ---- أرشيف المناطق: كل نسخ التحديد اليدوي (شاملة المحذوف) ----
-app.get('/api/zones/history', handle(async (req, res) => {
-  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
-  const limit = Math.min(Number(req.query.limit) || 2000, 5000);
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  const raw = await db.zones.history({ symbol, limit, offset });
-  res.json({ events: raw, groups: groupZoneHistory(raw), total: raw.length, limit, offset });
-}));
+// (نُقل إلى أعلى قبل /:symbol — إصلاح ظل التوجيه)
 
 // ---- السجل التاريخي للتحديد الآلي (منطق فابيو) ----
 // دمج حسب المنطقة + ترقيم على مستوى الصفوف: يخفض الحمولة من ميغابايتات إلى كيلوبايتات
