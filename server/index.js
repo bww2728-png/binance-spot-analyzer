@@ -1978,6 +1978,8 @@ app.use(express.static(distDir, { index: false, setHeaders: (res, filePath) => {
 app.get('/robots.txt', (_req, res) => {
   res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /api/\n');
 });
+// favicon صامت (204) — يمنع ضجيج 404 في كونسول المتصفح بلا أيقونة وهمية
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api')) {
     // ملفات ستاتيكية مفقودة (أيقونات/خرائط/نصوص) → 404 بدل صفحة SPA

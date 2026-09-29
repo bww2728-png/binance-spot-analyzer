@@ -38,6 +38,17 @@ function distanceBand(d: number | null | undefined): { label: string; color: str
   return { label: 'بعيدة', color: 'var(--down)' };
 }
 
+/** عتبة التقلب المفرط: انقلابات الاتجاه منذ الإقلاع */
+const VOLATILE_CHANGES = 10;
+
+/** صياغة عربية ودية لأخطاء الجلب — تخفي المضيفين الداخليين وتركز على المعنى */
+function friendlyFailure(f: { key: string; message?: string | null }): { symbol: string; reason: string } {
+  const [sym, tf] = String(f.key ?? '').split('|');
+  const msg = String(f.message ?? '');
+  const reason = /451/.test(msg) ? 'غير مدعوم في المنطقة (451)' : msg.slice(0, 120) || 'تعذر الجلب';
+  return { symbol: [sym, tf].filter(Boolean).join(' '), reason };
+}
+
 type Tab = 'feed' | 'directions' | 'tracking' | 'dashboard' | 'rejected';
 
 export default function StrategyScreen() {
@@ -70,6 +81,7 @@ export default function StrategyScreen() {
   const [dirAgreement, setDirAgreement] = useState('');
   const [dirSort, setDirSort] = useState('symbol');
   const [dirExpanded, setDirExpanded] = useState<string | null>(null);
+  const [hideVolatile, setHideVolatile] = useState(false);
 
   const loadDirections = useCallback(async (silent = false) => {
     if (!silent) setDirLoading(true);
@@ -228,8 +240,14 @@ export default function StrategyScreen() {
               onClick={() => void api.runStrategy2Calibration().then(() => load(true))}
               disabled={cal?.busy}
               className="btn text-[12px]"
-              style={{ opacity: cal?.busy ? 0.5 : 1 }}
-            >تشغيل المعايرة</button>
+              title={!cal?.at && !cal?.busy ? 'المعايرة لم تشتغل بعد — الإشارات حالياً بلا تصفية إحصائية' : 'إعادة تشغيل المعايرة الإحصائية'}
+              style={{
+                opacity: cal?.busy ? 0.5 : 1,
+                ...(!cal?.at && !cal?.busy
+                  ? { border: '2px solid var(--warn)', fontWeight: 800 }
+                  : {})
+              }}
+            >تشغيل المعايرة{!cal?.at && !cal?.busy ? ' ⚠' : ''}</button>
           </div>
         </div>
 
@@ -243,16 +261,33 @@ export default function StrategyScreen() {
           <Stat label="استعادة/تسوية" value={`${feed?.stats.restored ?? 0}/${feed?.stats.reconciled ?? 0}`} />
           <Stat label="آخر تحديث" value={feed?.updatedAt ? ago(feed.updatedAt) : '—'} />
         </div>
+        <div className="text-[11px] mt-1.5" style={{ color: 'var(--text-3)' }} title="سجل الاتجاهات يُبنى من إغلاقات شمعة الدقيقة لكل رمز، فيكتمل تدريجياً بعد كل إقلاع وقد يكون أقل من النطاق مؤقتاً">
+          أزواج النطاق تُفحص دورياً؛ وسجل الاتجاهات يكتمل تدريجياً بعد الإقلاع فقد يكون أقل مؤقتاً.
+        </div>
         {(feed?.busy) && <div className="text-[11px] mt-2" style={{ color: 'var(--warn)' }}>دورة فحص جارية…</div>}
         {feed?.error && <div className="text-[11px] mt-2" style={{ color: 'var(--down)' }}>خطأ: {feed.error}</div>}
         {feed?.failures.length ? (
           <div className="text-[11px] mt-2" style={{ color: 'var(--warn)' }}>
-            رموز فاشلة: {feed.failures.length} — {feed.failures.slice(0, 3).map(f => `${f.key} (${f.count})`).join(' · ')}
-            {feed.failures.length > 3 ? ' …' : ''}
+            <span>تعذر جلب {feed.failures.length} رمزاً غير مدعوم في المنطقة — البيانات المعروضة لما تبقى فقط.</span>
+            <details className="mt-1">
+              <summary className="cursor-pointer" style={{ color: 'var(--text-3)' }}>تفاصيل تقنية ({feed.failures.length})</summary>
+              <div className="mt-1 space-y-0.5">
+                {feed.failures.slice(0, 12).map(f => {
+                  const fr = friendlyFailure(f);
+                  return <div key={f.key}>{fr.symbol} — {fr.reason} (×{f.count})</div>;
+                })}
+                {feed.failures.length > 12 ? <div>… +{feed.failures.length - 12} أخرى</div> : null}
+              </div>
+            </details>
           </div>
         ) : null}
 
-        {/* المعايرة */}
+        {/* المعايرة — تحذير بارز قبل أول معايرة: النشر مفتوح بلا تصفية إحصائية */}
+        {!cal?.at && !cal?.busy ? (
+          <div className="mt-3 p-2.5 rounded-lg text-[12px] font-bold" style={{ background: 'var(--surface-1)', border: '2px solid var(--warn)', color: 'var(--text-1)' }}>
+            ⚠ المعايرة لم تشتغل بعد — أي فرصة منشورة حالياً بلا تصفية إحصائية (tier فارغ). شغّل «تشغيل المعايرة» أولاً قبل الاعتماد على الإشارات.
+          </div>
+        ) : null}
         <div className="mt-3 flex flex-wrap items-center gap-3 text-[11.5px]" style={{ color: 'var(--text-3)' }}>
           <span>
             المعايرة: {cal?.busy
@@ -263,9 +298,9 @@ export default function StrategyScreen() {
         </div>
       </div>
 
-      {/* التبويبات */}
+      {/* التبويبات — عدّاد الاتجاهات (…) قبل أول جلب حتى لا يوحي بالفراغ */}
       <div className="flex gap-1.5 flex-wrap">
-        {([['feed', `الفرص (${opps.length})`], ['directions', `الاتجاهات (${dirData?.summary.total ?? 0})`], ['tracking', 'قيد التتبع'], ['dashboard', 'لوحة التحكم'], ['rejected', `المرفوضة (${feed?.rejected.length ?? 0})`]] as [Tab, string][]).map(([t, label]) => (
+        {([['feed', `الفرص (${opps.length})`], ['directions', `الاتجاهات (${dirData ? dirData.summary.total : '…'})`], ['tracking', 'قيد التتبع'], ['dashboard', 'لوحة التحكم'], ['rejected', `المرفوضة (${feed?.rejected.length ?? 0})`]] as [Tab, string][]).map(([t, label]) => (
           <button key={t} onClick={() => setTab(t)} className="text-[12px] font-semibold px-3 py-1.5 rounded-lg"
             style={{
               background: tab === t ? 'var(--accent-soft)' : 'var(--surface-1)',
@@ -334,13 +369,21 @@ export default function StrategyScreen() {
                 </tbody>
               </table>
             </div>
-            {opps.length === 0 && !loading && (
-              <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
-                {feed && feed.stats.published > 0
-                  ? 'لا فرص نشطة الآن — كل المنشورة حُسمت، والمحرك يراقب باستمرار.'
-                  : 'لا فرص منشورة بعد — المحرك يراقب مناطق السيولة ويرصد تكوّن القمم/القيعان المحمية لحظياً.'}
-              </div>
-            )}
+            {opps.length === 0 && !loading && (() => {
+              const deadN = (feed?.rejected ?? []).filter(r => String(r.reason ?? '').includes('المشوار')).length;
+              return (
+                <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
+                  {feed && feed.stats.published > 0
+                    ? 'لا فرص نشطة الآن — كل المنشورة حُسمت، والمحرك يراقب باستمرار.'
+                    : 'لا فرص منشورة بعد — المحرك يراقب ويرصد تكوّن القمم/القيعان المحمية لحظياً.'}
+                  {deadN > 0 ? (
+                    <div className="mt-2 text-[12px]" style={{ color: 'var(--warn)' }}>
+                      أُسقطت {deadN} إشارة مؤخراً لموت المشوار (بلوغ العرض الخارجي على HTF هابط) — حماية لا غياب إشارات.
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -394,8 +437,12 @@ export default function StrategyScreen() {
               <option value="distance">الأقرب للعرض الخارجي</option>
             </select>
             <button onClick={exportDirectionsCsv} className="btn text-[12px]">تصدير CSV</button>
+            <label className="flex items-center gap-1.5 text-[12px] cursor-pointer" style={{ color: 'var(--text-2)' }} title={`إخفاء الرموز ذات ${VOLATILE_CHANGES}+ انقلاباً منذ الإقلاع (ضجيج فريم الدقيقة)`}>
+              <input type="checkbox" checked={hideVolatile} onChange={e => setHideVolatile(e.target.checked)} />
+              إخفاء كثيرة التقلب (≥{VOLATILE_CHANGES})
+            </label>
             <span className="text-[11px] num" style={{ color: 'var(--text-3)' }}>
-              {(dirData?.directions.length ?? 0)}{dirData?.filtered ? ` (مفلترة من ${dirData.total})` : ''} صف
+              {(dirData?.directions.filter(d => !hideVolatile || (d.changeCount ?? 0) < VOLATILE_CHANGES).length ?? 0)}{dirData?.filtered ? ` (مفلترة من ${dirData.total})` : ''} صف
             </span>
           </div>
 
@@ -414,7 +461,7 @@ export default function StrategyScreen() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(dirData?.directions ?? []).map(d => (
+                  {(dirData?.directions ?? []).filter(d => !hideVolatile || (d.changeCount ?? 0) < VOLATILE_CHANGES).map(d => (
                     <DirRow
                       key={d.symbol} d={d}
                       expanded={dirExpanded === d.symbol}
@@ -463,14 +510,23 @@ export default function StrategyScreen() {
             <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>فشل جلب البيانات (شفافية كاملة — لا فشل صامت)</div>
             {feed?.failures.length
               ? (
-                <div className="space-y-1">
-                  {feed.failures.map(f => (
-                    <div key={f.key} className="flex items-center gap-2 text-[11.5px]">
-                      <span className="num font-bold" style={{ color: 'var(--warn)' }}>{f.count}×</span>
-                      <span className="num" style={{ color: 'var(--text-2)' }}>{f.key}</span>
-                      <span style={{ color: 'var(--text-3)' }}>{f.message}</span>
+                <div className="text-[12px]" style={{ color: 'var(--text-2)' }}>
+                  <span>{feed.failures.length} رمزاً غير مدعوم في المنطقة — تُفحص بقية الرموز بنجاح.</span>
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-[11.5px]" style={{ color: 'var(--text-3)' }}>تفاصيل تقنية</summary>
+                    <div className="mt-1 space-y-1">
+                      {feed.failures.map(f => {
+                        const fr = friendlyFailure(f);
+                        return (
+                          <div key={f.key} className="flex items-center gap-2 text-[11.5px]">
+                            <span className="num font-bold" style={{ color: 'var(--warn)' }}>{f.count}×</span>
+                            <span className="num" style={{ color: 'var(--text-2)' }}>{fr.symbol}</span>
+                            <span style={{ color: 'var(--text-3)' }}>{fr.reason}</span>
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
+                  </details>
                 </div>
               )
               : <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا أعطال مسجلة — كل الرموز تُفحص بنجاح.</div>}
@@ -590,7 +646,9 @@ function DirRow({ d, expanded, onToggle, onChart }: { d: Strategy2DirectionRow; 
           {d.distToExternalPct != null ? `${d.distToExternalPct > 0 ? '+' : ''}${d.distToExternalPct.toFixed(2)}%` : '—'}
         </td>
         <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>{ago(d.since)}</td>
-        <td className="px-2.5 py-2 num text-[11px]" style={{ color: d.changeCount > 2 ? 'var(--warn)' : 'var(--text-2)' }}>{d.changeCount}</td>
+        <td className="px-2.5 py-2 num text-[11px]" style={{ color: d.changeCount >= VOLATILE_CHANGES ? 'var(--down)' : d.changeCount > 2 ? 'var(--warn)' : 'var(--text-2)' }} title={d.changeCount >= VOLATILE_CHANGES ? `تقلب مفرط: ${d.changeCount} انقلاباً منذ الإقلاع — قراراتها عالية المخاطر` : `${d.changeCount} انقلاباً منذ الإقلاع`}>
+          {d.changeCount}{d.changeCount >= VOLATILE_CHANGES ? ' ⚠' : ''}
+        </td>
         <td className="px-2.5 py-2">
           <button onClick={(e) => { e.stopPropagation(); onChart(); }} className="text-[11px] px-2 py-1 rounded" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت</button>
         </td>
