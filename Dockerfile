@@ -10,6 +10,8 @@ RUN npm run build
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
+# سقف heap يترك هامشاً للذاكرة الأصلية داخل حاوية Railway الصغيرة (إصلاح OOM: كان 455MB بلا سقف فينهار)
+ENV NODE_OPTIONS=--max-old-space-size=460
 
 # نسخ كامل مجلد الخادم (index/db/research/cases/archive/liquidity/...)
 # مهم: أي ملف جديد يضاف إلى server/ يُلتقط تلقائياً — القوائم الجزئية كانت تُسقط ملفات وتُسقط العقدة

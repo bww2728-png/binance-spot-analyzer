@@ -1152,9 +1152,16 @@ app.post('/api/backtest/run-custom', handle(async (req, res) => {
 
 // ═══ طبقة بيانات السوق الحية (WebSocket) — أسعار كل السوق + شموع + تدفق صفقات ═══
 // مصدر واحد لكل المستهلكين: صفر نداءات REST للأسعار، شموع حية، CVD/فقاعات لحظية.
+// حدود الذاكرة (إصلاح OOM الإنتاج): بذر 250 شمعة + سقف 400/مفتاح + 1500 صفقة/رمز + 6 اتصالات.
 const marketStreams = createMarketStreams({
   seedKlines: (symbol, timeframe, limit) => db.binance.klines(symbol, timeframe, limit),
-  log: console
+  log: console,
+  config: {
+    seedLimit: Number(process.env.MARKET_SEED_LIMIT) || 250,
+    maxBarsKept: Number(process.env.MARKET_MAX_BARS) || 400,
+    maxTradesPerSymbol: Number(process.env.MARKET_MAX_TRADES) || 1500,
+    maxConns: Number(process.env.MARKET_MAX_CONNS) || 6
+  }
 });
 setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
 
@@ -1203,7 +1210,16 @@ const liveOppEngine = createLiveOpportunityEngine({
         : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
     { opportunity: row }
   ),
-  log: console
+  log: console,
+  config: {
+    maxKlineSubs: Number(process.env.LIVE_MAX_KLINE_SUBS) || 600,
+    maxFlowSubs: Number(process.env.LIVE_MAX_FLOW_SUBS) || 60,
+    calibration: {
+      symbols: Number(process.env.LIVE_CALIB_SYMBOLS) || 48,
+      bars: Number(process.env.LIVE_CALIB_BARS) || 1000,
+      concurrency: Number(process.env.LIVE_CALIB_CONC) || 2
+    }
+  }
 });
 setTimeout(() => liveOppEngine.start(), 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
 
@@ -1289,7 +1305,19 @@ const strategy2Engine = createStrategyEngine({
       { opportunity: row }
     );
   },
-  log: console
+  log: console,
+  config: {
+    // إصلاح OOM: 462 رمز × 3 فريمات × 500 شمعة كان يقتل الحاوية (heap 455MB).
+    // 180 رمز × 3 × 250 = ~135k شمعة بدل ~693k (خفض ~80%).
+    maxSymbols: Number(process.env.STRATEGY2_MAX_SYMBOLS) || 180,
+    analysisWindow: Number(process.env.STRATEGY2_WINDOW) || 400,
+    warmupBars: Number(process.env.STRATEGY2_WARMUP) || 200,
+    calibration: {
+      symbols: Number(process.env.STRATEGY2_CALIB_SYMBOLS) || 48,
+      bars: Number(process.env.STRATEGY2_CALIB_BARS) || 1500,
+      concurrency: Number(process.env.STRATEGY2_CALIB_CONC) || 2
+    }
+  }
 });
 setTimeout(() => strategy2Engine.start(), 95_000); // بعد محرك الفرص الأول (اشتراكات WS متسلسلة)
 

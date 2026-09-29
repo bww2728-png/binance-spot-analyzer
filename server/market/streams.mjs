@@ -39,14 +39,15 @@ export function createMarketStreams({
     reconnectMaxMs: 30_000,
     proactiveReconnectMs: 23.5 * 3600_000,
     livenessTimeoutMs: 90_000,
-    seedLimit: 500,
+    seedLimit: 250,               // خفّض من 500: يكفي warmup (220) + هامش، ويخفض ذاكرة البذر ~50%
+    maxBarsKept: 400,             // سقف الشموع المحفوظة لكل مفتاح — يمنع نمو المخزن بلا حد (تسرب ذاكرة)
     reconcileMs: 5 * 60_000,
     reconcileBatch: 20,
     tradeWindowMs: 10 * 60_000,
-    maxTradesPerSymbol: 4000,
+    maxTradesPerSymbol: 1500,     // خفّض من 4000: يخفض ذاكرة التدفق ~62%
     aggTradeSubLimit: 0,          // 0 = بلا قص (التوزيع على الاتصالات يتكفل بالحدود)
     klineSubLimit: 0,             // 0 = بلا قص — كل المطلوب يُشترك فعلاً عبر اتصالات إضافية
-    maxConns: 8,
+    maxConns: 6,                  // خفّض من 8: يحد من استهلاك السوكتات والذاكرة
     ...config
   };
 
@@ -207,12 +208,22 @@ export function createMarketStreams({
   };
   const aggStreamOf = (sym) => `${String(sym).toLowerCase()}@aggTrade`;
 
+  /** تقليم مخزن الشموع لسقف maxBarsKept (الأحدث يبقى) — يمنع نمو الذاكرة بلا حد */
+  function trimKlines(key) {
+    const buf = klines.get(key);
+    if (!buf || buf.size <= cfg.maxBarsKept) return;
+    const keys = [...buf.keys()].sort((a, b) => a - b);
+    const drop = keys.length - cfg.maxBarsKept;
+    for (let i = 0; i < drop; i += 1) buf.delete(keys[i]);
+  }
+
   /** تحديث مخزن الشموع بصيغة صفوف بينانس الخام نفسها (تُقرأ مباشرة بnormalizeCandles/computeCvd) */
   function upsertKline(symbol, tf, k) {
     const key = `${symbol}|${tf}`;
     let buf = klines.get(key);
     if (!buf) { buf = new Map(); klines.set(key, buf); }
     buf.set(Number(k.t), [k.t, k.o, k.h, k.l, k.c, k.v, k.T, k.q, k.n, k.V, k.Q, '0']);
+    if (buf.size > cfg.maxBarsKept) trimKlines(key);
   }
 
   let lastFastAt = 0;
@@ -235,6 +246,7 @@ export function createMarketStreams({
         const buf = klines.get(key) ?? new Map();
         for (const row of raw ?? []) buf.set(Number(row[0]), row);
         klines.set(key, buf);
+        trimKlines(key);
       } catch (e) {
         log.warn?.(`[market-streams] seed failed ${key}: ${e?.message ?? e}`);
       } finally {
@@ -326,7 +338,7 @@ export function createMarketStreams({
     const desired = desiredStreams();
     const desiredSet = new Set(desired);
 
-    // 1) تحرير ملاك الستريمات غير المطلوبة
+    // 1) تحرير ملاك الستريمات غير المطلوبة + إخلاء ذاكرتها (إصلاح تسرب OOM)
     for (const s of [...streamOwner.keys()]) {
       if (desiredSet.has(s)) continue;
       const id = streamOwner.get(s);
@@ -334,6 +346,17 @@ export function createMarketStreams({
       connOwned.get(id)?.delete(s);
       const conn = conns.find(c => c.id === id);
       if (conn) { scheduleOn(conn, 'unsub', s); }
+      // إخلاء مخزن الشموع/الصفقات للمشتركين المحرَّرين — كان ينمو بلا حد
+      try {
+        if (s.includes('@kline_')) {
+          const tf = tfFromStream(s);
+          const sym = symbolFromStream(s);
+          if (sym && tf) klines.delete(`${sym}|${tf}`);
+        } else if (s.includes('@aggTrade')) {
+          const sym = symbolFromStream(s);
+          if (sym && !wantedFlow.has(sym)) trades.delete(sym);
+        }
+      } catch { /* الإخلاء لا يعطل المزامنة */ }
     }
 
     // 2) فتح اتصالات إضافية عند الحاجة (سقف 900/اتصال — حد بينانس 1024)
