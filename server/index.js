@@ -1354,11 +1354,13 @@ app.get('/api/strategy2/directions', handle(async (req, res) => {
     sort: req.query.sort, limit: req.query.limit, offset: req.query.offset
   };
   const { rows, total } = strategy2Engine.queryDirections(q);
+  // «مفلترة» تعني فلاتر فعلية من المستخدم — لا مجرد قص الصفحة (القص السابق كان يوحي بفلترة كاذبة)
+  const hasFilter = ['symbol', 'dir', 'stage', 'dead', 'agreement'].some(k => req.query[k] != null && String(req.query[k]).trim() !== '');
   res.json({
     summary: strategy2Engine.getDirectionsSummary(),
     directions: rows,
     total,
-    filtered: total !== rows.length,
+    filtered: hasFilter,
     updatedAt: Date.now()
   });
 }));

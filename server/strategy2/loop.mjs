@@ -153,7 +153,9 @@ export function createStrategyEngine(deps) {
   let cycleTimer = null, tickTimer = null, calibTimer = null, dirPriceTimer = null, unsubClose = null;
   let running = false;
   let lastPrices = {};
-  let lastFastAt = 0;
+  // تخفيف المعالجة الفورية لكل (رمز|فريم) على حدة — الخانق العام السابق كان يسقط إغلاقات
+  // متزامنة لرموز أخرى (إشارة ضائعة حتى الدورة التالية)
+  const fastThrottle = new Map(); // "SYM|tf" → آخر إطلاق (ms)
 
   const bumpFailure = (key, message) => {
     const f = failures.get(key) ?? { count: 0, last: null, message: null };
@@ -1016,8 +1018,14 @@ export function createStrategyEngine(deps) {
     }
     if (!cfg.entryTfs.includes(tf)) return;
     const t = now();
-    if (t - lastFastAt < 800) return;
-    lastFastAt = t;
+    const throttleKey = `${symbol}|${tf}`;
+    if (t - (fastThrottle.get(throttleKey) ?? 0) < 800) return;
+    fastThrottle.set(throttleKey, t);
+    // سقف الذاكرة: الأقدم يُسقط أولاً
+    if (fastThrottle.size > 2000) {
+      const oldest = fastThrottle.keys().next().value;
+      if (oldest) fastThrottle.delete(oldest);
+    }
     if (!status.busy) void processSymbolTf(symbol, tf);
   }
 

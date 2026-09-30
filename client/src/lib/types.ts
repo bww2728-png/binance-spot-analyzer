@@ -712,6 +712,7 @@ export interface Strategy2Feed {
     error: string | null;
     targetWinRate: number;
   };
+  csse?: { version: string; tracked: number; setups: Record<string, number> };
 }
 
 export interface Strategy2HistoryEvent {

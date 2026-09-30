@@ -101,9 +101,11 @@ export default function StrategyScreen() {
 
   useEffect(() => { if (tab === 'directions') void loadDirections(); }, [tab, loadDirections]);
   // نبضات الاتجاهات عبر WS — إعادة جلب صامتة (debounce 1 ث) + احتياطي 30 ث
+  // تُعاد القراءة فقط عند نبضات الاتجاهات/النشر/الحسم — نبضات tick الثانية لا تمس هذا السجل
   const dirDebounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (tab !== 'directions' || !pulse) return;
+    if (!['strategy2_directions', 'new', 'closed', 'central_notification'].includes(pulse.kind)) return;
     if (dirDebounceRef.current) window.clearTimeout(dirDebounceRef.current);
     dirDebounceRef.current = window.setTimeout(() => { void loadDirections(true); }, 1000);
     return () => { if (dirDebounceRef.current) window.clearTimeout(dirDebounceRef.current); };
@@ -164,8 +166,9 @@ export default function StrategyScreen() {
 
   useEffect(() => { void load(); }, [load]);
   // نبضات WS — إعادة جلب صامتة (debounce 1.2 ث) + احتياطي 30 ث
+  // تخطي نبضات tick والاتجاهات: بياناتها حية أصلاً في المخزن — إعادة الجلب الكامل كل ثانية هدر بلا فائدة
   useEffect(() => {
-    if (!pulse) return;
+    if (!pulse || pulse.kind === 'strategy2_tick' || pulse.kind === 'strategy2_directions') return;
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => { void load(true); }, 1200);
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
@@ -507,6 +510,30 @@ export default function StrategyScreen() {
             </div>
           </div>
           <div className="card p-4">
+            <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>ذاكرة التتبع المستمر للشارت (CSSE) — حية لكل (رمز|فريم)</div>
+            {(() => {
+              const csse = feed?.csse;
+              if (!csse) return <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا بيانات تتبع بعد — تظهر بعد أول دورة مسح.</div>;
+              const labels: Record<string, string> = { WAIT: 'انتظار', OPPORTUNITY: 'فرصة منشورة', CONFIRMED: 'إشارة مؤكدة', RESOLVED: 'محسومة', INVALIDATED: 'ملغاة' };
+              const entries = Object.entries(csse.setups ?? {}).sort((a, b) => b[1] - a[1]);
+              return (
+                <div>
+                  <div className="text-[12px] mb-2" style={{ color: 'var(--text-2)' }}>حالات مُتتبعة: <b className="num" style={{ color: 'var(--accent)' }}>{csse.tracked}</b></div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {entries.length === 0
+                      ? <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا حالات بعد.</span>
+                      : entries.map(([st, n]) => (
+                        <span key={st} className="text-[11px] px-2 py-0.5 rounded-full font-semibold" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>{labels[st] ?? st}: <b className="num">{n}</b></span>
+                      ))}
+                  </div>
+                </div>
+              );
+            })()}
+            <div className="text-[11px] mt-3" style={{ color: 'var(--text-3)' }}>
+              كل حالة تحمل عناصر الشارت بهويات حتمية (تبقى بعد إعادة التشغيل) + قائمة تسلسل ما تحقق وما لم يتحقق — تُعرض القائمة لكل فرصة في تبويب الفرص.
+            </div>
+          </div>
+          <div className="card p-4">
             <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>فشل جلب البيانات (شفافية كاملة — لا فشل صامت)</div>
             {feed?.failures.length
               ? (
@@ -565,7 +592,7 @@ export default function StrategyScreen() {
 function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: Strategy2DirectionRow; onChart: () => void }) {
   const tick = useStore(s => s.strategy2Rows[o.id]);
   const px = tick?.price ?? o.price;
-  const tier = TIER_BADGE[o.tier ?? 'probationary'] ?? TIER_BADGE.probationary;
+  const tier = o.tier ? (TIER_BADGE[o.tier] ?? null) : null;
   const dist = distanceBand(o.distancePct);
   const modelLabel = o.model === 1 ? '1 — سويب+choch' : o.model === 2 ? '2 — مبكرين+ابتلاع' : '—';
   return (
@@ -580,8 +607,10 @@ function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: St
       <td className="px-2.5 py-2 text-[11.5px]" style={{ color: 'var(--text-3)' }}>
         {o.afterPremium == null ? '—' : o.afterPremium ? 'نعم' : 'لا'}
       </td>
-      <td className="px-2.5 py-2 whitespace-nowrap">
-        <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: `${tier.color}22`, color: tier.color, border: `1px solid ${tier.color}55` }}>{tier.label}</span>
+      <td className="px-2.5 py-2 whitespace-nowrap" title={o.tier ? undefined : 'نُشرت قبل اكتمال المعايرة — بلا تصفية إحصائية'}>
+        {tier
+          ? <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: `${tier.color}22`, color: tier.color, border: `1px solid ${tier.color}55` }}>{tier.label}</span>
+          : <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: 'transparent', color: 'var(--text-3)', border: '1px dashed var(--border-1)' }}>بلا معايرة</span>}
       </td>
       <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>{pct(o.calibratedWinRate)}</td>
       <td className="px-2.5 py-2 num" style={{ color: 'var(--text-2)' }}>{fmtPx(o.entry)}</td>
@@ -589,7 +618,7 @@ function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: St
       <td className="px-2.5 py-2 num" style={{ color: 'var(--up)' }}>{fmtPx(o.tp1)}</td>
       <td className="px-2.5 py-2 num" style={{ color: 'var(--up)' }}>{fmtPx(o.tp2)}</td>
       <td className="px-2.5 py-2 num font-bold" style={{ color: (o.rr ?? 0) >= 1.5 ? 'var(--up)' : 'var(--text-2)' }}>{o.rr != null ? o.rr.toFixed(2) : '—'}</td>
-      <td className="px-2.5 py-2 whitespace-nowrap text-[11px] font-semibold" style={{ color: dist.color }}>{dist.label}</td>
+      <td className="px-2.5 py-2 whitespace-nowrap text-[11px] font-semibold" style={{ color: dist.color }} title={o.distancePct != null && Number.isFinite(o.distancePct) ? `البعد عن TP1: ${Math.abs(o.distancePct).toFixed(3)}%` : 'المسافة غير محسوبة'}>{dist.label}{o.distancePct != null && Number.isFinite(o.distancePct) ? ` · ${Math.abs(o.distancePct).toFixed(2)}%` : ''}</td>
       <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-2)' }}>
         {tick ? `${tick.plPct != null ? `${tick.plPct > 0 ? '+' : ''}${tick.plPct.toFixed(2)}%` : '—'}` : `${fmtPx(px)}`}
         {tick?.rNow != null && <span style={{ color: 'var(--text-3)' }}> · {tick.rNow.toFixed(2)}R</span>}

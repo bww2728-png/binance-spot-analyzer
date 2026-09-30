@@ -533,7 +533,6 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
   let bslSweptAfterDiscount = false; // فشل: سويب bsl بعد السويب الأخير
   let model1Ready = false, model2Ready = false;
   let invalid = null;
-  let stepIdx = chochIdx;
 
   // 1) هل سبق choch up تعدي bsl داخلي قبل الديسكاونت؟ (يُشترط عنده ssl لاحقاً)
   for (let i = chochIdx; i <= flowEnd; i += 1) {
