@@ -1322,6 +1322,12 @@ const strategy2Engine = createStrategyEngine({
     maxSymbols: Number(process.env.STRATEGY2_MAX_SYMBOLS) || 180,
     analysisWindow: Number(process.env.STRATEGY2_WINDOW) || 400,
     warmupBars: Number(process.env.STRATEGY2_WARMUP) || 200,
+    // فريمات الدخول (والأكبر ×8 تلقائياً): افتراضياً من الدقيقة — قابلة للضبط عبر البيئة
+    entryTfs: (() => {
+      const list = (process.env.STRATEGY2_ENTRY_TFS || '1m,5m,15m').split(',')
+        .map(s => s.trim().toLowerCase()).filter(s => /^(\d+)(m|h|d|w)$/.test(s));
+      return list.length ? list : ['1m', '5m', '15m'];
+    })(),
     calibration: {
       symbols: Number(process.env.STRATEGY2_CALIB_SYMBOLS) || 48,
       bars: Number(process.env.STRATEGY2_CALIB_BARS) || 1500,
@@ -1349,15 +1355,13 @@ app.get('/api/strategy2/status', handle(async (_req, res) => {
 // سجل الاتجاهات الحي لكل العملات — فلترة وترتيب على الخادم قبل أي قص
 app.get('/api/strategy2/directions', handle(async (req, res) => {
   const q = {
-    symbol: req.query.symbol, dir: req.query.dir, stage: req.query.stage,
+    symbol: req.query.symbol, tf: req.query.tf, dir: req.query.dir, stage: req.query.stage,
     dead: req.query.dead, agreement: req.query.agreement,
     sort: req.query.sort, limit: req.query.limit, offset: req.query.offset
   };
   const { rows, total } = strategy2Engine.queryDirections(q);
-  // «مفلترة» تعني فلاتر فعلية من المستخدم — لا مجرد قص الصفحة (القص السابق كان يوحي بفلترة كاذبة)
-  const hasFilter = ['symbol', 'dir', 'stage', 'dead', 'agreement'].some(k => req.query[k] != null && String(req.query[k]).trim() !== '');
   res.json({
-    summary: strategy2Engine.getDirectionsSummary(),
+    summary: strategy2Engine.getDirectionsSummary(q.tf),
     directions: rows,
     total,
     filtered: hasFilter,

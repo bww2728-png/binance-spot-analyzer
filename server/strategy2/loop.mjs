@@ -23,8 +23,8 @@ import {
 const DEFAULT_CONFIG = {
   cycleMs: 20_000,             // دورة فحص احتياطية (المعالجة الأساسية حدث-مدفوعة بإغلاق الشموع)
   tickMs: 1_000,               // نبض تتبع النتائج من الأسعار الحية
-  entryTfs: ['5m', '15m'],     // فريمات الدخول — الفريم الأكبر = ×8 تلقائياً (40m/2h)
-  warmupBars: 220,             // أقل عدد شموع قبل بدء التحليل
+  entryTfs: ['1m', '5m', '15m'], // فريمات الدخول — الفريم الأكبر = ×8 تلقائياً (8m/40m/2h)
+  warmupBars: 220,             // أقل عدد شموع قبل بدء التحليل (1m: تُخفَّض إلى 96 في الاتجاهات)
   analysisWindow: 900,         // نافذة الشموع المعالجة (يشمل تجميع ×8)
   maxSymbols: 462,
   publishLimit: 100,
@@ -143,6 +143,9 @@ export function createStrategyEngine(deps) {
     restored: 0, reconciled: 0
   };
   const calibration = { at: null, busy: false, trades: 0, progress: null, segments: [], error: null };
+  let resolvedSinceCalib = 0; // نتائج محسومة منذ آخر معايرة — تُشغّل المعايرة الذاتية عند العتبة
+  const AUTO_CALIB_TRADES = 30;
+  const AUTO_CALIB_MIN_AGE_MS = 3600_000;
 
   /* ---- سجل الاتجاهات الحي (كل العملات — تتبع مستمر بلا انقطاع) ---- */
   const directions = new Map();      // symbol → { state, since, lastChangeAt, changeCount, transitions[] }
@@ -187,7 +190,7 @@ export function createStrategyEngine(deps) {
       }
       csseStates.set(key, next);
       // سقف الحالات: الأقدم تحديثاً يُسقط أولاً (الذاكرة محدودة)
-      if (csseStates.size > 600) {
+      if (csseStates.size > 1000) {
         let oldest = null, oldestAt = Infinity;
         for (const [k, v] of csseStates) {
           if ((v.updatedAt ?? 0) < oldestAt) { oldestAt = v.updatedAt ?? 0; oldest = k; }
@@ -316,6 +319,8 @@ export function createStrategyEngine(deps) {
       detectedAt: now(), entryTimeMs: signal.at * 1000,
       price: signal.price,
       entry: signal.entry, stop: signal.stop, tp1: signal.tp1, tp2: signal.tp2,
+      tpAlt: signal.tpAlt ?? null,
+      conservative: tier == null || tier === 'weak', // شريحة غير مؤكدة → الهدف المتحفظ (BSL داخلي) مقترح
       stopRef: signal.stopRef,
       rr: signal.rr,
       distancePct: Number((((signal.price - signal.tp1) / signal.tp1) * 100).toFixed(3)),
@@ -356,6 +361,18 @@ export function createStrategyEngine(deps) {
       const prev = lastProcessed.get(`${symbol}|${tf}`);
       if (!force && prev === lastOpen) return; // لا شمعة جديدة — لا معالجة
       lastProcessed.set(`${symbol}|${tf}`, lastOpen);
+
+      // سجل الاتجاهات لكل فريم دخول (عدا 1m — له مساره الخاص عبر طابور الدقيقة)
+      if (tf !== '1m') {
+        try {
+          const dirPrice = Number(market?.getPrice?.(symbol)) || Number(candles[candles.length - 1].close);
+          const dirNext = computeDirectionState(candles, { price: dirPrice, tf });
+          clearFailure(`${symbol}|${tf}|dir`);
+          storeDirection(symbol, tf, dirNext);
+        } catch (e) {
+          bumpFailure(`${symbol}|${tf}|dir`, e.message);
+        }
+      }
 
       // فرصة نشطة لنفس الرمز/الفريم → لا إشارة جديدة (سقف 1)
       if (bySymbolTf.has(`${symbol}|${tf}`)) return;
@@ -407,8 +424,17 @@ export function createStrategyEngine(deps) {
       const price = Number(market?.getPrice?.(symbol)) || Number(c1[c1.length - 1].close);
       const next = computeDirectionState(c1, { price, candles5m: c5 });
       clearFailure(`${symbol}|1m|dir`);
+      storeDirection(symbol, '1m', next);
+    } catch (e) {
+      bumpFailure(`${symbol}|1m|dir`, e.message);
+    }
+  }
 
-      const prevEntry = directions.get(symbol);
+  /** تخزين حالة اتجاه (رمز|فريم): تصنيف التغيّر + سجل + حدث دائم + بث — تنبيه مركزي لانقلابات 1m فقط */
+  function storeDirection(symbol, tf, next) {
+    try {
+      const key = `${symbol}|${tf}`;
+      const prevEntry = directions.get(key);
       const prev = prevEntry?.state ?? null;
       const change = classifyChange(prev, next);
       const entry = {
@@ -422,10 +448,12 @@ export function createStrategyEngine(deps) {
         entry.transitions.unshift({ at: now(), kind: change.kind, label: change.label, dir: next.dir, stage: next.stage });
         if (entry.transitions.length > 12) entry.transitions.pop();
         void persist({
-          directionEvent: true, symbol, dir: next.dir, prevDir: prev?.dir ?? null,
-          stage: next.stage, label: change.label, kind: change.kind, notify: Boolean(change.notify), at: now()
+          directionEvent: true, symbol, tf, dir: next.dir, prevDir: prev?.dir ?? null,
+          dirTF: next.dirTF ?? next.dir1m ?? next.dir, dirHTF: next.dirHTF ?? next.dir40m ?? null,
+          htfTf: next.htfTf ?? null,
+          stage: next.stage, label: change.label, kind: change.kind, notify: Boolean(change.notify) && tf === '1m', at: now()
         }).catch(() => undefined);
-        if (change.notify) {
+        if (change.notify && tf === '1m') {
           // إشعار مركزي مصنف (شاشة الإشعارات فقط — بلا نوافذ منبثقة)
           broadcast({
             type: 'central_notification', notification: {
@@ -437,12 +465,12 @@ export function createStrategyEngine(deps) {
         }
         broadcast({
           type: 'strategy2_directions',
-          changed: [{ symbol, dir: next.dir, stage: next.stage, dead: next.dead, agreement: next.agreement }]
+          changed: [{ symbol, tf, dir: next.dir, stage: next.stage, dead: next.dead, agreement: next.agreement }]
         });
       }
-      directions.set(symbol, entry);
+      directions.set(key, entry);
     } catch (e) {
-      bumpFailure(`${symbol}|1m|dir`, e.message);
+      bumpFailure(`${symbol}|${tf}|dir`, e.message);
     }
   }
 
@@ -463,7 +491,8 @@ export function createStrategyEngine(deps) {
   /** تحديث خفيف بالأسعار الحية (الموت/المسافة) — بين إغلاقات الشموع */
   function refreshDirectionPrices() {
     if (!directions.size) return;
-    for (const [symbol, entry] of directions) {
+    for (const [key, entry] of directions) {
+      const symbol = key.split('|')[0];
       const px = Number(market?.getPrice?.(symbol));
       if (!Number.isFinite(px)) continue;
       const updated = updateWithPrice(entry.state, px);
@@ -480,13 +509,19 @@ export function createStrategyEngine(deps) {
     }
   }
 
-  function queryDirections({ symbol = '', dir = '', stage = '', dead = '', agreement = '', sort = 'symbol', limit = 500, offset = 0 } = {}) {
+  function queryDirections({ symbol = '', tf = '', dir = '', stage = '', dead = '', agreement = '', sort = 'symbol', limit = 500, offset = 0 } = {}) {
     const sym = String(symbol).trim().toUpperCase();
+    const tff = String(tf).trim().toLowerCase();
     let rows = [];
-    for (const [s, entry] of directions) {
+    for (const [key, entry] of directions) {
+      const s = key.split('|')[0];
       const st = entry.state;
       rows.push({
         symbol: s,
+        tf: st.tf ?? key.split('|')[1] ?? '1m',
+        htfTf: st.htfTf ?? null,
+        dirTF: st.dirTF ?? st.dir1m ?? st.dir,
+        dirHTF: st.dirHTF ?? st.dir40m ?? null,
         dir: st.dir, dir1m: st.dir1m, dir40m: st.dir40m, agreement: st.agreement,
         stage: st.stage, stageDetail: st.stageDetail,
         anchorHigh: st.anchorHigh, anchorLow: st.anchorLow,
@@ -499,6 +534,7 @@ export function createStrategyEngine(deps) {
       });
     }
     if (sym) rows = rows.filter(r => r.symbol.includes(sym));
+    if (tff) rows = rows.filter(r => r.tf === tff);
     if (dir) rows = rows.filter(r => r.dir === dir);
     if (agreement) rows = rows.filter(r => r.agreement === agreement);
     if (dead === '1' || dead === 'true') rows = rows.filter(r => r.dead);
@@ -513,18 +549,23 @@ export function createStrategyEngine(deps) {
     return { rows: rows.slice(off, off + Math.min(Number(limit) || 500, 1000)), total };
   }
 
-  function getDirectionsSummary() {
+  function getDirectionsSummary(tf = null) {
+    const tff = tf != null && String(tf).trim() !== '' ? String(tf).trim().toLowerCase() : null;
     const counts = { up: 0, down: 0, range: 0, confirmed: 0, conflicted: 0, dead: 0 };
-    for (const [, entry] of directions) {
+    let total = 0;
+    const stages = {};
+    for (const [key, entry] of directions) {
+      const rowTf = entry.state?.tf ?? key.split('|')[1] ?? '1m';
+      if (tff && rowTf !== tff) continue;
+      total += 1;
       const st = entry.state;
       counts[st.dir] = (counts[st.dir] ?? 0) + 1;
       if (st.agreement === 'confirmed') counts.confirmed += 1;
       if (st.agreement === 'conflicted') counts.conflicted += 1;
       if (st.dead) counts.dead += 1;
+      stages[st.stage] = (stages[st.stage] ?? 0) + 1;
     }
-    const stages = {};
-    for (const [, entry] of directions) stages[entry.state.stage] = (stages[entry.state.stage] ?? 0) + 1;
-    return { total: directions.size, ...counts, stages };
+    return { total, ...counts, stages };
   }
 
 
@@ -567,6 +608,11 @@ export function createStrategyEngine(deps) {
       while (rejected.length > 120) rejected.shift();
       status.updatedAt = now();
       status.error = null;
+      // معايرة ذاتية: نتائج جديدة كافية + مضى عليها وقت → أعد المعايرة تلقائياً
+      if (resolvedSinceCalib >= AUTO_CALIB_TRADES && now() - (calibration.at ?? 0) > AUTO_CALIB_MIN_AGE_MS && !calibration.busy) {
+        log.log?.(`[strategy2] auto-calibration: ${resolvedSinceCalib} resolved since last`);
+        void runCalibration();
+      }
       return { ok: true, cycle: status.cycle, ms: now() - t0 };
     } catch (e) {
       status.error = e.message;
@@ -614,6 +660,7 @@ export function createStrategyEngine(deps) {
         const win = op.outcome === 'target' || op.outcome === 'target2';
         if (win) status.wins += 1; else if (op.outcome === 'stop' || op.outcome === 'invalidated') status.losses += 1;
         status.resolved += 1;
+        resolvedSinceCalib += 1;
         csseOutcome(op.symbol, op.tf, { kind: 'resolved', outcome: op.outcome, price: px });
         const sk = op.segmentKey;
         const st2 = liveStats.get(sk) ?? { trades: 0, wins: 0 };
@@ -724,6 +771,7 @@ export function createStrategyEngine(deps) {
       calibration.trades = trades.filter(x => x.win === 0 || x.win === 1).length;
       calibration.segments = rows;
       calibration.progress = null;
+      resolvedSinceCalib = 0;
       calibration.samplePairs = all.length;
       calibration.version = CALIB_VERSION;
       broadcast({ type: 'strategy2_calibration_done', segments: rows.length, trades: calibration.trades });
@@ -761,15 +809,20 @@ export function createStrategyEngine(deps) {
       if (typeof readDirectionEvents !== 'function') return;
       const rows = await readDirectionEvents();
       if (!Array.isArray(rows) || !rows.length) return;
-      const latest = new Map(); // symbol → آخر حدث (الأحدث أولاً)
+      const latest = new Map(); // "SYM|tf" → آخر حدث (الأحدث أولاً)
       for (const r of rows) {
-        if (!r.symbol || latest.has(r.symbol)) continue;
-        latest.set(r.symbol, r);
+        if (!r.symbol) continue;
+        const key = `${r.symbol}|${r.tf ?? '1m'}`;
+        if (latest.has(key)) continue;
+        latest.set(key, r);
       }
-      for (const [symbol, r] of latest) {
-        if (directions.has(symbol)) continue;
+      for (const [key, r] of latest) {
+        if (directions.has(key)) continue;
+        const symbol = r.symbol;
+        const tf = r.tf ?? '1m';
         const state = {
-          dir: r.dir ?? 'range', dir1m: r.dir1m ?? r.dir ?? 'range', dir40m: r.dir40m ?? null,
+          dir: r.dir ?? 'range', dirTF: r.dirTF ?? r.dir1m ?? r.dir ?? 'range', dirHTF: r.dirHTF ?? r.dir40m ?? null,
+          tf, htfTf: r.htfTf ?? null,
           agreement: r.agreement ?? 'single',
           stage: r.stage ?? 'بانتظار إعادة الحساب', stageDetail: {},
           anchorHigh: r.anchorHigh ?? null, anchorLow: r.anchorLow ?? null,
@@ -777,14 +830,15 @@ export function createStrategyEngine(deps) {
           externalNext: null, distToExternalPct: null,
           deathLevel: r.deathLevel ?? null, dead: Boolean(r.dead),
           discountLevel: null, legLow: null, legHigh: null,
-          price: r.price ?? null, atr1m: null
+          price: r.price ?? null, atrTF: null
         };
-        directions.set(symbol, {
+        if (tf === '1m') { state.dir1m = state.dirTF; state.dir40m = state.dirHTF; }
+        directions.set(key, {
           state, since: r.at ?? now(), lastChangeAt: r.at ?? null,
           changeCount: 1, transitions: [{ at: r.at ?? now(), kind: 'restored', label: 'استرجاع من السجل الدائم', dir: state.dir, stage: state.stage }],
           restoredPlaceholder: true
         });
-        directionQueue.add(symbol); // إعادة حساب فورية بالبيانات الحية عند التوفر
+        if (tf === '1m') directionQueue.add(symbol); // إعادة حساب فورية بالبيانات الحية عند التوفر
       }
       log.log?.(`[strategy2] restored ${latest.size} direction states from events`);
     } catch (e) {
@@ -849,6 +903,7 @@ export function createStrategyEngine(deps) {
           const win = outcome === 'target' || outcome === 'target2';
           if (win) status.wins += 1; else if (outcome === 'stop' || outcome === 'invalidated') status.losses += 1;
           status.resolved += 1; status.reconciled += 1;
+          resolvedSinceCalib += 1;
           broadcast({ type: 'strategy2_closed', opportunity: op });
           void persist({ ...op, closed: true }).catch(() => undefined);
           history.unshift(op);
@@ -1012,7 +1067,7 @@ export function createStrategyEngine(deps) {
   function onCandleClosed(symbol, tf) {
     // شموع الدقيقة → طابور إعادة حساب الاتجاه (التتبع المستمر بلا انقطاع)
     if (tf === '1m') {
-      if (directions.has(symbol) || directionQueue.size < 1200) directionQueue.add(symbol);
+      if (directions.has(`${symbol}|1m`) || directionQueue.size < 1200) directionQueue.add(symbol);
       void drainDirectionQueue();
       return;
     }

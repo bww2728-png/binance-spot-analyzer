@@ -492,9 +492,10 @@ const liveOpportunitiesApi = {
   },
   getStrategy2History: (days: number, signal?: AbortSignal) =>
     fetch(`${BASE}/strategy2/history?days=${days}`, { signal }).then(j<Strategy2HistoryResponse>),
-  getStrategy2Directions: (opts: { symbol?: string; dir?: string; stage?: string; dead?: string; agreement?: string; sort?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
+  getStrategy2Directions: (opts: { symbol?: string; tf?: string; dir?: string; stage?: string; dead?: string; agreement?: string; sort?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (opts.symbol) qs.set('symbol', opts.symbol);
+    if (opts.tf) qs.set('tf', opts.tf);
     if (opts.dir) qs.set('dir', opts.dir);
     if (opts.stage) qs.set('stage', opts.stage);
     if (opts.dead) qs.set('dead', opts.dead);

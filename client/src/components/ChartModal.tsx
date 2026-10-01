@@ -39,7 +39,7 @@ const TF_SECONDS: Record<string, number> = {
   '1d': 86400, '3d': 259200, '1w': 604800
 };
 
-function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true, containerCb }: {
+function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true, containerCb, extraLines = [] }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
@@ -52,6 +52,7 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
   height: number;
   showAutoMarkers?: boolean;
   containerCb?: (el: HTMLDivElement | null) => void;
+  extraLines?: { price: number; color: string; title: string }[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -221,12 +222,19 @@ function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onCh
     if (zones.bsl != null) {
       lines.push(series.createPriceLine({ price: zones.bsl, color: '#f23645', title: 'BSL', lineWidth: 1, lineStyle: 2, axisLabelVisible: true }));
     }
+    // مستويات الاستراتيجية المحللة (دخول/وقف/أهداف/سويب/مناطق) — تُرسم في أماكنها السعرية
+    for (const l of extraLines ?? []) {
+      if (l == null || !Number.isFinite(Number(l.price))) continue;
+      try {
+        lines.push(series.createPriceLine({ price: Number(l.price), color: l.color || '#64748b', title: String(l.title || '').slice(0, 24), lineWidth: 1, lineStyle: 2, axisLabelVisible: true }));
+      } catch { /* مستوى تالف يُتجاهل */ }
+    }
     return () => {
       for (const l of lines) {
         try { series.removePriceLine(l); } catch { /* ignore */ }
       }
     };
-  }, [zones.ssl, zones.bsl, ready]);
+  }, [zones.ssl, zones.bsl, ready, extraLines]);
 
   // مناطق السيولة تُرسم كمناطق مظللة (Bands) عبر canvas overlay — لا خطوط
   const visibleZones = useMemo(() => {
@@ -595,8 +603,19 @@ export default function ChartModal() {
   const [barcodeAck, setBarcodeAck] = useState(false);
   const [barcodeScanning, setBarcodeScanning] = useState(false);
 
-  const [tfLower, setTfLower] = useState(analysis?.tf_lower ?? '15m');
-  const [tfUpper, setTfUpper] = useState(analysis?.tf_upper ?? '4h');
+  const [tfLower, setTfLower] = useState(modal.tfLower ?? analysis?.tf_lower ?? '15m');
+  const [tfUpper, setTfUpper] = useState(modal.tfUpper ?? analysis?.tf_upper ?? '4h');
+  // احترام الفريم المطلوب من زر الشارت (استراتيجيتي تطلب 1m/5m/15m) — مع المزامنة عند تغيّر الطلب
+  useEffect(() => {
+    if (modal.tfLower) setTfLower(modal.tfLower);
+    else if (analysis?.tf_lower) setTfLower(analysis.tf_lower);
+  }, [modal.symbol, modal.tfLower, analysis?.tf_lower]);
+  useEffect(() => {
+    if (modal.tfUpper) setTfUpper(modal.tfUpper);
+    else if (analysis?.tf_upper) setTfUpper(analysis.tf_upper);
+  }, [modal.symbol, modal.tfUpper, analysis?.tf_upper]);
+  // مستويات الاستراتيجية المطلوب رسمها (من زر الشارت) — في أماكنها السعرية على الفريمين
+  const strategyLevels = useMemo(() => (modal.levels ?? []).filter(l => l != null && Number.isFinite(Number(l?.price))), [modal.levels]);
 
   // ---- وضع التعليم ومناطق السيولة ----
   const zoneCounts = useStore(s => s.zoneCounts);
@@ -909,7 +928,7 @@ export default function ChartModal() {
                   </button>
                 </div>
               )}
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} containerCb={el => { lowerChartRef.current = el; }} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} containerCb={el => { lowerChartRef.current = el; }} extraLines={strategyLevels} />
             </div>
             <div
               className={fullscreen === 'upper' ? 'fixed inset-0 z-[60]' : fullscreen ? 'hidden' : ''}
@@ -928,7 +947,7 @@ export default function ChartModal() {
                   </button>
                 </div>
               )}
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} containerCb={el => { upperChartRef.current = el; }} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} containerCb={el => { upperChartRef.current = el; }} extraLines={strategyLevels} />
             </div>
           </div>
 

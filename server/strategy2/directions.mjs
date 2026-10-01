@@ -1,13 +1,16 @@
 /* نواة سجل الاتجاهات الحي — حتمية بالكامل (بلا شبكة)
  *
- * منطق المستخدم الحرفي:
- *  - اتجاه كل عملة يُحدَّد من فريم الدقيقة (1m) وفريمه الأكبر (تجميع ×8 = 8m).
+ * منطق المستخدم الحرفي (معمّم لكل فريم):
+ *  - اتجاه كل عملة يُحدَّد من فريمها وفريمها الأكبر (تجميع ×8).
  *  - إن كان الاتجاه صاعداً: هل حصل تعدي منطقة bsl؟
  *      نعم → تحديد منطقة ديسكاونت + ssl (شرط إضافي قبل التأكيد)
  *      لا  → تحديد منطقة ديسكاونت فقط
  *  - ثم بعد بلوغ الديسكاونت: بانتظار تأكيد الدخول (حيث تتولد الإشارة عبر تدفق الشراء القائم).
  *  - هابط: رصد نهاية الهبوط (بانتظار قمة محمية / choch up).
  *  - عرضي: رصد تكوّن هيكل.
+ *
+ * التوافق الخلفي: الاستدعاء القديم (شموع 1m + candles5m) يعيد نفس الحقول القديمة
+ * (dir1m/dir40m/atr1m) بلا أي تغيير سلوكي.
  *
  * كل الدوال نقية: نفس المدخلات → نفس المخرجات.
  */
@@ -16,20 +19,39 @@ import { aggregateX8, buildHtfContext, buildInternal, atr } from './structure.mj
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/** دقائق الفريم من رمزه */
+function tfMinutes(tf) {
+  const n = parseInt(tf, 10) || 1;
+  const u = String(tf).replace(/[0-9]/g, '') || 'm';
+  const mult = { m: 1, h: 60, d: 1440, w: 10080 }[u] ?? 1;
+  return n * mult;
+}
+
+/** رمز الفريم الأكبر (×8) */
+export function htfLabelOf(tf) {
+  const m = tfMinutes(tf) * 8;
+  if (m < 60) return `${m}m`;
+  if (m % 60 === 0) return `${m / 60}h`;
+  return `${Math.floor(m / 60)}h${m % 60}m`;
+}
+
 /** اتجاه بنية 1m من آخر كسور المناطق الداخلية (مساعد) */
 function internalDir(internal) {
   return internal.internalTrend === 'up' ? 'up'
     : internal.internalTrend === 'down' ? 'down' : 'range';
 }
 
-/** موضع السعر ضمن رِجل الصعود الحالية (0 = القاع، 1 = القمة) */
-function upLegPosition(candles1m, flipLevel, price) {
+/** موضع السعر ضمن رِجل الصعود الحالية (0 = القاع، 1 = القمة) — نافذة زمنية ~4 ساعات */
+function upLegPosition(candles, flipLevel, price) {
   let low = Math.min(flipLevel ?? Infinity, price);
   let high = Math.max(flipLevel ?? -Infinity, price);
-  // نافذة الرِجل: آخر 240 شمعة دقيقة (4 ساعات) — تكفي لأي مشوار قصير/متوسط
-  const start = Math.max(0, candles1m.length - 240);
-  for (let i = start; i < candles1m.length; i += 1) {
-    const h = Number(candles1m[i].high), l = Number(candles1m[i].low);
+  const lastMs = Number(candles[candles.length - 1]?.timeMs ?? candles[candles.length - 1]?.time * 1000);
+  const windowStart = lastMs - 4 * 3600_000;
+  for (let i = candles.length - 1; i >= 0; i -= 1) {
+    const c = candles[i];
+    const ms = Number(c.timeMs ?? c.time * 1000);
+    if (ms < windowStart) break;
+    const h = Number(c.high), l = Number(c.low);
     if (Number.isFinite(h) && h > high) high = h;
     if (Number.isFinite(l) && l < low) low = l;
   }
@@ -42,54 +64,68 @@ function upLegPosition(candles1m, flipLevel, price) {
 }
 
 /**
- * الحالة الكاملة لاتجاه عملة واحدة من شموع الدقيقة.
- * @param candles1m شموع دقيقة (≥ 120 مطلوبة للبنية)
- * @param opts { price, candles5m? } — شموع 5m اختيارية لحساب توافق 40m
+ * الحالة الكاملة لاتجاه عملة واحدة على فريم معين.
+ * @param candles شموع الفريم الأساسي (1m: ≥120 · غيرها: ≥96)
+ * @param opts { price, candles5m?, candlesConfirm?, tf?, confirmTf? }
+ *  - candles5m: توافق 40m للتوافق الخلفي (1m فقط)
+ *  - candlesConfirm + confirmTf: تأكيد عام لأي فريم
+ *  - tf: رمز الفريم الأساسي (افتراضي '1m')
  */
-export function computeDirectionState(candles1m, { price = null, candles5m = null } = {}) {
+export function computeDirectionState(candles, { price = null, candles5m = null, candlesConfirm = null, tf = null, confirmTf = null } = {}) {
+  const baseTf = tf ?? '1m';
+  const confirm = candlesConfirm ?? candles5m ?? null;
+  const confTf = confirmTf ?? (confirm != null ? (baseTf === '1m' ? '40m' : htfLabelOf(baseTf)) : null);
+  const minBars = baseTf === '1m' ? 120 : 96;
+  const candles1m = candles;
   const empty = {
-    dir: 'range', dir1m: 'range', dir40m: null, agreement: 'single',
+    dir: 'range', dirTF: 'range', dirHTF: null, tf: baseTf, htfTf: htfLabelOf(baseTf), agreement: 'single',
     stage: 'جارٍ تكوين البنية — شموع غير كافية', stageDetail: {},
     anchorHigh: null, anchorLow: null, afterPremium: null,
     externalNext: null, distToExternalPct: null,
     deathLevel: null, dead: false,
     discountLevel: null, legLow: null, legHigh: null,
     price: Number.isFinite(Number(price)) ? Number(price) : null,
-    atr1m: null
+    atrTF: null
   };
-  if (!Array.isArray(candles1m) || candles1m.length < 120) return empty;
+  if (!Array.isArray(candles1m) || candles1m.length < minBars) return empty;
 
   const px = Number.isFinite(Number(price))
     ? Number(price)
     : Number(candles1m[candles1m.length - 1]?.close);
 
-  // 1) الفريم الأكبر (8m = 1m × 8): الاتجاه الحاكم
+  // 1) الفريم الأكبر (×8): الاتجاه الحاكم
   const htf = aggregateX8(candles1m);
   const ctx = buildHtfContext(htf, { price: px });
-  // 2) بنية 1m الداخلية
+  // 2) بنية الفريم الأساسي الداخلية
   const internal = buildInternal(candles1m);
-  // 3) توافق 40m (من شموع 5m اختيارية)
-  let dir40m = null;
-  if (Array.isArray(candles5m) && candles5m.length >= 60) {
-    dir40m = buildHtfContext(aggregateX8(candles5m), { price: px }).direction;
+  // 3) التوافق من الفريم الأكبر الثاني (اختياري)
+  let dirHTF = null;
+  if (Array.isArray(confirm) && confirm.length >= 60) {
+    dirHTF = buildHtfContext(aggregateX8(confirm), { price: px }).direction;
   }
 
-  const d1 = internalDir(internal);
+  const dBase = internalDir(internal);
   const dir = ctx.direction; // الحاكم: بنية الفريم الأكبر
-  const agreement = dir40m == null ? 'single' : (dir40m === dir ? 'confirmed' : 'conflicted');
+  const agreement = dirHTF == null ? 'single' : (dirHTF === dir ? 'confirmed' : 'conflicted');
 
   const a = atr(candles1m, candles1m.length - 1) || (px ? px * 0.001 : 1);
 
   const state = {
     ...empty,
-    dir, dir1m: d1, dir40m, agreement,
+    dir, dirTF: dBase, dirHTF, agreement,
     anchorHigh: ctx.protectedHigh,
     anchorLow: ctx.protectedLow,
     afterPremium: ctx.afterPremium,
     price: Number.isFinite(px) ? px : null,
-    atr1m: Number.isFinite(a) ? a : null,
+    atrTF: Number.isFinite(a) ? a : null,
     stageDetail: {}
   };
+  // توافق خلفي لصفوف 1m: نفس الحقول القديمة حرفياً
+  if (baseTf === '1m') {
+    state.dir1m = dBase;
+    state.dir40m = dirHTF;
+    state.atr1m = state.atrTF;
+  }
 
   // العرض الخارجي التالي + موت المشوار
   if (Number.isFinite(px)) {
@@ -122,7 +158,7 @@ export function computeDirectionState(candles1m, { price = null, candles5m = nul
   }
 
   /* ---- آلة المراحل — منطق المستخدم حرفياً ---- */
-  if (dir === 'up' || (dir === 'range' && d1 === 'up')) {
+  if (dir === 'up' || (dir === 'range' && dBase === 'up')) {
     const flipLevel = ctx.lastBreak?.dir === 'up' ? ctx.lastBreak.level : (ctx.protectedLow ?? null);
     const leg = upLegPosition(candles1m, flipLevel, px);
     state.legLow = leg.low; state.legHigh = leg.high; state.discountLevel = leg.discountLevel;
@@ -154,7 +190,7 @@ export function computeDirectionState(candles1m, { price = null, candles5m = nul
         ? 'بانتظار تأكيد الدخول (الديسكاونت بلغ)'
         : 'تحديد ديسكاونت فقط';
     }
-  } else if (dir === 'down' || (dir === 'range' && d1 === 'down')) {
+  } else if (dir === 'down' || (dir === 'range' && dBase === 'down')) {
     state.stage = state.dead
       ? 'الهبوط مات — بلوغ العرض الخارجي (بانتظار قمة محمية)'
       : 'رصد نهاية الهبوط — بانتظار قمة محمية / choch up';

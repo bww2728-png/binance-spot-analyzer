@@ -11,10 +11,14 @@
  * 5) الاتجاه: آخر كسر حقيقي لقمة/قاع محمية. صاعد وصل bsl خارجي/سبلاي على HTF هابط → انتهى المشوار.
  * 6) الدخول شراء: بعد choch up (اختراق قمة محمية) ← ديسكاونت إلزامي (فيبو ≤ 0.5 أو sellers induced)
  *    ← إن سبقه تعدي bsl داخلي قبل الديسكاونت → يُشترط تعدي ssl داخلي
- *    ← نموذج 1: سويب bsl داخلي + سويب ssl داخلي + صعود + choch up داخلي
+ *    ← نموذج 1: سويب bsl داخلي + سويب ssl داخلي + صعود + choch up داخلي (أو نموذج شمعتين صاعد)
  *       نموذج 2: إخراج المشترين المبكرين (سويب ssl واستعادة) + ابتلاع شرائي
- *    ← فشل الدخول: سويب ssl ← صعود ← سويب bsl ← هبوط ← كسر قاع السويب
- * 7) الأهداف: TP1 = قمة choch up الحقيقي · TP2 = bsl خارجي · الوقف تحت قاع السويب
+ *    ← بوابة البريميوم: سويب bsl داخلي والسعر في بريميوم HTF يستلزم سويب ssl خارجي لاحقاً
+ *    ← فشل الدخول: سويب ssl ← صعود ← سويب bsl ← هبوط ← كسر قاع السويب، أو choch-down داخلي بعد الاستعادة
+ * 7) الأهداف: TP1 = قمة choch up الحقيقي · TP2 = bsl خارجي · TP بديل متحفظ = أقرب bsl داخلية فوق الدخول · الوقف تحت قاع السويب
+ *
+ * sellers induced = سويب ssl داخلي + قيعان BOS الصاعد الداخلي السابقة (أصل الرِجل) — بديلها الفيبو عند الغياب.
+ * buyers induced  = سويب bsl داخلي + قمم BOS الهابط الداخلي السابقة (أصل الرِجل) — بديلها الفيبو عند الغياب.
  *
  * كل الدوال نقية: نفس المدخلات → نفس المخرجات. هذا يجعل المعايرة إعادة تشغيل لنفس الكود على التاريخ.
  */
@@ -219,10 +223,25 @@ export function buildHtfContext(htfCandles, { pivotWidth = 2, price = null } = {
  */
 export function buildInternal(candles, { pivotWidth = 1 } = {}) {
   const pivots = findPivots(candles, pivotWidth, pivotWidth);
-  const zones = []; // {kind:'bsl'|'ssl', level, i, time, state, sweptAt, sweptLow/High, brokenAt}
+  const zones = []; // {kind:'bsl'|'ssl', level, i, time, state, sweptAt, sweptExtreme, brokenAt}
   let internalTrend = 'range';
   let lastSellersInduced = null; // آخر ssl داخلي سُحبت (مستوى)
   let lastBuyersInduced = null;  // آخر bsl داخلي سُحبت
+  // مناطق الاستدراج المتراكمة (ذاكرة لا تُنسى بظهور الجديد):
+  // sellers induced = سويب ssl داخلي + قيعان BOS الصاعد الداخلي السابقة (أصل الرِجل الصاعدة)
+  // buyers induced  = سويب bsl داخلي + قمم BOS الهابط الداخلي السابقة (أصل الرِجل الهابطة)
+  const sellersInduced = []; // {level, kind:'ssl-swept'|'bos-low', at}
+  const buyersInduced = [];  // {level, kind:'bsl-swept'|'bos-high', at}
+
+  const windowExtreme = (from, isLow) => {
+    let v = isLow ? Infinity : -Infinity;
+    for (let j = Math.max(0, from - 20); j < from; j += 1) {
+      const x = numOrNaN(isLow ? candles[j].low : candles[j].high);
+      if (!Number.isFinite(x)) continue;
+      v = isLow ? Math.min(v, x) : Math.max(v, x);
+    }
+    return Number.isFinite(v) ? v : null;
+  };
 
   const byKind = (kind) => zones.filter(z => z.kind === kind);
 
@@ -246,20 +265,32 @@ export function buildInternal(candles, { pivotWidth = 1 } = {}) {
         if (h > z.level) {
           if (close > z.level) {
             z.state = 'broken'; z.brokenAt = c.time;
+            // انقلاب داخلي هابط ← صاعد = BOS صاعد: قاع أصل الرِجل sellers induced
+            if (internalTrend === 'down') {
+              const origin = windowExtreme(i, true);
+              if (origin != null) sellersInduced.push({ level: origin, kind: 'bos-low', at: c.time });
+            }
             internalTrend = 'up';
           } else {
             z.state = 'swept'; z.sweptAt = c.time; z.sweptExtreme = h;
             lastBuyersInduced = { level: z.level, at: c.time, extreme: h };
+            buyersInduced.push({ level: z.level, kind: 'bsl-swept', at: c.time });
           }
         }
       } else {
         if (l < z.level) {
           if (close < z.level) {
             z.state = 'broken'; z.brokenAt = c.time;
+            // انقلاب داخلي صاعد ← هابط = BOS هابط: قمة أصل الرِجل buyers induced
+            if (internalTrend === 'up') {
+              const origin = windowExtreme(i, false);
+              if (origin != null) buyersInduced.push({ level: origin, kind: 'bos-high', at: c.time });
+            }
             internalTrend = 'down';
           } else {
             z.state = 'swept'; z.sweptAt = c.time; z.sweptExtreme = l;
             lastSellersInduced = { level: z.level, at: c.time, extreme: l };
+            sellersInduced.push({ level: z.level, kind: 'ssl-swept', at: c.time });
           }
         }
       }
@@ -273,6 +304,8 @@ export function buildInternal(candles, { pivotWidth = 1 } = {}) {
     internalTrend,
     lastSellersInduced,
     lastBuyersInduced,
+    sellersInduced: sellersInduced.slice(-24),
+    buyersInduced: buyersInduced.slice(-24),
     // آخر bsl داخلي مفتوح (لم تكسر بالإغلاق)
     openBsl: byKind('bsl').filter(z => z.state === 'open').map(z => z.level).sort((a, b) => a - b),
     openSsl: byKind('ssl').filter(z => z.state === 'open').map(z => z.level).sort((a, b) => b - a)
@@ -528,11 +561,24 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
   const discountLevel = rangeLow + discountPos * (rangeHigh - rangeLow);
 
   // مراقبة ما بعد choch up شمعة بشمعة (حتمي — من chochIdx حتى آخر شمعة)
-  let discountReached = false, sslRetestDone = false, bslRetestBeforeDiscount = false;
+  let discountReached = false, discountVia = null, sslRetestDone = false, bslRetestBeforeDiscount = false;
   let lastSweepLow = null;          // قاع آخر سويب ssl (وقف + شرط الفشل)
   let bslSweptAfterDiscount = false; // فشل: سويب bsl بعد السويب الأخير
   let model1Ready = false, model2Ready = false;
   let invalid = null;
+  // مستويات السويب المعتمدة: مناطق ssl الداخلية + قيعان BOS الصاعد السابقة (sellers induced)
+  const sweepLevels = [
+    ...internal.ssl.map(z => ({ level: z.level })),
+    ...((internal.sellersInduced ?? []).filter(e => e.kind === 'bos-low').map(e => ({ level: e.level })))
+  ];
+  // بوابة البريميوم: سويب BSL داخلي والسعر في بريميوم HTF يستلزم سويب SSL خارجي لاحقاً
+  const htfMid = (ctx?.range && Number.isFinite(ctx.range.mid)) ? ctx.range.mid : null;
+  const extSslLevels = Array.isArray(ctx?.externalSslBelow) ? ctx.externalSslBelow : [];
+  let premiumBslSweepAt = null, externalSslSweptAfter = false;
+  // فشل choch-down: أقرب دعم داخلي تكوّن بعد الـchoch — كسره بعد الاستعادة = انقلاب داخلي
+  const postSupports = internal.ssl.filter(z => z.i > chochIdx && z.state !== 'broken').map(z => z.level);
+  const nearestPostSupport = postSupports.length ? Math.max(...postSupports) : null;
+  let sweepReclaimed = false;
 
   // 1) هل سبق choch up تعدي bsl داخلي قبل الديسكاونت؟ (يُشترط عنده ssl لاحقاً)
   for (let i = chochIdx; i <= flowEnd; i += 1) {
@@ -544,14 +590,25 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
         if (z.level < rangeHigh && h > z.level && close <= z.level) { bslRetestBeforeDiscount = true; break; }
       }
     }
-    // بلوغ الديسكاونت (فيبو) أو sellers induced (سويب ssl داخلي واستعادته)
-    if (pos <= discountPos) discountReached = true;
-    for (const z of internal.ssl) {
-      if (z.level >= rangeLow && l < z.level && close > z.level) {
+    // بلوغ الديسكاونت: فيبو، أو sellers induced (سويب ssl/قيعان BOS واستعادتها)
+    if (pos <= discountPos) { discountReached = true; discountVia = discountVia ?? 'فيبو'; }
+    for (const s of sweepLevels) {
+      if (s.level >= rangeLow && l < s.level && close > s.level) {
         lastSweepLow = Math.min(lastSweepLow ?? l, l);
         sslRetestDone = true;
+        if (!discountReached) { discountReached = true; discountVia = 'sellers induced'; }
         bslSweptAfterDiscount = false; // سويب جديد يعيد ضبط شرط الفشل
         model1Ready = true;            // سويب ssl داخلي حصل — جزء نموذج 1
+      }
+    }
+    // سويب BSL داخلي في بريميوم؟ (يُسلَّح مرة واحدة — أول سويب والسعر فوق منتصف HTF)
+    if (htfMid != null && premiumBslSweepAt == null) {
+      for (const z of internal.bsl) {
+        if (z.level < rangeHigh && h > z.level && close <= z.level && close > htfMid) { premiumBslSweepAt = c.time; break; }
+      }
+    } else if (premiumBslSweepAt != null && !externalSslSweptAfter) {
+      for (const lvl of extSslLevels) {
+        if (l < lvl && close > lvl) { externalSslSweptAfter = true; break; }
       }
     }
     // سويب bsl داخلي بعد السويب الأخير (بداية مسار الفشل)
@@ -561,7 +618,21 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
       }
       // فشل الدخول: بعد سويب bsl — كسر قاع السويب بالإغلاق
       if (bslSweptAfterDiscount && close < lastSweepLow) {
-        invalid = { at: c.time, reason: 'فشل الدخول: سويب ssl ثم bsl ثم كسر قاع السويب' };
+        invalid = {
+          at: c.time,
+          reason: 'فشل الدخول: سويب ssl ثم bsl ثم كسر قاع السويب',
+          interpretation: 'قد يكون الـ choch up مجرد buyers induced على الفريم الأكبر — راقب البريميوم الأكبر'
+        };
+        break;
+      }
+      // فشل choch-down داخلي: بعد الاستعادة فوق الدعم، كسره بالإغلاق = انقلاب داخلي أثناء الصعود
+      if (nearestPostSupport != null && close > nearestPostSupport) sweepReclaimed = true;
+      if (sweepReclaimed && nearestPostSupport != null && close < nearestPostSupport - 0.25 * a) {
+        invalid = {
+          at: c.time,
+          reason: 'فشل: choch down داخلي أثناء الصعود — كسر آخر دعم داخلي بعد الاستعادة',
+          interpretation: 'قد يكون الـ choch up مجرد buyers induced على الفريم الأكبر — راقب البريميوم الأكبر'
+        };
         break;
       }
     }
@@ -570,6 +641,17 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
 
   if (invalid) {
     return { signal: null, phase: 'فشل نقطة الدخول — بانتظار تكوين جديد', phaseDetail: null, invalid, waiting: {} };
+  }
+
+  // بوابة البريميوم: لا إشارة قبل سويب SSL خارجي لاحق لسويب BSL الداخلي في البريميوم
+  if (premiumBslSweepAt != null && !externalSslSweptAfter) {
+    return {
+      signal: null,
+      phase: 'سويب BSL داخلي في بريميوم — بانتظار سويب SSL خارجي (تأكيد)',
+      phaseDetail: { htfMid, premiumBslSweepAt },
+      invalid: null,
+      waiting: { externalSsl: extSslLevels.slice(0, 4) }
+    };
   }
 
   const needSsl = bslRetestBeforeDiscount; // قاعدة الملاحظة: تعدي bsl داخلي قبل الديسكاونت → يُشترط ssl
@@ -612,7 +694,13 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
   }
 
   const price = numOrNaN(last.close);
-  if (model1Ready && internalChochUp) {
+  // الهدف المتحفظ: أقرب BSL داخلية مفتوحة فوق الدخول — للشرائح غير المؤكدة
+  const aboveBsl = (internal.openBsl ?? []).filter(v => Number.isFinite(v) && v > price);
+  const tpAlt = aboveBsl.length ? Math.min(...aboveBsl) : null;
+  const discountNote = discountVia === 'sellers induced'
+    ? 'الديسكاونت بلغ عبر sellers induced'
+    : `الديسكاونت بلغ (فيبو ≤ ${(discountPos * 100).toFixed(0)}%)`;
+  if (model1Ready && (internalChochUp || bullPair)) {
     const stop = lastSweepLow - Math.max(lastSweepLow * bandPct, 0.25 * a);
     const tp2 = ctx.externalBslAbove?.find(v => v > chochHigh) ?? null;
     const risk = price - stop;
@@ -621,17 +709,17 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
       return {
         signal: {
           model: 1, at: last.time, price,
-          entry: price, stop, tp1: chochHigh, tp2,
+          entry: price, stop, tp1: chochHigh, tp2, tpAlt,
           rr: Number(rr1.toFixed(2)),
           stopRef: lastSweepLow,
           reasons: [
             'choch up: اختراق قمة محمية بخطواتها الخمس',
-            `الديسكاونت بلغ (فيبو ≤ ${(discountPos * 100).toFixed(0)}%)`,
+            discountNote,
             'سويب SSL داخلي + إعادة تحمّل',
-            'choch up داخلي بتأكيد إغلاق'
+            internalChochUp ? 'choch up داخلي بتأكيد إغلاق' : 'نموذج شمعتين صاعد (صعود بسيط)'
           ]
         },
-        phase: 'إشارة نموذج 1', phaseDetail: { tp1: chochHigh, tp2 }, invalid: null,
+        phase: 'إشارة نموذج 1', phaseDetail: { tp1: chochHigh, tp2, tpAlt }, invalid: null,
         waiting: {}
       };
     }
@@ -645,24 +733,24 @@ export function scanBuyFlow(candles, ctx, internal, phScan, {
       return {
         signal: {
           model: 2, at: last.time, price,
-          entry: price, stop, tp1: chochHigh, tp2,
+          entry: price, stop, tp1: chochHigh, tp2, tpAlt,
           rr: Number(rr1.toFixed(2)),
           stopRef: lastSweepLow,
           reasons: [
             'choch up: اختراق قمة محمية بخطواتها الخمس',
-            `الديسكاونت بلغ (فيبو ≤ ${(discountPos * 100).toFixed(0)}%)`,
+            discountNote,
             'إخراج المشترين المبكرين (سويب ssl واستعادة)',
             'ابتلاع شرائي مؤكد'
           ]
         },
-        phase: 'إشارة نموذج 2', phaseDetail: { tp1: chochHigh, tp2 }, invalid: null,
+        phase: 'إشارة نموذج 2', phaseDetail: { tp1: chochHigh, tp2, tpAlt }, invalid: null,
         waiting: {}
       };
     }
   }
 
   // توثيق رفض R:R — النموذج مكتمل لكن الهدف القريب يجعل المخاطرة غير مجدية (بلا صمت)
-  const readyModel = (model1Ready && internalChochUp) ? 1 : ((model2Ready && bullishEngulf) ? 2 : null);
+  const readyModel = (model1Ready && (internalChochUp || bullPair)) ? 1 : ((model2Ready && bullishEngulf) ? 2 : null);
   if (readyModel != null) {
     const sweepRef = lastSweepLow;
     const stopCalc = sweepRef - Math.max(sweepRef * bandPct, 0.25 * a);
@@ -752,6 +840,11 @@ export function analyzeCandles(candles, opts = {}) {
       : null,
     flow,
     upLegDead,
+    induced: {
+      sellers: (internal.sellersInduced ?? []).slice(-6),
+      buyers: (internal.buyersInduced ?? []).slice(-6)
+    },
+    premium: (ctx.range && Number.isFinite(price)) ? price > ctx.range.mid : null,
     candles: candles.slice(-60)
   };
 }

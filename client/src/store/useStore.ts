@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import type { Analysis, BarcodeScan, CaseRow, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
+import type { Analysis, BarcodeScan, CaseRow, ChartLevel, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol, type LiveOppTickRow, type LiveWatchTickRow } from '../lib/binance';
@@ -73,7 +73,7 @@ interface StoreState {
   prices: Record<string, number>;
   settings: Settings | null;
   screen: Screen;
-  chartModal: { symbol: string; tfLower: string | null; tfUpper: string | null } | null;
+  chartModal: { symbol: string; tfLower: string | null; tfUpper: string | null; levels?: ChartLevel[] } | null;
   notifications: AppNotification[];
   unreadNotifications: number;
   markAllNotificationsRead: () => void;
@@ -100,7 +100,7 @@ interface StoreState {
   init: () => Promise<void>;
   syncSymbols: () => Promise<void>;
   setScreen: (s: Screen) => void;
-  openChart: (symbol: string, tfLower: string | null, tfUpper: string | null) => void;
+  openChart: (symbol: string, tfLower: string | null, tfUpper: string | null, levels?: ChartLevel[]) => void;
   closeChart: () => void;
   openCaseLedger: (symbol?: string) => void;
   setCaseFilter: (f: string | null) => void;
@@ -377,7 +377,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try { history.replaceState(null, '', `#/${s === 'autoHistory' ? 'history' : s}`); } catch { /* ignore */ }
   },
 
-  openChart: (symbol, tfLower, tfUpper) => set({ chartModal: { symbol, tfLower, tfUpper } }),
+  openChart: (symbol, tfLower, tfUpper, levels) => set({ chartModal: { symbol, tfLower, tfUpper, levels } }),
   closeChart: () => set({ chartModal: null }),
 
   /** فتح شاشة الأرشيف — مع تصفية لعملة محددة إن وُجدت (يُغلق الشارت أولاً) */

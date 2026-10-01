@@ -633,6 +633,8 @@ export interface Strategy2Opportunity {
   stop: number;
   tp1: number;
   tp2: number | null;
+  tpAlt: number | null;
+  conservative?: boolean | null;
   stopRef: number;
   rr: number | null;
   distancePct: number | null;
@@ -749,9 +751,13 @@ export interface Strategy2HistoryResponse {
 
 export interface Strategy2DirectionRow {
   symbol: string;
+  tf?: string;
+  htfTf?: string | null;
+  dirTF?: 'up' | 'down' | 'range';
+  dirHTF?: 'up' | 'down' | 'range' | null;
+  dir1m?: 'up' | 'down' | 'range';
+  dir40m?: 'up' | 'down' | 'range' | null;
   dir: 'up' | 'down' | 'range';
-  dir1m: 'up' | 'down' | 'range';
-  dir40m: 'up' | 'down' | 'range' | null;
   agreement: 'confirmed' | 'conflicted' | 'single';
   stage: string;
   stageDetail: Record<string, unknown>;
@@ -789,4 +795,11 @@ export interface Strategy2DirectionsResponse {
   total: number;
   filtered: boolean;
   updatedAt: number;
+}
+
+/** خط سعري يُرسم على الشارت (مناطق الاستراتيجية المحللة في أماكنها) */
+export interface ChartLevel {
+  price: number;
+  color: string;
+  title: string;
 }
