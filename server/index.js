@@ -1360,6 +1360,8 @@ app.get('/api/strategy2/directions', handle(async (req, res) => {
     sort: req.query.sort, limit: req.query.limit, offset: req.query.offset
   };
   const { rows, total } = strategy2Engine.queryDirections(q);
+  // «مفلترة» تعني فلاتر فعلية من المستخدم — لا مجرد قص الصفحة
+  const hasFilter = ['symbol', 'tf', 'dir', 'stage', 'dead', 'agreement'].some(k => req.query[k] != null && String(req.query[k]).trim() !== '');
   res.json({
     summary: strategy2Engine.getDirectionsSummary(q.tf),
     directions: rows,
