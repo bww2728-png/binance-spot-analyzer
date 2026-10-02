@@ -139,9 +139,11 @@ export default function StrategyScreen() {
   const [tier, setTier] = useState(savedUI.tier ?? '');
   const [htfDir, setHtfDir] = useState(savedUI.htfDir ?? '');
   const [sort, setSort] = useState(savedUI.sort ?? 'recent');
-  const [preset, setPreset] = useState('all');
+  const [preset, setPreset] = useState(() =>
+    (savedUI.symbol || savedUI.tf || savedUI.model || savedUI.tier || savedUI.htfDir || (savedUI.sort && savedUI.sort !== 'recent')) ? 'custom' : 'all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [drawerIdx, setDrawerIdx] = useState<number | null>(null);
+  // الدرج بالمعرف لا بالفهرس — حتى لا يضيع المختار عندما تتحدث القائمة أثناء البث
+  const [drawerId, setDrawerId] = useState<string | null>(null);
   const [rejReason, setRejReason] = useState('');
   const debounceRef = useRef<number | null>(null);
   const [symbolInput, setSymbolInput] = useState(savedUI.symbol ?? '');
@@ -341,7 +343,8 @@ export default function StrategyScreen() {
   const cal = feed?.calibration;
   const qualifiedSegs = (cal?.segments ?? []).filter(s => s.tier === 'qualified').length;
   const probationarySegs = (cal?.segments ?? []).filter(s => s.tier === 'probationary').length;
-  const drawerOpp = drawerIdx != null ? opps[drawerIdx] ?? null : null;
+  const drawerIdx = drawerId != null ? opps.findIndex(o => o.id === drawerId) : -1;
+  const drawerOpp = drawerIdx >= 0 ? opps[drawerIdx] : null;
 
   return (
     <div className="space-y-4">
@@ -503,7 +506,7 @@ export default function StrategyScreen() {
 
           {/* بطاقات الهاتف */}
           <div className="space-y-2 md:hidden">
-            {opps.map((o, i) => <OppCard key={o.id} o={o} liveDir={dirBySymbol.get(`${o.symbol}|${o.tf}`)} onDetail={() => setDrawerIdx(i)} onChart={() => openChart(o.symbol, o.tf, null, oppLevels(o))} />)}
+            {opps.map((o) => <OppCard key={o.id} o={o} liveDir={dirBySymbol.get(`${o.symbol}|${o.tf}`)} onDetail={() => setDrawerId(o.id)} onChart={() => openChart(o.symbol, o.tf, null, oppLevels(o))} />)}
           </div>
 
           <div className="card overflow-hidden hidden md:block">
@@ -517,11 +520,11 @@ export default function StrategyScreen() {
                   </tr>
                 </thead>
                 <tbody>
-                  {opps.map((o, i) => (
+                  {opps.map((o) => (
                     <OppRow key={o.id} o={o} liveDir={dirBySymbol.get(`${o.symbol}|${o.tf}`)}
                       expanded={expandedId === o.id}
                       onToggle={() => setExpandedId(expandedId === o.id ? null : o.id)}
-                      onDetail={() => setDrawerIdx(i)}
+                      onDetail={() => setDrawerId(o.id)}
                       onChart={() => openChart(o.symbol, o.tf, null, oppLevels(o))}
                       onJumpDirections={jumpToDirections} />
                   ))}
@@ -807,8 +810,8 @@ export default function StrategyScreen() {
 
       {/* درج تفاصيل الفرصة */}
       {drawerOpp && (
-        <OppDrawer opps={opps} index={opps.indexOf(drawerOpp)} onClose={() => setDrawerIdx(null)}
-          onSelect={(i) => setDrawerIdx(i)} dirBySymbol={dirBySymbol} onJumpDirections={jumpToDirections} />
+        <OppDrawer opps={opps} index={drawerIdx} onClose={() => setDrawerId(null)}
+          onSelect={(i) => setDrawerId(opps[i]?.id ?? null)} dirBySymbol={dirBySymbol} onJumpDirections={jumpToDirections} />
       )}
     </div>
   );
