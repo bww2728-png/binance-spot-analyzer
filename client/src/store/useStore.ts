@@ -95,7 +95,7 @@ interface StoreState {
   /* نبضة محرك «الفرص الحية — استراتيجيتي» عبر WS (تحديث لحظي للشاشة) */
   strategy2Pulse: { at: number; kind: string } | null;
   /* أسعار حية لكل فرصة منشورة من محرك الاستراتيجية (id → صف النبضة) */
-  strategy2Rows: Record<string, { price: number | null; plPct: number | null; rNow: number | null; mfeR: number; ageSec: number }>;
+  strategy2Rows: Record<string, { price: number | null; plPct: number | null; toTp1Pct: number | null; rNow: number | null; mfeR: number; ageSec: number }>;
 
   init: () => Promise<void>;
   syncSymbols: () => Promise<void>;
@@ -293,8 +293,8 @@ export const useStore = create<StoreState>((set, get) => ({
           get().pushToast(`استراتيجيتي — نتيجة ${o.symbol} (${o.tf}): ${label}`, win ? 'info' : 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: win ? 'info' : 'alert' });
           set({ strategy2Pulse: { at: Date.now(), kind: 'closed' } });
         } else if (msg.type === 'strategy2_tick') {
-          const rows: Record<string, { price: number | null; plPct: number | null; rNow: number | null; mfeR: number; ageSec: number }> = {};
-          for (const r of msg.opportunities ?? []) rows[r.id] = r;
+          const rows: Record<string, { price: number | null; plPct: number | null; toTp1Pct: number | null; rNow: number | null; mfeR: number; ageSec: number }> = {};
+          for (const r of msg.opportunities ?? []) rows[r.id] = { price: r.price ?? null, plPct: r.plPct ?? null, toTp1Pct: (r as { toTp1Pct?: number | null }).toTp1Pct ?? null, rNow: r.rNow ?? null, mfeR: Number(r.mfeR ?? 0), ageSec: Number(r.ageSec ?? 0) };
           set({ strategy2Rows: rows, strategy2Pulse: { at: Date.now(), kind: 'strategy2_tick' } });
         } else if (msg.type === 'strategy2_state' || msg.type === 'strategy2_calibration_progress' || msg.type === 'strategy2_calibration_done') {
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });

@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
 import LiveDashboard from './LiveDashboard';
-import type { BuyHistoryResponse, ChartLevel, Strategy2DirectionsResponse, Strategy2DirectionRow, Strategy2Feed, Strategy2Opportunity } from '../lib/types';
+import OppDrawer, { oppLevels } from './OppDrawer';
+import type { BuyHistoryResponse, Strategy2DirectionsResponse, Strategy2DirectionRow, Strategy2Feed, Strategy2Opportunity } from '../lib/types';
 
 /* ═══ الفرص الحية — استراتيجيتي (محرك SMC مستقل) ═══
- * تبويبات: الفرص (جدول شامل) · قيد التتبع (مراحل الانتظار) · لوحة التحكم · المرفوضة.
+ * تبويبات: الفرص (جدول + درج تفاصيل) · الاتجاهات · قيد التتبع · لوحة التحكم · المرفوضة.
  * الفلترة على الخادم قبل القص — والنبضات لحظية عبر WS (strategy2_*).
+ * مبادئ ملزمة: لا حذف لمعلومة استراتيجية (طبقات وتوسعة بدل الحذف) · لا لغة يقين ·
+ * لا قرار نيابة عن المحلل (إبراز محايد بقواعد معلنة) · ثبات تام أثناء البث الحي.
  */
 
 const fmtPx = (v: number | null | undefined) =>
@@ -38,34 +41,6 @@ function distanceBand(d: number | null | undefined): { label: string; color: str
   return { label: 'بعيدة', color: 'var(--down)' };
 }
 
-/** مستويات فرصة استراتيجيتي مرسومة على الشارت في أماكنها السعرية */
-function oppLevels(o: Strategy2Opportunity): ChartLevel[] {
-  const lv: ChartLevel[] = [];
-  const push = (price: number | null | undefined, color: string, title: string) => {
-    if (price != null && Number.isFinite(Number(price))) lv.push({ price: Number(price), color, title });
-  };
-  push(o.entry, '#0ea5e9', 'دخول');
-  push(o.stop, '#dc2626', 'وقف');
-  push(o.tp1, '#16a34a', 'TP1');
-  push(o.tp2, '#16a34a', 'TP2');
-  push(o.stopRef, '#7c3aed', 'قاع السويب');
-  push(o.tpAlt, '#b45309', 'TP متحفظ (BSL داخلي)');
-  return lv;
-}
-
-/** مستويات سجل الاتجاه لرمز مرسومة على الشارت في أماكنها السعرية */
-function dirLevels(d: Strategy2DirectionRow): ChartLevel[] {
-  const lv: ChartLevel[] = [];
-  const push = (price: number | null | undefined, color: string, title: string) => {
-    if (price != null && Number.isFinite(Number(price))) lv.push({ price: Number(price), color, title });
-  };
-  push(d.anchorHigh ?? d.anchorLow, '#0ea5e9', d.anchorHigh != null ? 'قمة محمية' : 'قاع محمي');
-  push(d.discountLevel, '#0a7f6a', 'ديسكاونت');
-  push(d.deathLevel, '#f23645', 'موت المشوار');
-  push(d.externalNext, '#b45309', 'العرض الخارجي');
-  return lv;
-}
-
 /** عتبة التقلب المفرط: انقلابات الاتجاه منذ الإقلاع */
 const VOLATILE_CHANGES = 10;
 
@@ -77,33 +52,107 @@ function friendlyFailure(f: { key: string; message?: string | null }): { symbol:
   return { symbol: [sym, tf].filter(Boolean).join(' '), reason };
 }
 
+/** مستويات سجل الاتجاه مرسومة على الشارت في أماكنها */
+function dirLevels(d: Strategy2DirectionRow) {
+  const lv: { price: number; color: string; title: string }[] = [];
+  const push = (price: number | null | undefined, color: string, title: string) => {
+    if (price != null && Number.isFinite(Number(price))) lv.push({ price: Number(price), color, title });
+  };
+  push(d.anchorHigh ?? d.anchorLow, '#0ea5e9', d.anchorHigh != null ? 'قمة محمية' : 'قاع محمي');
+  push(d.discountLevel, '#0a7f6a', 'ديسكاونت');
+  push(d.deathLevel, '#f23645', 'موت المشوار');
+  push(d.externalNext, '#b45309', 'العرض الخارجي');
+  return lv;
+}
+
+/** اكتمال الشروط اللازمة من التسلسل (0..1) — أساس الفرز المحايد */
+function completenessOf(o: Strategy2Opportunity): number | null {
+  const req = (o.sequence ?? []).filter(s => s.required);
+  if (!req.length) return null;
+  return req.filter(s => s.status === 'occurred').length / req.length;
+}
+
+/** قاعدة الإبراز المحايد المعلنة: شريحة مؤهلة + قريبة من الهدف — ليست توصية دخول */
+function attentionOf(o: Strategy2Opportunity): { on: boolean; score: number } {
+  let score = 0;
+  if (o.tier === 'qualified') score += 2;
+  else if (o.tier === 'probationary') score += 1;
+  if (o.distancePct != null && Number.isFinite(o.distancePct) && Math.abs(o.distancePct) <= 0.75) score += 1;
+  const c = completenessOf(o);
+  if (c != null && c >= 1) score += 1;
+  return { on: score >= 3, score };
+}
+
+/** شريط موقع السعر الحي بين الوقف والدخول والهدف */
+function PriceBar({ stop, entry, tp1, live }: { stop: number | null; entry: number | null; tp1: number | null; live: number | null }) {
+  if (stop == null || entry == null || tp1 == null || !Number.isFinite(stop) || !Number.isFinite(entry) || !Number.isFinite(tp1) || tp1 <= stop) {
+    return <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>—</span>;
+  }
+  const pctOf = (v: number) => Math.max(0, Math.min(100, ((v - stop) / (tp1 - stop)) * 100));
+  const entryPct = pctOf(entry);
+  const livePct = live != null && Number.isFinite(live) ? pctOf(live) : null;
+  return (
+    <span className="block w-28" title={`وقف ${fmtPx(stop)} · دخول ${fmtPx(entry)} · هدف ${fmtPx(tp1)}${live != null ? ` · حي ${fmtPx(live)}` : ''}`}>
+      <span className="relative block h-1.5 rounded-full" style={{ background: 'linear-gradient(to left, var(--up) 0%, var(--up) 100%)', opacity: 0.9 }}>
+        <span className="absolute top-[-2px] h-[10px] w-[2px]" style={{ right: `${entryPct}%`, background: '#0ea5e9' }} title={`دخول ${fmtPx(entry)}`} />
+        {livePct != null && (
+          <span className="absolute top-[-3px] h-[12px] w-[2px]" style={{ right: `${livePct}%`, background: 'var(--text-1)' }} title={`السعر الحي ${fmtPx(live)}`} />
+        )}
+      </span>
+    </span>
+  );
+}
+
 type Tab = 'feed' | 'directions' | 'tracking' | 'dashboard' | 'rejected';
 
+/* ذاكرة الواجهة محلياً: التبويب والفلاتر والفرز — استمرارية الجلسة */
+const UI_KEY = 'strategy2-ui-v1';
+function loadUI(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(UI_KEY) ?? '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch { return {}; }
+}
+
+const PRESETS: { id: string; label: string; hint: string }[] = [
+  { id: 'all', label: 'الكل', hint: 'إظهار كل الفرص النشطة' },
+  { id: 'qualified', label: 'مؤكدة', hint: 'الشريحة المؤهلة إحصائياً فقط' },
+  { id: 'near', label: 'قريبة من الدخول', hint: 'مرتبة بالأقرب للهدف الأول' },
+  { id: 'rr', label: 'عالية R:R', hint: 'مرتبة بأعلى مخاطرة/عائد' },
+  { id: 'up', label: 'HTF صاعد', hint: 'الاتجاه الأكبر صاعد فقط' },
+  { id: 'attention', label: 'تحتاج انتباه', hint: 'مؤهلة + قريبة + مكتملة الشروط' }
+];
+
 export default function StrategyScreen() {
-  const [tab, setTab] = useState<Tab>('feed');
+  const savedUI = useMemo(loadUI, []);
+  const [tab, setTab] = useState<Tab>((savedUI.tab as Tab) || 'feed');
   const [feed, setFeed] = useState<Strategy2Feed | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const pulse = useStore(s => s.strategy2Pulse);
   const openChart = useStore(s => s.openChart);
 
-  // فلاتر خادمية
-  const [symbol, setSymbol] = useState('');
-  const [tf, setTf] = useState('');
-  const [model, setModel] = useState('');
-  const [tier, setTier] = useState('');
-  const [htfDir, setHtfDir] = useState('');
-  const [sort, setSort] = useState('recent');
+  // فلاتر خادمية (+preset)
+  const [symbol, setSymbol] = useState(savedUI.symbol ?? '');
+  const [tf, setTf] = useState(savedUI.tf ?? '');
+  const [model, setModel] = useState(savedUI.model ?? '');
+  const [tier, setTier] = useState(savedUI.tier ?? '');
+  const [htfDir, setHtfDir] = useState(savedUI.htfDir ?? '');
+  const [sort, setSort] = useState(savedUI.sort ?? 'recent');
+  const [preset, setPreset] = useState('all');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [drawerIdx, setDrawerIdx] = useState<number | null>(null);
+  const [rejReason, setRejReason] = useState('');
   const debounceRef = useRef<number | null>(null);
-  const [symbolInput, setSymbolInput] = useState('');
+  const [symbolInput, setSymbolInput] = useState(savedUI.symbol ?? '');
 
-  // ═══ سجل الاتجاهات الحي (فريم الدقيقة + فريمه الأكبر ×8) ═══
+  // ═══ سجل الاتجاهات الحي ═══
   const [dirData, setDirData] = useState<Strategy2DirectionsResponse | null>(null);
   const [dirLoading, setDirLoading] = useState(false);
   const [dirError, setDirError] = useState<string | null>(null);
   const [dirSymbolInput, setDirSymbolInput] = useState('');
   const [dirSymbol, setDirSymbol] = useState('');
-  const [dirTf, setDirTf] = useState('1m');
+  const [dirTf, setDirTf] = useState(savedUI.dirTf ?? '1m');
   const [dir, setDir] = useState('');
   const [dirStage, setDirStage] = useState('');
   const [dirDead, setDirDead] = useState('');
@@ -111,6 +160,13 @@ export default function StrategyScreen() {
   const [dirSort, setDirSort] = useState('symbol');
   const [dirExpanded, setDirExpanded] = useState<string | null>(null);
   const [hideVolatile, setHideVolatile] = useState(false);
+
+  // حفظ التفضيلات محلياً
+  useEffect(() => {
+    try {
+      localStorage.setItem(UI_KEY, JSON.stringify({ tab, symbol, tf, model, tier, htfDir, sort, dirTf }));
+    } catch { /* التخزين اختياري */ }
+  }, [tab, symbol, tf, model, tier, htfDir, sort, dirTf]);
 
   const loadDirections = useCallback(async (silent = false) => {
     if (!silent) setDirLoading(true);
@@ -150,7 +206,7 @@ export default function StrategyScreen() {
     return () => window.clearTimeout(id);
   }, [dirSymbolInput]);
 
-  // خريطة الاتجاهات الحية — تُلوّن عمود الاتجاه في جدول الفرص لحظياً (مطابقة رمز+فريم)
+  // خريطة الاتجاهات الحية — مطابقة رمز+فريم لتلوين عمود الاتجاه لحظياً
   const dirBySymbol = useMemo(() => {
     const m = new Map<string, Strategy2DirectionRow>();
     for (const d of dirData?.directions ?? []) m.set(`${d.symbol}|${d.tf ?? '1m'}`, d);
@@ -159,10 +215,10 @@ export default function StrategyScreen() {
 
   const exportDirectionsCsv = useCallback(() => {
     const rows = dirData?.directions ?? [];
-    const header = ['symbol', 'dir8m', 'dir1m', 'dir40m', 'agreement', 'stage', 'afterPremium', 'externalNext', 'distPct', 'deathLevel', 'dead', 'discountLevel', 'price', 'since', 'changeCount'];
+    const header = ['symbol', 'tf', 'dir', 'dirTF', 'dirHTF', 'agreement', 'stage', 'afterPremium', 'externalNext', 'distPct', 'deathLevel', 'dead', 'discountLevel', 'price', 'since', 'changeCount'];
     const lines = [header.join(',')];
     for (const d of rows) {
-      lines.push([d.symbol, d.dir, d.dir1m, d.dir40m ?? '', d.agreement,
+      lines.push([d.symbol, d.tf ?? '1m', d.dir, d.dirTF ?? d.dir1m ?? '', d.dirHTF ?? d.dir40m ?? '', d.agreement,
         `"${d.stage.replace(/"/g, '""')}"`,
         d.afterPremium == null ? '' : (d.afterPremium ? 'yes' : 'no'),
         d.externalNext ?? '', d.distToExternalPct ?? '', d.deathLevel ?? '',
@@ -184,7 +240,7 @@ export default function StrategyScreen() {
       setFeed(await api.getStrategy2Feed({
         symbol: symbol || undefined, tf: tf || undefined,
         model: model || undefined, tier: tier || undefined,
-        htfDir: htfDir || undefined, sort: sort || undefined, limit: 200
+        htfDir: htfDir || undefined, sort: sort === 'completeness' || sort === 'attention' ? 'recent' : (sort || undefined), limit: 200
       }));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'فشل جلب البيانات');
@@ -213,12 +269,44 @@ export default function StrategyScreen() {
     return () => window.clearTimeout(id);
   }, [symbolInput]);
 
-  const opps = feed?.opportunities ?? [];
+  // الفرز المحايد على العميل (الاكتمال/الانتباه) — الخادم يرتب البقية
+  const opps = useMemo(() => {
+    const rows = [...(feed?.opportunities ?? [])];
+    if (sort === 'completeness') rows.sort((a, b) => (completenessOf(b) ?? -1) - (completenessOf(a) ?? -1) || b.detectedAt - a.detectedAt);
+    else if (sort === 'attention') rows.sort((a, b) => attentionOf(b).score - attentionOf(a).score || b.detectedAt - a.detectedAt);
+    return rows;
+  }, [feed?.opportunities, sort]);
   const decided = (feed?.stats.wins ?? 0) + (feed?.stats.losses ?? 0);
   const liveWr = feed?.stats.liveWinRate;
   const waitingTop = useMemo(() =>
     Object.entries(feed?.waitingPhases ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 8),
     [feed?.waitingPhases]);
+  const rejectedGroups = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of feed?.rejected ?? []) m.set(r.reason, (m.get(r.reason) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }, [feed?.rejected]);
+  const rejectedShown = useMemo(() =>
+    (feed?.rejected ?? []).filter(r => !rejReason || r.reason === rejReason),
+    [feed?.rejected, rejReason]);
+  const deadRejected = (feed?.rejected ?? []).filter(r => String(r.reason ?? '').includes('المشوار')).length;
+  const pulseLive = pulse != null && Date.now() - pulse.at < 8000;
+
+  const applyPreset = (id: string) => {
+    setPreset(id);
+    if (id === 'all') { setSymbol(''); setSymbolInput(''); setTf(''); setModel(''); setTier(''); setHtfDir(''); setSort('recent'); }
+    else if (id === 'qualified') setTier('qualified');
+    else if (id === 'near') setSort('distance');
+    else if (id === 'rr') setSort('rr');
+    else if (id === 'up') setHtfDir('up');
+    else if (id === 'attention') setSort('attention');
+  };
+  const touchFilter = () => setPreset('custom');
+
+  const jumpToDirections = (sym: string) => {
+    setTab('directions');
+    setDirSymbolInput(sym);
+  };
 
   const dashboardFetcher = useCallback(async (signal?: AbortSignal): Promise<BuyHistoryResponse> => {
     const h = await api.getStrategy2History(90, signal);
@@ -253,6 +341,7 @@ export default function StrategyScreen() {
   const cal = feed?.calibration;
   const qualifiedSegs = (cal?.segments ?? []).filter(s => s.tier === 'qualified').length;
   const probationarySegs = (cal?.segments ?? []).filter(s => s.tier === 'probationary').length;
+  const drawerOpp = drawerIdx != null ? opps[drawerIdx] ?? null : null;
 
   return (
     <div className="space-y-4">
@@ -267,7 +356,10 @@ export default function StrategyScreen() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[11px]" style={{ color: 'var(--text-3)' }} title="المحرك يعمل لحظياً عبر WebSocket بلا مسح يدوي — كل إغلاق شمعة يُحلَّل فوراً">بث حي دائم عبر WS</span>
+            <span className="text-[11px] flex items-center gap-1.5" style={{ color: 'var(--text-3)' }} title="المحرك يعمل لحظياً عبر WebSocket بلا مسح يدوي — كل إغلاق شمعة يُحلَّل فوراً">
+              <span className="inline-block w-2 h-2 rounded-full" style={{ background: pulseLive ? 'var(--up)' : 'var(--text-3)' }} />
+              {pulseLive ? 'بث حي' : 'بانتظار النبض'}
+            </span>
             <button
               onClick={() => void api.runStrategy2Calibration().then(() => load(true))}
               disabled={cal?.busy}
@@ -283,8 +375,16 @@ export default function StrategyScreen() {
           </div>
         </div>
 
+        {/* ماذا يحدث الآن؟ */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
+          <Stat label="فرص نشطة الآن" value={String(feed?.total ?? 0)} highlight={(feed?.total ?? 0) > 0} />
+          <Stat label="آخر نشر" value={opps[0] ? `${opps[0].symbol} ${opps[0].tf} (منذ ${ago(opps[0].detectedAt)})` : '—'} />
+          <Stat label="آخر حدث مرفوض" value={feed?.rejected?.[0] ? feed.rejected[0].reason.slice(0, 42) : '—'} />
+          <Stat label="الدورة / التحديث" value={feed ? `#${feed.cycle} · ${feed.updatedAt ? ago(feed.updatedAt) : '—'}` : '—'} />
+        </div>
+
         {/* شرائط الحالة */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mt-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mt-2">
           <Stat label="الدورة" value={String(feed?.cycle ?? 0)} />
           <Stat label="أزواج النطاق" value={String(feed?.pairsTotal ?? 0)} />
           <Stat label="فرص منشورة" value={String(feed?.total ?? 0)} highlight />
@@ -293,7 +393,7 @@ export default function StrategyScreen() {
           <Stat label="استعادة/تسوية" value={`${feed?.stats.restored ?? 0}/${feed?.stats.reconciled ?? 0}`} />
           <Stat label="آخر تحديث" value={feed?.updatedAt ? ago(feed.updatedAt) : '—'} />
         </div>
-        <div className="text-[11px] mt-1.5" style={{ color: 'var(--text-3)' }} title="سجل الاتجاهات يُبنى من إغلاقات شمعة الدقيقة لكل رمز، فيكتمل تدريجياً بعد كل إقلاع وقد يكون أقل من النطاق مؤقتاً">
+        <div className="text-[11px] mt-1.5" style={{ color: 'var(--text-3)' }} title="سجل الاتجاهات يُبنى من إغلاقات الشموع لكل فريم، فيكتمل تدريجياً بعد كل إقلاع وقد يكون أقل من النطاق مؤقتاً">
           أزواج النطاق تُفحص دورياً؛ وسجل الاتجاهات يكتمل تدريجياً بعد الإقلاع فقد يكون أقل مؤقتاً.
         </div>
         {(feed?.busy) && <div className="text-[11px] mt-2" style={{ color: 'var(--warn)' }}>دورة فحص جارية…</div>}
@@ -345,39 +445,54 @@ export default function StrategyScreen() {
       {error && <div className="card p-4 text-[12px]" style={{ color: 'var(--down)' }}>{error}</div>}
       {loading && !feed && <div className="card p-4 text-[12px]" style={{ color: 'var(--text-3)' }}>جارٍ الجلب…</div>}
 
-      {/* ═══ تبويب الفرص: الجدول الشامل ═══ */}
+      {/* ═══ تبويب الفرص ═══ */}
       {tab === 'feed' && (
         <div className="space-y-3">
+          {/* وجهات نظر جاهزة */}
+          <div className="card p-3 flex flex-wrap items-center gap-2">
+            {PRESETS.map(p => (
+              <button key={p.id} onClick={() => applyPreset(p.id)} title={p.hint} className="text-[12px] font-semibold px-3 py-1.5 rounded-lg"
+                style={{
+                  background: preset === p.id ? 'var(--accent-soft)' : 'var(--surface-1)',
+                  color: preset === p.id ? 'var(--accent)' : 'var(--text-2)',
+                  border: '1px solid var(--border-1)'
+                }}>{p.label}</button>
+            ))}
+            {preset === 'custom' && <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>عرض مخصص</span>}
+          </div>
+
           <div className="card p-3 flex flex-wrap items-center gap-2">
             <input
               value={symbolInput}
-              onChange={e => setSymbolInput(e.target.value)}
+              onChange={e => { setSymbolInput(e.target.value); touchFilter(); }}
               placeholder="بحث رمز…"
               className="text-[12px] px-2.5 py-1.5 rounded-lg w-28"
               style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
             />
-            <select value={tf} onChange={e => setTf(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+            <select value={tf} onChange={e => { setTf(e.target.value); touchFilter(); }} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
               <option value="">كل الفريمات</option>
               {['1m', '5m', '15m'].map(f => <option key={f} value={f}>{f}</option>)}
             </select>
-            <select value={model} onChange={e => setModel(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+            <select value={model} onChange={e => { setModel(e.target.value); touchFilter(); }} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
               <option value="">النموذجان</option>
               <option value="1">نموذج 1 — سويب + choch up</option>
               <option value="2">نموذج 2 — إخراج مبكرين + ابتلاع</option>
             </select>
-            <select value={tier} onChange={e => setTier(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+            <select value={tier} onChange={e => { setTier(e.target.value); touchFilter(); }} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
               <option value="">كل الطبقات</option>
               <option value="qualified">مؤهلة</option>
               <option value="probationary">تحت التجربة</option>
             </select>
-            <select value={htfDir} onChange={e => setHtfDir(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+            <select value={htfDir} onChange={e => { setHtfDir(e.target.value); touchFilter(); }} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
               <option value="">كل اتجاهات HTF</option>
               <option value="up">صاعد</option>
               <option value="down">هابط</option>
               <option value="range">عرضي</option>
             </select>
-            <select value={sort} onChange={e => setSort(e.target.value)} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>
+            <select value={sort} onChange={e => { setSort(e.target.value); touchFilter(); }} className="text-[12px] px-2 py-1.5 rounded-lg" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }} title="الاكتمال والانتباه فرز محايد على العميل من التسلسل">
               <option value="recent">الأحدث</option>
+              <option value="completeness">الأكثر اكتمالاً</option>
+              <option value="attention">تحتاج انتباه</option>
               <option value="rr">أعلى R:R</option>
               <option value="distance">الأقرب للهدف</option>
             </select>
@@ -386,36 +501,75 @@ export default function StrategyScreen() {
             </span>
           </div>
 
-          <div className="card overflow-hidden">
+          {/* بطاقات الهاتف */}
+          <div className="space-y-2 md:hidden">
+            {opps.map((o, i) => <OppCard key={o.id} o={o} liveDir={dirBySymbol.get(`${o.symbol}|${o.tf}`)} onDetail={() => setDrawerIdx(i)} onChart={() => openChart(o.symbol, o.tf, null, oppLevels(o))} />)}
+          </div>
+
+          <div className="card overflow-hidden hidden md:block">
             <div className="overflow-x-auto">
               <table className="w-full text-[12px]" style={{ borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--border-1)', background: 'var(--surface-0)' }}>
-                    {['الرمز', 'الفريم', 'النموذج', 'اتجاه HTF', 'بعد بريميوم؟', 'الطبقة', 'معايَرة', 'دخول', 'وقف', 'TP1', 'TP2', 'R:R', 'المسافة', 'الحالة', 'العمر', 'أدلة الدخول', 'الشارت'].map(h => (
+                    {['الفرصة', 'الاتجاه', 'الدخول والموقع', 'الأهداف', 'R:R', 'الحالة', 'العمر', ''].map(h => (
                       <th key={h} className="text-right px-2.5 py-2 font-bold whitespace-nowrap" style={{ color: 'var(--text-2)' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {opps.map(o => <OppRow key={o.id} o={o} liveDir={dirBySymbol.get(`${o.symbol}|${o.tf}`)} onChart={() => openChart(o.symbol, o.tf, null, oppLevels(o))} />)}
+                  {opps.map((o, i) => (
+                    <OppRow key={o.id} o={o} liveDir={dirBySymbol.get(`${o.symbol}|${o.tf}`)}
+                      expanded={expandedId === o.id}
+                      onToggle={() => setExpandedId(expandedId === o.id ? null : o.id)}
+                      onDetail={() => setDrawerIdx(i)}
+                      onChart={() => openChart(o.symbol, o.tf, null, oppLevels(o))}
+                      onJumpDirections={jumpToDirections} />
+                  ))}
                 </tbody>
               </table>
             </div>
-            {opps.length === 0 && !loading && (() => {
-              const deadN = (feed?.rejected ?? []).filter(r => String(r.reason ?? '').includes('المشوار')).length;
-              return (
-                <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
+            {opps.length === 0 && !loading && (
+              <div className="py-8 px-4">
+                <div className="text-center text-[13px] font-bold mb-3" style={{ color: 'var(--text-1)' }}>
                   {feed && feed.stats.published > 0
                     ? 'لا فرص نشطة الآن — كل المنشورة حُسمت، والمحرك يراقب باستمرار.'
                     : 'لا فرص منشورة بعد — المحرك يراقب ويرصد تكوّن القمم/القيعان المحمية لحظياً.'}
-                  {deadN > 0 ? (
-                    <div className="mt-2 text-[12px]" style={{ color: 'var(--warn)' }}>
-                      أُسقطت {deadN} إشارة مؤخراً لموت المشوار (بلوغ العرض الخارجي على HTF هابط) — حماية لا غياب إشارات.
-                    </div>
-                  ) : null}
                 </div>
-              );
-            })()}
+                {/* لوحة تفسير الفراغ الكاملة: أسباب الرفض + الموت + الانتظار */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[12px]">
+                  <div className="rounded-lg p-3" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+                    <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>لماذا لا توجد فرص؟ ({rejectedGroups.length} أسباب)</div>
+                    {rejectedGroups.length === 0
+                      ? <span style={{ color: 'var(--text-3)' }}>لا رفض مسجل — الشروط لم تكتمل بعد.</span>
+                      : rejectedGroups.slice(0, 4).map(([reason, n]) => (
+                        <div key={reason} className="flex justify-between gap-2 py-0.5" style={{ color: 'var(--text-2)' }}>
+                          <span className="truncate" title={reason}>{reason}</span>
+                          <b className="num" style={{ color: 'var(--accent)' }}>{n}</b>
+                        </div>
+                      ))}
+                  </div>
+                  <div className="rounded-lg p-3" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+                    <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>الحماية النشطة</div>
+                    <div style={{ color: 'var(--text-2)' }}>
+                      {deadRejected > 0
+                        ? <>أُسقطت <b className="num" style={{ color: 'var(--warn)' }}>{deadRejected}</b> إشارة لموت المشوار (بلوغ العرض الخارجي) — حماية لا غياب إشارات.</>
+                        : 'لا إسقاط بموت المشوار حالياً.'}
+                    </div>
+                  </div>
+                  <div className="rounded-lg p-3" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+                    <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>ماذا ينتظر المحرك؟</div>
+                    {waitingTop.length === 0
+                      ? <span style={{ color: 'var(--text-3)' }}>بانتظار أول دورة مسح.</span>
+                      : waitingTop.slice(0, 3).map(([phase, count]) => (
+                        <div key={phase} className="flex justify-between gap-2 py-0.5" style={{ color: 'var(--text-2)' }}>
+                          <span className="truncate" title={phase}>{phase}</span>
+                          <b className="num" style={{ color: 'var(--accent)' }}>{count}</b>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -511,7 +665,7 @@ export default function StrategyScreen() {
             </div>
             {dirData && dirData.directions.length === 0 && !dirLoading && (
               <div className="py-10 text-center text-[12.5px]" style={{ color: 'var(--text-3)' }}>
-                لا صفوف — المحرك يكوّن سجل الاتجاهات من إغلاقات الدقيقة (تكتمل اللقطة بعد أول دورة).
+                لا صفوف — المحرك يكوّن سجل الاتجاهات من إغلاقات الشموع (تكتمل اللقطة بعد أول دورة).
               </div>
             )}
           </div>
@@ -521,11 +675,11 @@ export default function StrategyScreen() {
         </div>
       )}
 
-      {/* ═══ تبويب قيد التتبع: مراحل الانتظار ═══ */}
+      {/* ═══ تبويب قيد التتبع: مراحل الانتظار + ما الذي ننتظره ═══ */}
       {tab === 'tracking' && (
         <div className="space-y-3">
           <div className="card p-4">
-            <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>مراحل الانتظار الحالية (آخر دورة)</div>
+            <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>ما الذي ينتظره المحرك؟ (آخر دورة)</div>
             {waitingTop.length === 0
               ? <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لم تُراكم أدوار بعد — تظهر بعد أول دورة مسح.</div>
               : (
@@ -538,6 +692,16 @@ export default function StrategyScreen() {
                   ))}
                 </div>
               )}
+            {dirData && Object.keys(dirData.summary.stages ?? {}).length > 0 && (
+              <div className="mt-3 pt-2" style={{ borderTop: '1px solid var(--border-1)' }}>
+                <div className="text-[12px] font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>مراحل الاتجاهات ({dirData.summary.total} عملة)</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(dirData.summary.stages).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([st, n]) => (
+                    <span key={st} className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }} title={st}>{st.length > 34 ? `${st.slice(0, 34)}…` : st}: <b className="num">{n}</b></span>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="text-[11px] mt-3" style={{ color: 'var(--text-3)' }}>
               مسار القمة المحمية بخطواتها الخمس: سويب BSL ← كسر قاع فرعي ← sellers induced (اختياري) ← ssl sweep (اختياري) ← عودة + نموذج بيعي.
               فشل الدخول الموثق: سويب ssl ← صعود ← سويب bsl ← كسر قاع السويب.
@@ -600,72 +764,116 @@ export default function StrategyScreen() {
         <LiveDashboard refreshKey={pulse?.at ?? 0} fetchHistory={dashboardFetcher} title="لوحة التحكم — استراتيجيتي" csvPrefix="strategy2" />
       )}
 
-      {/* ═══ تبويب المرفوضة ═══ */}
+      {/* ═══ تبويب المرفوضة: إحصاءات + فلترة + قائمة ═══ */}
       {tab === 'rejected' && (
-        <div className="card p-4">
-          <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>الفرص التي لم تجتز البوابات — بسبب صريح لكل واحدة</div>
-          {(feed?.rejected.length ?? 0) === 0
-            ? <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا مرفوضات حديثة.</div>
-            : (
-              <div className="space-y-1">
-                {feed!.rejected.map((r, i) => (
-                  <div key={`${r.at}-${i}`} className="text-[11.5px] flex flex-wrap gap-2 items-baseline" style={{ borderBottom: '1px solid var(--border-1)', padding: '4px 0' }}>
-                    <span className="num" style={{ color: 'var(--text-3)' }}>{new Date(r.at).toLocaleTimeString('ar')}</span>
-                    {r.symbol && <span className="num font-bold" style={{ color: 'var(--text-1)' }}>{r.symbol}{r.tf ? ` ${r.tf}` : ''}</span>}
-                    <span style={{ color: 'var(--text-2)' }}>{r.reason}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+        <div className="space-y-3">
+          <div className="card p-4">
+            <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>أسباب الرفض مجمعة ({rejectedGroups.length})</div>
+            {rejectedGroups.length === 0
+              ? <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا مرفوضات حديثة.</div>
+              : (
+                <div className="flex flex-wrap gap-1.5">
+                  <button onClick={() => setRejReason('')} className="text-[11.5px] px-2.5 py-1 rounded-full font-semibold"
+                    style={{ background: !rejReason ? 'var(--accent-soft)' : 'var(--surface-0)', color: !rejReason ? 'var(--accent)' : 'var(--text-2)', border: '1px solid var(--border-1)' }}>
+                    الكل ({feed?.rejected.length ?? 0})
+                  </button>
+                  {rejectedGroups.map(([reason, n]) => (
+                    <button key={reason} onClick={() => setRejReason(rejReason === reason ? '' : reason)} title={reason} className="text-[11.5px] px-2.5 py-1 rounded-full font-semibold"
+                      style={{ background: rejReason === reason ? 'var(--accent-soft)' : 'var(--surface-0)', color: rejReason === reason ? 'var(--accent)' : 'var(--text-2)', border: '1px solid var(--border-1)' }}>
+                      {reason.length > 40 ? `${reason.slice(0, 40)}…` : reason} ({n})
+                    </button>
+                  ))}
+                </div>
+              )}
+          </div>
+          <div className="card p-4">
+            <div className="text-[13px] font-bold mb-2" style={{ color: 'var(--text-1)' }}>الفرص التي لم تجتز البوابات — بسبب صريح لكل واحدة</div>
+            {rejectedShown.length === 0
+              ? <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>لا مرفوضات {rejReason ? 'بهذا السبب' : 'حديثة'}.</div>
+              : (
+                <div className="space-y-1">
+                  {rejectedShown.map((r, i) => (
+                    <div key={`${r.at}-${i}`} className="text-[11.5px] flex flex-wrap gap-2 items-baseline" style={{ borderBottom: '1px solid var(--border-1)', padding: '4px 0' }}>
+                      <span className="num" style={{ color: 'var(--text-3)' }}>{new Date(r.at).toLocaleTimeString('ar')}</span>
+                      {r.symbol && <span className="num font-bold" style={{ color: 'var(--text-1)' }}>{r.symbol}{r.tf ? ` ${r.tf}` : ''}</span>}
+                      <span style={{ color: 'var(--text-2)' }}>{r.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+          </div>
         </div>
+      )}
+
+      {/* درج تفاصيل الفرصة */}
+      {drawerOpp && (
+        <OppDrawer opps={opps} index={opps.indexOf(drawerOpp)} onClose={() => setDrawerIdx(null)}
+          onSelect={(i) => setDrawerIdx(i)} dirBySymbol={dirBySymbol} onJumpDirections={jumpToDirections} />
       )}
     </div>
   );
 }
 
-function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: Strategy2DirectionRow; onChart: () => void }) {
+function OppRow({ o, liveDir, expanded, onToggle, onDetail, onChart, onJumpDirections }: {
+  o: Strategy2Opportunity; liveDir?: Strategy2DirectionRow;
+  expanded: boolean; onToggle: () => void; onDetail: () => void; onChart: () => void;
+  onJumpDirections: (symbol: string) => void;
+}) {
   const tick = useStore(s => s.strategy2Rows[o.id]);
   const px = tick?.price ?? o.price;
   const tier = o.tier ? (TIER_BADGE[o.tier] ?? null) : null;
-  const dist = distanceBand(o.distancePct);
   const modelLabel = o.model === 1 ? '1 — سويب+choch' : o.model === 2 ? '2 — مبكرين+ابتلاع' : '—';
+  const att = attentionOf(o);
+  const comp = completenessOf(o);
   return (
-    <tr style={{ borderBottom: '1px solid var(--border-1)' }}>
-      <td className="px-2.5 py-2 font-bold num whitespace-nowrap" style={{ color: 'var(--text-1)' }}>{o.symbol}</td>
-      <td className="px-2.5 py-2 num" style={{ color: 'var(--text-3)' }}>{o.tf}</td>
-      <td className="px-2.5 py-2 whitespace-nowrap text-[11px]" style={{ color: 'var(--text-2)' }}>{modelLabel}</td>
-      <td className="px-2.5 py-2 text-[11.5px] whitespace-nowrap" style={{ color: htfColor(liveDir?.dir ?? o.htfDirection ?? 'range') }}>
-        {HTF_LABEL[liveDir?.dir ?? o.htfDirection ?? 'range'] ?? '—'}
-        {liveDir?.dead && <span style={{ color: 'var(--warn)' }}> · مات</span>}
-      </td>
-      <td className="px-2.5 py-2 text-[11.5px]" style={{ color: 'var(--text-3)' }}>
-        {o.afterPremium == null ? '—' : o.afterPremium ? 'نعم' : 'لا'}
-      </td>
-      <td className="px-2.5 py-2 whitespace-nowrap" title={o.tier ? undefined : 'نُشرت قبل اكتمال المعايرة — بلا تصفية إحصائية'}>
-        {tier
-          ? <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: `${tier.color}22`, color: tier.color, border: `1px solid ${tier.color}55` }}>{tier.label}</span>
-          : <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: 'transparent', color: 'var(--text-3)', border: '1px dashed var(--border-1)' }}>بلا معايرة</span>}
-      </td>
-      <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>{pct(o.calibratedWinRate)}</td>
-      <td className="px-2.5 py-2 num" style={{ color: 'var(--text-2)' }}>{fmtPx(o.entry)}</td>
-      <td className="px-2.5 py-2 num" style={{ color: 'var(--down)' }}>{fmtPx(o.stop)}</td>
-      <td className="px-2.5 py-2 num" style={{ color: 'var(--up)' }} title={o.conservative && o.tpAlt != null ? `شريحة غير مؤكدة — الهدف المتحفظ المقترح (BSL داخلي): ${fmtPx(o.tpAlt)}` : undefined}>
-        {fmtPx(o.tp1)}
-        {o.conservative && o.tpAlt != null ? <div className="text-[10px] font-semibold" style={{ color: 'var(--warn)' }}>متحفظ: {fmtPx(o.tpAlt)}</div> : null}
-      </td>
-      <td className="px-2.5 py-2 num" style={{ color: 'var(--up)' }}>{fmtPx(o.tp2)}</td>
-      <td className="px-2.5 py-2 num font-bold" style={{ color: (o.rr ?? 0) >= 1.5 ? 'var(--up)' : 'var(--text-2)' }}>{o.rr != null ? o.rr.toFixed(2) : '—'}</td>
-      <td className="px-2.5 py-2 whitespace-nowrap text-[11px] font-semibold" style={{ color: dist.color }} title={o.distancePct != null && Number.isFinite(o.distancePct) ? `البعد عن TP1: ${Math.abs(o.distancePct).toFixed(3)}%` : 'المسافة غير محسوبة'}>{dist.label}{o.distancePct != null && Number.isFinite(o.distancePct) ? ` · ${Math.abs(o.distancePct).toFixed(2)}%` : ''}</td>
-      <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-2)' }}>
-        {tick ? `${tick.plPct != null ? `${tick.plPct > 0 ? '+' : ''}${tick.plPct.toFixed(2)}%` : '—'}` : `${fmtPx(px)}`}
-        {tick?.rNow != null && <span style={{ color: 'var(--text-3)' }}> · {tick.rNow.toFixed(2)}R</span>}
-      </td>
-      <td className="px-2.5 py-2 num text-[11px]" style={{ color: 'var(--text-3)' }}>{ago(o.detectedAt)}</td>
-      <td className="px-2.5 py-2 text-[11px] max-w-[280px]" style={{ color: 'var(--text-3)' }} title={o.reasons.join(' · ')}>
-        <div>{o.reasons.slice(0, 2).join(' · ')}{o.reasons.length > 2 ? ` +${o.reasons.length - 2}` : ''}</div>
-        {o.sequence?.length ? (
-          <div className="mt-1 flex flex-wrap gap-1" title={o.sequence.map(s => `${s.status === 'occurred' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '–' : '…'} ${s.label}`).join(' · ')}>
-            {o.sequence.map(s => (
+    <>
+      <tr onClick={onToggle} title={att.on ? 'تحتاج انتباه: شريحة مؤهلة + قريبة من الهدف + مكتملة الشروط (إبراز محايد — ليست توصية دخول)' : 'انقر للتوسيع'}
+        style={{
+          borderBottom: '1px solid var(--border-1)', cursor: 'pointer',
+          background: att.on ? 'var(--accent-soft)' : undefined,
+          borderRight: att.on ? '3px solid var(--accent)' : undefined
+        }}>
+        <td className="px-2.5 py-2 whitespace-nowrap">
+          <span className="font-bold num" style={{ color: 'var(--text-1)' }}>{o.symbol}</span>
+          <span className="num text-[11px] mr-1.5" style={{ color: 'var(--text-3)' }}>{o.tf} · نموذج {o.model ?? '—'}</span>
+          <div className="text-[10.5px]" style={{ color: 'var(--text-3)' }}>{modelLabel}</div>
+        </td>
+        <td className="px-2.5 py-2 text-[11.5px] whitespace-nowrap" style={{ color: htfColor(liveDir?.dir ?? o.htfDirection ?? 'range') }}>
+          {HTF_LABEL[liveDir?.dir ?? o.htfDirection ?? 'range'] ?? '—'}
+          {liveDir?.dead && <span style={{ color: 'var(--warn)' }}> · مات</span>}
+          <div className="text-[10.5px]" style={{ color: 'var(--text-3)' }}>
+            توافق: {liveDir ? (liveDir.agreement === 'confirmed' ? 'مؤكد' : liveDir.agreement === 'conflicted' ? 'متعارض' : 'الفريم فقط') : '—'}
+          </div>
+        </td>
+        <td className="px-2.5 py-2 num">
+          <div style={{ color: 'var(--text-2)' }}>{fmtPx(o.entry)}</div>
+          <div className="mt-1"><PriceBar stop={o.stop} entry={o.entry} tp1={o.tp1} live={px} /></div>
+          <div className="text-[10.5px]" style={{ color: tick?.plPct != null && tick.plPct < 0 ? 'var(--down)' : 'var(--text-3)' }}>
+            حي {fmtPx(px)}{tick?.plPct != null ? ` · ${tick.plPct > 0 ? '+' : ''}${tick.plPct.toFixed(2)}%` : ''}
+          </div>
+        </td>
+        <td className="px-2.5 py-2 num" style={{ color: 'var(--up)' }} title={o.conservative && o.tpAlt != null ? `شريحة غير مؤكدة — الهدف المتحفظ المقترح (BSL داخلي): ${fmtPx(o.tpAlt)}` : undefined}>
+          {fmtPx(o.tp1)}
+          <div className="text-[10.5px]" style={{ color: 'var(--text-3)' }}>وقف {fmtPx(o.stop)}</div>
+          {o.conservative && o.tpAlt != null ? <div className="text-[10px] font-semibold" style={{ color: 'var(--warn)' }}>متحفظ: {fmtPx(o.tpAlt)}</div> : null}
+        </td>
+        <td className="px-2.5 py-2 num">
+          <span className="font-bold" style={{ color: (o.rr ?? 0) >= 1.5 ? 'var(--up)' : 'var(--text-1)' }}>{o.rr != null ? o.rr.toFixed(2) : '—'}</span>
+          <div className="mt-0.5">
+            {tier
+              ? <span className="text-[10px] px-2 py-px rounded-full font-semibold" style={{ background: `${tier.color}22`, color: tier.color, border: `1px solid ${tier.color}55` }}>{tier.label}</span>
+              : <span className="text-[10px] px-2 py-px rounded-full font-semibold" title="نُشرت قبل اكتمال المعايرة — بلا تصفية إحصائية" style={{ background: 'transparent', color: 'var(--text-3)', border: '1px dashed var(--border-1)' }}>بلا معايرة</span>}
+          </div>
+        </td>
+        <td className="px-2.5 py-2 text-[11px] max-w-[240px]">
+          <div className="flex items-center gap-1.5" title={comp != null ? `اكتمال الشروط اللازمة: ${(comp * 100).toFixed(0)}%` : 'لا شروط لازمة مسجلة'}>
+            <span className="inline-block h-1.5 rounded-full" style={{ width: 56, background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+              <span className="block h-full rounded-full" style={{ width: `${Math.round((comp ?? 0) * 100)}%`, background: 'var(--accent)' }} />
+            </span>
+            <span className="num" style={{ color: 'var(--text-3)' }}>{comp != null ? `${Math.round(comp * 100)}%` : '—'}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1" title={(o.sequence ?? []).map(s => `${s.status === 'occurred' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '–' : '…'} ${s.label}`).join(' · ')}>
+            {(o.sequence ?? []).slice(0, 6).map(s => (
               <span key={s.key} className="px-1.5 py-px rounded-full font-semibold" style={{
                 fontSize: 10,
                 background: s.status === 'occurred' ? 'var(--up)' : s.status === 'failed' ? 'var(--down)' : 'transparent',
@@ -675,15 +883,83 @@ function OppRow({ o, liveDir, onChart }: { o: Strategy2Opportunity; liveDir?: St
               }}>{s.status === 'occurred' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '–' : '…'} {s.label}</span>
             ))}
           </div>
-        ) : null}
-      </td>
-      <td className="px-2.5 py-2">
-        <button onClick={onChart} className="text-[11px] px-2 py-1 rounded" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت</button>
-      </td>
-    </tr>
+          <div className="mt-0.5" style={{ color: 'var(--text-3)' }} title={o.reasons.join(' · ')}>
+            {o.reasons.slice(0, 2).join(' · ')}{o.reasons.length > 2 ? ` +${o.reasons.length - 2}` : ''}
+          </div>
+        </td>
+        <td className="px-2.5 py-2 num text-[11px] whitespace-nowrap" style={{ color: 'var(--text-3)' }}>
+          {ago(o.detectedAt)}
+          {tick ? <div>عمر {tick.ageSec} ث</div> : null}
+        </td>
+        <td className="px-2.5 py-2 whitespace-nowrap">
+          <button onClick={(e) => { e.stopPropagation(); onDetail(); }} className="text-[11px] px-2 py-1 rounded ml-1" style={{ background: 'var(--accent-soft)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>تفاصيل</button>
+          <button onClick={(e) => { e.stopPropagation(); onChart(); }} className="text-[11px] px-2 py-1 rounded" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت</button>
+        </td>
+      </tr>
+      {expanded && (
+        <tr style={{ background: 'var(--surface-0)' }}>
+          <td colSpan={8} className="px-6 py-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[12px]">
+              <div>
+                <div className="font-bold mb-1" style={{ color: 'var(--text-1)' }}>لماذا هذه الفرصة؟</div>
+                {o.reasons.map((r, i) => <div key={i} style={{ color: 'var(--text-2)' }}>• {r}</div>)}
+                <div className="mt-2 text-[11.5px]" style={{ color: 'var(--text-3)' }}>
+                  بعد بريميوم: {o.afterPremium == null ? '—' : o.afterPremium ? 'نعم' : 'لا'} · الشريحة: <span className="num">{o.segmentKey ?? '—'}</span> ·
+                  معايَرة {pct(o.calibratedWinRate)}{o.wilsonLB != null ? ` (Wilson ${o.wilsonLB.toFixed(2)})` : ''} ·
+                  المسافة عن TP1: {o.distancePct != null && Number.isFinite(o.distancePct) ? `${Math.abs(o.distancePct).toFixed(2)}% (${distanceBand(o.distancePct).label})` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="font-bold mb-1" style={{ color: 'var(--text-1)' }}>التسلسل الكامل</div>
+                {(o.sequence ?? []).map(s => (
+                  <div key={s.key} className="flex gap-2 py-px text-[11.5px]" style={{ color: 'var(--text-2)' }}>
+                    <b style={{ color: s.status === 'occurred' ? 'var(--up)' : s.status === 'failed' ? 'var(--down)' : 'var(--text-3)' }}>
+                      {s.status === 'occurred' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '–' : '…'}
+                    </b>
+                    <span>{s.label}{s.required ? '' : ' (اختياري)'}</span>
+                  </div>
+                ))}
+                <div className="mt-2 flex gap-2 flex-wrap">
+                  <button onClick={onDetail} className="text-[11.5px] px-2.5 py-1 rounded" style={{ background: 'var(--accent-soft)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الدرج الكامل ←</button>
+                  <button onClick={() => onJumpDirections(o.symbol)} className="text-[11.5px] px-2.5 py-1 rounded" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>اتجاه الرمز</button>
+                  <button onClick={onChart} className="text-[11.5px] px-2.5 py-1 rounded" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--accent)' }}>الشارت بالمستويات</button>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
+function OppCard({ o, liveDir, onDetail, onChart }: { o: Strategy2Opportunity; liveDir?: Strategy2DirectionRow; onDetail: () => void; onChart: () => void }) {
+  const tick = useStore(s => s.strategy2Rows[o.id]);
+  const px = tick?.price ?? o.price;
+  const att = attentionOf(o);
+  return (
+    <div className="card p-3" style={att.on ? { borderRight: '3px solid var(--accent)' } : undefined}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-bold num text-[13px]" style={{ color: 'var(--text-1)' }}>{o.symbol} <span style={{ color: 'var(--text-3)' }}>{o.tf} · نموذج {o.model ?? '—'}</span></span>
+        <span className="text-[11.5px] font-semibold" style={{ color: htfColor(liveDir?.dir ?? o.htfDirection ?? 'range') }}>
+          {HTF_LABEL[liveDir?.dir ?? o.htfDirection ?? 'range'] ?? '—'}
+        </span>
+      </div>
+      <div className="flex items-center justify-between mt-2 text-[12px] num" style={{ color: 'var(--text-2)' }}>
+        <span>دخول {fmtPx(o.entry)}</span>
+        <span style={{ color: tick?.plPct != null && tick.plPct < 0 ? 'var(--down)' : 'var(--up)' }}>
+          حي {fmtPx(px)}{tick?.plPct != null ? ` (${tick.plPct > 0 ? '+' : ''}${tick.plPct.toFixed(2)}%)` : ''}
+        </span>
+        <span>TP1 {fmtPx(o.tp1)}</span>
+        <span>وقف {fmtPx(o.stop)}</span>
+      </div>
+      <div className="flex gap-2 mt-2">
+        <button onClick={onDetail} className="btn text-[12px] flex-1">تفاصيل</button>
+        <button onClick={onChart} className="btn text-[12px] flex-1">الشارت</button>
+      </div>
+    </div>
+  );
+}
 
 function DirChip({ label, active, onClick, color }: { label: string; active: boolean; onClick: () => void; color: string }) {
   return (
