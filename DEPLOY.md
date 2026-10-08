@@ -65,7 +65,7 @@ set RAILWAY_TOKEN=<project-token>
 railway up
 ```
 
-> ملاحظات: Railway يدعم WebSocket. لا توجد متغيرات بيئة مطلوبة (الافتراضيات مدمجة في `server/db.js`)؛ لضبطها: `railway variables --set "KEY=value"`.
+> ملاحظات: Railway يدعم WebSocket. النشر عبر **Dockerfile** (محدد في `railway.json`) — صورة حتمية بسقف ذاكرة `NODE_OPTIONS=--max-old-space-size=460` و`PORT` من بيئة Railway. لا توجد متغيرات بيئة مطلوبة (الافتراضيات مدمجة في `server/db.js`)؛ لضبطها: `railway variables --set "KEY=value"`. عند توليد نطاق جديد (مثال: `...-7604.up.railway.app`) حدّث روابط الفحص أدناه.
 
 ## 5) رفع الكود إلى GitHub
 
@@ -86,7 +86,9 @@ git push -u origin main
 
 | الفحص | المسار/الأمر |
 | --- | --- |
-| الصفحة | `GET /` |
+| الصفحة | `GET /` (يجب 200؛ 503 تعني `client/dist` ناقصا — راجع سجل البناء) |
+| الصحة | `GET /healthz` (يجب `{ok:true}` بلا انتظار DB) |
+| الجاهزية | `GET /readyz` (يجب `{ok:true, dist:true}`) |
 | حالة القائمة | `GET /api/symbols/meta` (عدّاد الأصول + `last_updated`) |
 | مزامنة يدوية | `POST /api/symbols/sync` |
 | WebSocket | الاتصال بـ `wss(s)://<host>/ws` ← رسالة `hello` |

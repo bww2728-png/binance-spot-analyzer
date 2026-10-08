@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,13 @@ const app = express();
 
 // نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
 app.get('/healthz', (req, res) => res.json({ ok: true, up: Date.now() }));
+// نقطة جاهزية غير حاجبة: لا تنتظر Supabase/Binance أبداً (تشخيص سريع دون تعليق healthcheck)
+// يتحقق الـ deploy منها يدوياً بعد الإقلاع: /readyz → {ok, dist, uptime}
+app.get('/readyz', (req, res) => {
+  const distDir = path.join(__dirname, '..', 'client', 'dist');
+  const dist = fs.existsSync(path.join(distDir, 'index.html'));
+  res.status(dist ? 200 : 503).json({ ok: dist, dist, up: Date.now(), uptime: process.uptime() });
+});
 // ترتيب Express حرج: هذه الوسائط قبل أي مسار وإلا لا تُنفّذ عليه (المسارات المسجلة أولاً تتجاوز المسجلة لاحقاً)
 // ترويسات أمنية أساسية — بدون CSP صارم يكسر CDN، وSAMEORIGIN يحفظ الإطارات الداخلية
 app.use((req, res, next) => {
@@ -48,7 +56,29 @@ app.use('/api', (req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   next();
 });
-app.use(express.json());
+// حد الجسم: 1mb عموماً (حماية DoS) — مسارا الرفع المشروعان (لقطات حتى 8×1MB) لهما 10mb صريحاً
+// (الخادم يقص كل dataUrl عند 1_000_000 حرف والعدد عند 8 — السقف الكلي ~8MB)
+const json1mb = express.json({ limit: '1mb' });
+const json10mb = express.json({ limit: '10mb' });
+const UPLOAD_PATHS = new Set(['/api/auto-history/screenshots', '/api/cases']);
+app.use((req, res, next) => {
+  if (req.method === 'POST' && UPLOAD_PATHS.has(req.path)) return json10mb(req, res, next);
+  return json1mb(req, res, next);
+});
+
+// تحذير بدء التشغيل: القيم المدمجة احتياطية — اضبط SUPABASE_URL/ANON_KEY في بيئة الاستضافة (لا تُطبع القيم أبداً)
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+  console.warn('[config] using baked-in Supabase defaults (set SUPABASE_URL/SUPABASE_ANON_KEY to override)');
+}
+
+// رفضوع وعود مرفوضة في الحلقات الخلفية يجب ألا تُسقط healthz بصمت
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandledRejection:', reason instanceof Error ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] uncaughtException:', err instanceof Error ? err.message : err);
+  process.exit(1); // خروج نظيف لتُعيد منصة الاستضافة التشغيل بدل حالة عالقة
+});
 
 const PORT = process.env.PORT || 8787;
 
@@ -2026,11 +2056,23 @@ app.use((req, res, next) => {
     if (/\.(ico|png|jpe?g|svg|txt|xml|map|json|webmanifest)$/i.test(req.path) && req.path !== '/') {
       return res.status(404).type('text/plain').send('not found');
     }
+    // البناء ناقص (client/dist بلا index.html) → 503 صريح بدل كراش sendFile — يُرى في سجلات Railway مباشرة
+    if (!fs.existsSync(path.join(distDir, 'index.html'))) {
+      return res.status(503).json({ error: 'client build missing (client/dist/index.html not found)' });
+    }
     res.setHeader('Cache-Control', 'no-cache, must-revalidate');
-    res.sendFile('index.html', { root: distDir });
+    res.sendFile('index.html', { root: distDir }, (err) => { if (err) next(err); });
   } else {
     next();
   }
+});
+// معالج أخطاء عام أخير: JSON نظيف دائماً بدل صفحة HTML — يمنع تسرب stack للإنتاج
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('[http]', req.method, req.path, err instanceof Error ? err.message : err);
+  if (res.headersSent) return next(err);
+  const status = err && typeof err.status === 'number' ? err.status : 500;
+  res.status(status).json({ error: status === 413 ? 'payload too large (max 1mb)' : 'internal error' });
 });
 
 // ---- خادم WebSocket لبث تحديثات قائمة الأزواج لحظياً ----
@@ -2071,7 +2113,10 @@ setInterval(() => {
   }
 }, 30000);
 
-server.listen(PORT, () => console.log(`[server] listening on http://localhost:${PORT} (+ ws:/ws)`));
+server.listen(PORT, () => {
+  const distOk = fs.existsSync(path.join(distDir, 'index.html'));
+  console.log(`[server] listening on http://localhost:${PORT} (+ ws:/ws) dist=${distOk ? 'ok' : 'MISSING'}`);
+});
 
 // ---- مزامنة دورية بالفرق + بث التغييرات لحظياً ----
 const SYNC_MS = (Number(process.env.SYMBOLS_SYNC_MIN) || 30) * 60 * 1000;
