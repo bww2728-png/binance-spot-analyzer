@@ -126,7 +126,12 @@ R:R ناقص / فلو غير مؤكد / معايرة ناقصة. (البنية `
 ## 14) المعايرة: بوابة التداول ≠ الحذف من البحث
 
 - `minSegmentTrades = 8` بوابة تداول فقط.
-- الشرائح ذات 5-6 حالات: **محجوبة عن النشر + ظاهرة في البحث** بوسمها (`qualified/probationary/weak`).
+- الشرائح ذات 5-6 حالات: **محجوبة عن النشر + ظاهرة في البحث** بوسمها.
+- دقة الحقول اليوم (`client/src/lib/types.ts` — لا تُعمَّم): `BuyCalibrationSegment.tier`
+  وحده يقبل `qualified|probationary|weak`؛ و`BuyOpportunity.tier` و`BuyHistoryEvent.tier`
+  يقبلان `qualified|probationary|null` فقط (بلا `weak`)؛ و`durationMs` موجود فقط في
+  `BuyHistoryEvent`؛ و`BuyWatchRow` بلا `tier` أصلا — أي وسم جديد (مثلا `weak` للفرص)
+  يتطلب توسيع الأنواع صراحة في المرحلة 5.
 
 ## 15) الاختبارات الملزمة
 
