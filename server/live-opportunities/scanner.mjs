@@ -524,3 +524,55 @@ export function summarizeSegments(trades, {
   }
   return out.sort((a, b) => b.trades - a.trades);
 }
+
+/**
+ * لقطة القرار غير القابلة للتغيير (Decision Snapshot — قاعدة ملزمة):
+ * عند لحظة النشر تُحفظ كل المدخلات التي صنعت القرار — لا يُعتمد مستقبلًا على
+ * إعادة حسابها من البيانات الحالية لأن البيانات أو الخوارزميات قد تتغير.
+ * نقية: نفس المدخلات → نفس اللقطة. (القاعدة 2: لا Ranking بلا Snapshot محفوظ)
+ */
+export function buildDecisionSnapshot({
+  zone, state, flow, session, location, profile, plan, segment,
+  calibrationAt = null, thresholds = {}, codeRef = 'live-opp/1'
+} = {}) {
+  const snap = Object.freeze({
+    codeRef,
+    takenAt: null, // يملؤها الناشر (detectedAt) — تُمرَّر هنا لتثبيت عدم التسريب
+    zone: Object.freeze({
+      id: zone?.id ?? null, symbol: zone?.symbol ?? null, timeframe: zone?.timeframe ?? null,
+      kind: zone?.kind ?? null, referenceLevel: Number(zone?.referenceLevel),
+      liquidityLevel: Number(zone?.liquidityLevel), confidence: Number(zone?.confidence),
+      touches: Number(zone?.touches ?? 0), atr: Number(zone?.atr)
+    }),
+    sweep: Object.freeze({
+      observedAt: state?.sweepObservedAt ?? null, low: Number(state?.sweepLow),
+      sawSweep: Boolean(state?.sawSweep)
+    }),
+    reclaim: Object.freeze({
+      at: state?.reclaimAt ?? null, elapsedMs: state?.reclaimElapsedMs ?? null,
+      elapsedBars: state?.reclaimBars ?? null, windowBars: Number(thresholds?.reclaimWindowBars ?? 3)
+    }),
+    flow: Object.freeze({
+      score: Number(flow?.score), tier: flow?.tier ?? null,
+      components: flow?.components ? { ...flow.components } : null,
+      reasons: Array.isArray(flow?.reasons) ? [...flow.reasons] : []
+    }),
+    context: Object.freeze({
+      session: session?.tier ?? null,
+      location: location?.state ?? null,
+      poc: Number(profile?.poc), vah: Number(profile?.vah), val: Number(profile?.val)
+    }),
+    plan: Object.freeze({
+      entry: Number(plan?.entry), stop: Number(plan?.stop), tp: Number(plan?.tp),
+      rr: Number(plan?.rr), stopAtr: Number(plan?.stopAtr),
+      targetLabel: plan?.targetLabel ?? null, minRR: Number(thresholds?.minRR ?? 2)
+    }),
+    calibration: Object.freeze({
+      at: calibrationAt, segmentKey: segment?.key ?? null,
+      smoothedWinRate: Number(segment?.smoothedWinRate), trades: Number(segment?.trades ?? 0),
+      tier: segment?.tier ?? null
+    }),
+    thresholds: Object.freeze({ ...thresholds })
+  });
+  return snap;
+}

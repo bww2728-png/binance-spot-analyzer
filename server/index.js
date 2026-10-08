@@ -1240,13 +1240,15 @@ const liveOppEngine = createLiveOpportunityEngine({
   readCalibration: readLiveCalibration,
   broadcast: (msg) => broadcast(msg),
   persist: (row) => saveLiquidityEvent(
-    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : 'live_opportunity',
+    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : row?.type === 'live_rejected' ? 'live_opportunity_rejected' : 'live_opportunity',
     { symbol: row?.symbol || 'GLOBAL' },
     row?.type === 'live_calibration'
       ? `معايرة الفرص الحية: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
       : row?.closed
         ? `نتيجة فرصة ${row.symbol} ${row.timeframe}: ${row.outcome === 'target' ? 'وصل الهدف' : 'ضرب الوقف'}`
-        : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
+        : row?.type === 'live_rejected'
+          ? `رفض ما بعد السويب ${row.symbol} ${row.timeframe}: ${row.reason}`
+          : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
     { opportunity: row }
   ),
   log: console,

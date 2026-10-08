@@ -16,11 +16,12 @@ import { computeVolumeProfile, classifyLocation } from '../liquidity/volumeProfi
 import { sessionFactor } from '../liquidity/session.mjs';
 import {
   advanceTracker, canPublish, initTracker, markPublished, pickWatchlist,
-  pruneTrackers, publishKeyFor, tfRank, trackerKey, TF_ORDER
+  pruneTrackers, publishKeyFor, tfRank, tfSeconds, trackerKey, TF_ORDER,
+  stageChain, dedupeSweepEvents
 } from './tracker.mjs';
 import {
   buildLongPlan, calibrateSweeps, compositeScore, confBand, flowScore, gates,
-  longTargets, nextSslBelow, segmentLookupKeys, summarizeSegments
+  longTargets, nextSslBelow, segmentLookupKeys, summarizeSegments, buildDecisionSnapshot
 } from './scanner.mjs';
 
 const DEFAULT_CONFIG = {
@@ -36,6 +37,12 @@ const DEFAULT_CONFIG = {
   maxTrackAtr: 6,
   maxStopAtr: 3,
   freshnessBars: 6,
+  // نافذة الاستعادة فرضية تجريبية (عقيدة Fabio §3): 3 = المرشح الأساسي، 4/6 = حساسية.
+  // الاختيار النهائي على OOS حصرا — ممنوع الاختيار على نفس بيانات الضبط (قاعدة ملزمة).
+  reclaimWindowBars: 3,
+  reclaimExperiment: [3, 4, 6],
+  // تأكيد التدفق قبل الدخول (التسلسل الحرفي): أدنى درجة فلو تُقبل للنشر
+  flowMinScore: 45,
   approachAtr: 1.5,
   breakAtr: 0.6,
   watchApproachAtr: 0.5,
@@ -100,6 +107,11 @@ export function createLiveOpportunityEngine(deps) {
     pairsTotal: 0,
     zonesTracked: 0,
     phases: {},
+    // قمع التغطية بالأسباب (عقيدة §13): كل مرحلة بعدّاد — لا نسبة عمياء
+    funnel: {
+      eligible: 0, noData: 0, swept: 0, noReclaim: 0, lateReclaim: 0,
+      flowFail: 0, planFail: 0, gateFail: 0, calibFail: 0, published: 0
+    },
     published: 0,
     resolved: 0,
     wins: 0,
@@ -184,7 +196,8 @@ export function createLiveOpportunityEngine(deps) {
     // مع ضبط قاع السويب من الشموع الحقيقية لا من سعر لحظي.
     const { next: st } = advanceTracker(state, {
       zone, price: Number(price), atr: zone.atr, now: now(),
-      freshnessBars: cfg.freshnessBars, approachAtr: cfg.approachAtr, breakAtr: cfg.breakAtr
+      freshnessBars: cfg.freshnessBars, approachAtr: cfg.approachAtr, breakAtr: cfg.breakAtr,
+      reclaimWindowBars: cfg.reclaimWindowBars
     });
     // قاع السويب الحقيقي من الشموع: أدنى قاع خلال نافذة السويب، بلا تجاوز مستوى السيولة إلا لأسفل
     const lookback = Math.min(candles.length, Math.max(3, cfg.freshnessBars));
@@ -199,6 +212,11 @@ export function createLiveOpportunityEngine(deps) {
     }
     trackers.set(st.key, st);
     if (!canPublish(st, publishKeyFor(st))) return null;
+    // بوابة التسلسل الحرفي (عقيدة §2): نشر بلا قصة مشاهَدة كاملة = خلل حرج
+    if (!st.sawSweep || !st.reclaimAt) {
+      log.error?.(`[live-opp] SEQUENCE VIOLATION ${symbol} ${zone.timeframe} zone=${zone.id} phase=${st.phase} sawSweep=${st.sawSweep} reclaimAt=${st.reclaimAt}`);
+      return null;
+    }
 
     status.bookCalls += 1;
     const book = await fetchBookSignals(symbol).catch(() => ({ bubbles: [], book: null, icebergs: [], spoofs: [] }));
@@ -212,6 +230,20 @@ export function createLiveOpportunityEngine(deps) {
       spoofs: book.spoofs,
       sweepLow: st.sweepLow, price: Number(price), atr: zone.atr
     });
+    // تأكيد التدفق قبل الدخول (التسلسل الحرفي — veto خارج الدرجة): فلو ضعيف = رفض مسجل بالسلسلة
+    if (!(Number(flow?.score) >= cfg.flowMinScore)) {
+      status.funnel.flowFail += 1;
+      const row = {
+        symbol, timeframe: zone.timeframe, zoneId: zone.id, at: now(),
+        flowScore: flow?.score ?? null, flowTier: flow?.tier ?? null,
+        reason: `فلو غير مؤكد (${flow?.score ?? '?'} < ${cfg.flowMinScore})`,
+        chain: stageChain(st, { flow, veto: 'flow_unconfirmed' })
+      };
+      rejected.push(row);
+      // ما بعد السويب يُحفظ للبحث (لماذا لم تتحول إلى فرصة؟) — ذهب البحث لاحقا
+      if (st.sawSweep) void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+      return null;
+    }
 
     const last = candles[candles.length - 1];
     const entry = Number(last.close);
@@ -247,7 +279,14 @@ export function createLiveOpportunityEngine(deps) {
       : Number(st.sweepLow);
     const plan = buildLongPlan({ entry, sweepLow: protectedLow, atr: zone.atr, bandPct: cfg.bandPct, targets, minRR: planMinRR });
     if (!plan.valid || !plan.tp) {
-      rejected.push({ symbol, timeframe: zone.timeframe, zoneId: zone.id, at: now(), reason: plan.violations?.join(' · ') || 'لا خطة صالحة' });
+      status.funnel.planFail += 1;
+      const row = {
+        symbol, timeframe: zone.timeframe, zoneId: zone.id, at: now(),
+        reason: plan.violations?.join(' · ') || 'لا خطة صالحة',
+        chain: stageChain(st, { flow, veto: 'no_valid_plan' })
+      };
+      rejected.push(row);
+      if (st.sawSweep) void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
       return null;
     }
 
@@ -276,16 +315,40 @@ export function createLiveOpportunityEngine(deps) {
         : effectiveTier == null
           ? `الشريحة ${segment.key} ضعيفة إحصائياً (${(segment.smoothedWinRate * 100).toFixed(1)}% منكمشة من ${segment.trades} صفقة — دون 50%)`
           : `الشريحة ${segment.key} ${effectiveTier === 'probationary' ? 'تحت التجربة' : 'غير مؤهلة'} (${(segment.smoothedWinRate * 100).toFixed(1)}% · حد Wilson ${(segment.wilsonLB * 100).toFixed(0)}% من ${segment.trades} صفقة)`;
-      rejected.push({
+      const vetoKind = !gate.pass ? 'gate_block' : 'calibration_tier';
+      if (!gate.pass) status.funnel.gateFail += 1; else status.funnel.calibFail += 1;
+      const row = {
         symbol, timeframe: zone.timeframe, zoneId: zone.id, at: now(),
         composite, flowScore: flow.score, rr: plan.rr,
-        reason: !gate.pass ? gate.blockers.join(' · ') : segReason
-      });
+        reason: !gate.pass ? gate.blockers.join(' · ') : segReason,
+        chain: stageChain(st, { flow, veto: vetoKind })
+      };
+      rejected.push(row);
+      if (st.sawSweep) void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
       return null;
     }
 
-    const key = publishKeyFor(st);
-    const opportunity = {
+    const detectedAt = now();
+    // القاعدة 1 (لا تسريب مستقبلي): المعايرة المستخدمة يجب أن تسبق لحظة القرار
+    if (calibration.at != null && Number(calibration.at) > detectedAt) {
+      log.error?.(`[live-opp] FUTURE LEAKAGE ${symbol} ${zone.timeframe}: calibration.at=${calibration.at} > detectedAt=${detectedAt} — publish blocked`);
+      return null;
+    }
+    // القاعدة 2 (لا Ranking بلا Snapshot): اللقطة تُبنى أولا وتُحفظ مع الفرصة — لا إعادة حساب لاحقا
+    const snapshot = {
+      ...buildDecisionSnapshot({
+        zone, state: st, flow, session, location, profile, plan, segment,
+        calibrationAt: calibration.at ?? null,
+        thresholds: {
+          reclaimWindowBars: cfg.reclaimWindowBars, minRR: planMinRR,
+          minComposite: cfg.minComposite, flowMinScore: cfg.flowMinScore,
+          maxStopAtr: cfg.maxStopAtr, bandPct: cfg.bandPct
+        }
+      }),
+      takenAt: detectedAt
+    };
+
+    const key = publishKeyFor(st);    const opportunity = {
       id: key,
       symbol,
       timeframe: zone.timeframe,
@@ -331,7 +394,8 @@ export function createLiveOpportunityEngine(deps) {
       outcomeAt: null,
       outcomePrice: null,
       bars: null,
-      rotation: status.cycle
+      rotation: status.cycle,
+      snapshot
     };
 
     trackers.set(key, markPublished(st, key, now()));
@@ -341,6 +405,7 @@ export function createLiveOpportunityEngine(deps) {
       if (oldest) opportunities.delete(oldest.id);
     }
     status.published += 1;
+    status.funnel.published += 1;
     status.lastPublishAt = opportunity.detectedAt;
     broadcast({ type: 'live_opportunity_new', opportunity });
     void persist(opportunity).catch(() => undefined);
@@ -510,7 +575,8 @@ export function createLiveOpportunityEngine(deps) {
       const phaseCount = {};
       for (const [symbol, list] of bySymbol) {
         const px = Number(prices[symbol]);
-        if (!Number.isFinite(px)) continue;
+        if (!Number.isFinite(px)) { status.funnel.noData += 1; continue; }
+        status.funnel.eligible += list.length;
         for (const zone of list) {
           const atr = Number(zone.atr) > 0 ? Number(zone.atr) : Math.abs(Number(zone.referenceLevel)) * 0.005 || 1;
           const liq = Number(zone.liquidityLevel ?? zone.referenceLevel);
@@ -523,12 +589,15 @@ export function createLiveOpportunityEngine(deps) {
           liveKeys.add(key);
           const { next, events } = advanceTracker(prev ?? initTracker(zone, started, { freshnessBars: cfg.freshnessBars }), {
             zone, price: px, atr, now: started,
-            freshnessBars: cfg.freshnessBars, approachAtr: cfg.approachAtr, breakAtr: cfg.breakAtr
+            freshnessBars: cfg.freshnessBars, approachAtr: cfg.approachAtr, breakAtr: cfg.breakAtr,
+            reclaimWindowBars: cfg.reclaimWindowBars
           });
           trackers.set(key, next);
           phaseCount[next.phase] = (phaseCount[next.phase] ?? 0) + 1;
           for (const e of events) {
-            if (e.type === 'sweep') sweepEvents.push({ symbol, timeframe: zone.timeframe, zoneId: zone.id, at: e.at, price: e.price });
+            if (e.type === 'sweep') { status.funnel.swept += 1; sweepEvents.push({ symbol, timeframe: zone.timeframe, zoneId: zone.id, at: e.at, price: e.price }); }
+            else if (e.type === 'expired') status.funnel.noReclaim += 1;
+            else if (e.type === 'late_reclaim') status.funnel.lateReclaim += 1;
           }
           const close = next.geometry?.toLiquidityAtr;
           const veryClose = Number.isFinite(close) && close <= cfg.watchApproachAtr;
@@ -557,10 +626,12 @@ export function createLiveOpportunityEngine(deps) {
 
       for (const ev of sweepEvents.slice(0, 30)) broadcast({ type: 'live_sweep_detected', ...ev });
 
-      // 2) الترتيب: الفريم الأدق أولاً ثم الأقرب مسافةً (عرض أولاً بأول)
-      candidates.sort((a, b) =>
-        tfRank(a.zone.timeframe) - tfRank(b.zone.timeframe) ||
-        (a.state.geometry?.toLiquidityAtr ?? 99) - (b.state.geometry?.toLiquidityAtr ?? 99));
+      // 2) الترتيب + إزالة تكرار الحدث الواحد عبر الفريمات (عقيدة §11):
+      //    نفس السويب على عدة فريمات = حدث واحد أساسه الأدق فريماً والبقية شهود (dupTfs)
+      for (const c of candidates) c.tfSec = tfSeconds(c?.zone?.timeframe);
+      const deduped = dedupeSweepEvents(candidates);
+      candidates.length = 0;
+      candidates.push(...deduped);
 
       // 3) تحقق شبكي متوازٍ محدود للنشر (محدد توازٍ + منع تكرار المرشح قيد التحقق)
       const limit = createLimiter(cfg.verifyConcurrency);
@@ -700,8 +771,7 @@ export function createLiveOpportunityEngine(deps) {
 
   /** القائمة الحية للواجهة */
   function getFeed() {
-    const ops = [...opportunities.values()].sort((a, b) => b.composite - a.composite || b.detectedAt - a.detectedAt);
-    const watch = [];
+    const ops = [...opportunities.values()].sort((a, b) => b.composite - a.composite || b.detectedAt - a.detectedAt);    const watch = [];
     for (const st of trackers.values()) {
       if (st.phase === 'published') continue;
       const close = st.geometry?.toLiquidityAtr;
@@ -735,6 +805,7 @@ export function createLiveOpportunityEngine(deps) {
       pairsTotal: status.pairsTotal,
       zonesTracked: status.zonesTracked,
       phases: status.phases,
+      funnel: { ...status.funnel },
       deepScans: status.deepScans,
       updatedAt: status.updatedAt,
       error: status.error,

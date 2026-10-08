@@ -52,6 +52,11 @@ export function initTracker(zone, now, { freshnessBars = 6 } = {}) {
     staleSweep: Boolean(isSwept && !fresh),
     sweepObservedAt: isSwept && fresh ? sweptAtSec * 1000 : null,
     sweepLow: isSwept && fresh ? Number(zone?.liquidityLevel) : null,
+    // عقيدة Fabio: التسلسل الحرفي SSL→Sweep→Reclaim→Flow→Entry — تُسجَّل الشواهد لا تُفترض
+    sawSweep: Boolean(isSwept && fresh),
+    reclaimAt: null,
+    reclaimElapsedMs: null,
+    reclaimBars: null,
     attempts: 0,
     publishedKey: null,
     invalidatedAt: null,
@@ -70,7 +75,8 @@ export function initTracker(zone, now, { freshnessBars = 6 } = {}) {
  * - reclaimed → حدث استعادة (مرشح للتأكيد والخطة)
  */
 export function advanceTracker(prev, {
-  zone, price, atr, now, freshnessBars = 6, approachAtr = 1.5, breakAtr = 0.6
+  zone, price, atr, now, freshnessBars = 6, approachAtr = 1.5, breakAtr = 0.6,
+  reclaimWindowBars = 3
 } = {}) {
   const base = prev ?? initTracker(zone, now, { freshnessBars });
   const events = [];
@@ -93,6 +99,7 @@ export function advanceTracker(prev, {
       next.sweepObservedAt = now;
       next.sweepLow = Number(price);
       next.staleSweep = false;
+      next.sawSweep = true;
       events.push({ type: 'sweep', at: now, price: Number(price) });
     } else {
       next.sweepLow = Math.min(Number(base.sweepLow ?? price), Number(price));
@@ -111,9 +118,22 @@ export function advanceTracker(prev, {
     events.push({ type: 'invalidated', at: now, price: Number(price) });
   } else if (res.phase === 'reclaimed') {
     if (base.phase !== 'reclaimed' && base.phase !== 'published') {
-      events.push({ type: 'reclaim', at: now, price: Number(price) });
+      // الزمن المزدوج الإلزامي: شموع + ملي ثانية فعلية (3 شموع ≠ نفس الزمن عبر الفريمات)
+      const elapsedMs = next.sweepObservedAt ? Math.max(0, now - next.sweepObservedAt) : null;
+      const elapsedBars = elapsedMs != null && tfSec > 0 ? elapsedMs / (tfSec * 1000) : null;
+      next.reclaimAt = now;
+      next.reclaimElapsedMs = elapsedMs;
+      next.reclaimBars = elapsedBars != null ? Number(elapsedBars.toFixed(2)) : null;
+      // نافذة الاستعادة فرضية تجريبية (3 أساسي، 4/6 حساسية): المتأخر يُوسم ولا يُؤهَّل
+      const windowMs = Math.max(1, reclaimWindowBars) * tfSec * 1000;
+      if (elapsedMs != null && elapsedMs > windowMs) {
+        next.staleSweep = true;
+        events.push({ type: 'late_reclaim', at: now, price: Number(price), elapsedMs, elapsedBars: next.reclaimBars, windowBars: reclaimWindowBars });
+      } else {
+        events.push({ type: 'reclaim', at: now, price: Number(price), elapsedMs, elapsedBars: next.reclaimBars, windowBars: reclaimWindowBars });
+      }
     }
-    next.staleSweep = false;
+    next.staleSweep = next.staleSweep || false;
   }
 
   return { next, events };
@@ -124,12 +144,13 @@ export function markPublished(state, publishKey, now) {
   return { ...state, phase: 'published', publishedKey: publishKey, publishedAt: now, updatedAt: now };
 }
 
-/** هل يمكن نشر فرصة من هذه الحالة؟ (استعادة مكتملة + سويب طازج + غير منشورة لنفس السويب) */
+/** هل يمكن نشر فرصة من هذه الحالة؟ التسلسل الحرفي: swept مشاهَد → reclaim ضمن النافذة → غير منشورة لنفس السويب */
 export function canPublish(state, publishKey) {
   if (!state) return false;
   if (state.staleSweep) return false;
   if (state.phase !== 'reclaimed') return false;
   if (!state.sweepObservedAt) return false;
+  if (!state.sawSweep || !state.reclaimAt) return false; // لم تُشاهَد القصة كاملة — ممنوع النشر
   return state.publishedKey !== publishKey;
 }
 
@@ -178,4 +199,61 @@ export function pruneTrackers(trackers, liveKeys, now, { maxAgeMs = 6 * 3600_000
     }
   }
   return removed;
+}
+
+/**
+ * سلسلة المراحل الموثقة لمرشح (للبحث: لماذا لم يتحول إلى فرصة؟).
+ * تُرفق بكل رفض: SSL → Sweep → Reclaim → Flow → Veto/Plan.
+ */
+export function stageChain(state, extra = {}) {
+  const s = state ?? {};
+  return [
+    { stage: 'ssl', symbol: s.symbol ?? null, timeframe: s.timeframe ?? null, zoneId: s.zoneId ?? null, referenceLevel: s.referenceLevel ?? null, liquidityLevel: s.liquidityLevel ?? null },
+    { stage: 'sweep', saw: Boolean(s.sawSweep), at: s.sweepObservedAt ?? null, low: s.sweepLow ?? null },
+    { stage: 'reclaim', at: s.reclaimAt ?? null, elapsedMs: s.reclaimElapsedMs ?? null, elapsedBars: s.reclaimBars ?? null, stale: Boolean(s.staleSweep) },
+    { stage: 'flow', ...(extra.flow ?? null ? { score: extra.flow.score ?? null, tier: extra.flow.tier ?? null } : {}) },
+    { stage: 'veto', reason: extra.veto ?? null }
+  ];
+}
+
+/**
+ * إزالة تكرار الحدث الواحد عبر الفريمات: نفس (الرمز + مستوى السيولة + زمن السويب)
+ * = حدث واحد؛ الأساسي أدق فريم، والبقية شهود (dupTfs).
+ * نقية تماما: نفس المدخلات → نفس المخرجات.
+ */
+export function dedupeSweepEvents(candidates, { levelTolPct = 0.001 } = {}) {
+  const groups = [];
+  for (const c of candidates ?? []) {
+    const liq = Number(c?.zone?.liquidityLevel);
+    const t = Number(c?.state?.sweepObservedAt);
+    let g = null;
+    for (const gg of groups) {
+      if (gg.symbol !== c?.symbol) continue;
+      const gl = Number(gg.liq);
+      if (!Number.isFinite(liq) || !Number.isFinite(gl) || gl <= 0) continue;
+      if (Math.abs(liq - gl) / gl > levelTolPct) continue;
+      const gt = Number(gg.sweepAt);
+      const windowMs = Math.max(Number(c?.tfSec ?? 0), Number(gg.tfSec ?? 0)) * 1000 || 0;
+      if (Number.isFinite(t) && Number.isFinite(gt) && Math.abs(t - gt) <= Math.max(windowMs, 60_000)) { g = gg; break; }
+    }
+    if (!g) {
+      g = { symbol: c?.symbol, liq, sweepAt: t, tfSec: Number(c?.tfSec ?? 0), items: [] };
+      groups.push(g);
+    }
+    g.items.push(c);
+  }
+  const out = [];
+  for (const g of groups) {
+    const sorted = [...g.items].sort((a, b) => tfRank(a?.zone?.timeframe) - tfRank(b?.zone?.timeframe));
+    const primary = sorted[0];
+    if (primary) {
+      primary.dupTfs = sorted.slice(1).map(x => x?.zone?.timeframe).filter(Boolean);
+      out.push(primary);
+    }
+  }
+  // حتمية الترتيب: الأدق فريماً أولاً ثم الأقرب
+  out.sort((a, b) =>
+    tfRank(a?.zone?.timeframe) - tfRank(b?.zone?.timeframe) ||
+    (a?.state?.geometry?.toLiquidityAtr ?? 99) - (b?.state?.geometry?.toLiquidityAtr ?? 99));
+  return out;
 }
