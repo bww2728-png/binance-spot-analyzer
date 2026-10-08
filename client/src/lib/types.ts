@@ -484,6 +484,10 @@ export interface BuyOpportunity {
   targetLabel: string | null;
   targets: number[];
   composite: number;
+  // درجة الترتيب الجديدة (نسبية للدفعة — عقيدة §10؛ الفرز المعروض يبقى composite حتى OOS)
+  rank?: number | null;
+  rankMargin?: number | null;
+  rankRefDurationMs?: number | null;
   flowScore: number;
   flowTier: "high" | "mid" | "low";
   flowReasons: string[];
@@ -539,6 +543,9 @@ export interface BuyCalibrationSegment {
   wilsonLB?: number;
   tier?: "qualified" | "probationary" | "weak";
   avgRR: number | null;
+  medianDurationMs?: number | null;
+  durationN?: number;
+  durationShrunk?: boolean;
 }
 
 /** حدث تاريخي لفرصة حية (من سجل الأحداث الدائم — يغذي لوحة التحكم) */
@@ -578,6 +585,7 @@ export interface BuyFeed {
   pairsTotal: number;
   zonesTracked: number;
   phases: Record<string, number>;
+  funnel: { eligible: number; noData: number; swept: number; noReclaim: number; lateReclaim: number; flowFail: number; planFail: number; gateFail: number; calibFail: number; published: number } | null;
   deepScans: number;
   updatedAt: number | null;
   error: string | null;

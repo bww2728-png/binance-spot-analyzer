@@ -290,11 +290,13 @@ export function nextSslBelow(zones, price, { excludeIds = [], maxDistancePct = 0
  */
 export function simulateSweep({
   candles, sweepIndex, zone, atr, bandPct = 0.0025,
-  maxReclaimBars = 6, maxBars = 96, minRR = 2, priorWindow = 30,
+  maxBars = 96, maxReclaimBars = 6, minRR = 2, priorWindow = 30,
   maxStopAtr = 3, minDepthAtr = 0.15, maxDepthAtr = 3,
   maxRangePos = 0.8, minBuyRatioPct = 48,
   sessionTierOf = null, requireSessionPrime = false, takerBuy = null,
-  entryMode = 'close', retestTolAtr = 0.3, retestWindow = 12
+  entryMode = 'close', retestTolAtr = 0.3, retestWindow = 12,
+  // تكاليف التداول (بحث OOS — عقيدة §15): تُسجَّل ولا تغيّر القرار الحي
+  feePct = 0, slippagePct = 0
 } = {}) {
   if (!Array.isArray(candles) || candles.length < 30) return { outcome: 'no_entry', reason: 'شموع غير كافية' };
   const i0 = Number(sweepIndex);
@@ -381,10 +383,17 @@ export function simulateSweep({
   const plan = buildLongPlan({ entry, sweepLow: protectedLow, atr: a, bandPct, targets, minRR });
   if (!plan.tp || !plan.valid) return { outcome: 'no_entry', reason: plan.violations?.join(' · ') || 'R:R دون الحد', rr: plan.rr };
   const { stop, tp } = plan;
+  // صافي التكاليف: تُخصم من العائد المعلن (لا تغيّر منطق الدخول/الخروج — للبحث الصادق فقط)
+  const tradeCostPct = Number(feePct) * 2 + Number(slippagePct);
   for (let i = entryIdx + 1; i < Math.min(entryIdx + maxBars, candles.length); i += 1) {
     const c = candles[i];
-    if (Number(c.low) <= stop) return { outcome: 'decided', win: 0, exit: stop, bars: i - entryIdx, rr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time };
-    if (Number(c.high) >= tp) return { outcome: 'decided', win: 1, exit: tp, bars: i - entryIdx, rr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time };
+    if (Number(c.low) <= stop) return { outcome: 'decided', win: 0, exit: stop, bars: i - entryIdx, rr: plan.rr, netRr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time, tradeCostPct };
+    if (Number(c.high) >= tp) {
+      const grossPct = (tp - entry) / Math.max(entry, 1e-12) * 100;
+      const netPct = grossPct - tradeCostPct;
+      const netRr = (entry - stop) > 0 ? netPct / (((entry - stop) / Math.max(entry, 1e-12)) * 100) : plan.rr;
+      return { outcome: 'decided', win: 1, exit: tp, bars: i - entryIdx, rr: plan.rr, netRr: Number(netRr.toFixed(2)), entry, stop, tp, entryTime: candles[entryIdx].time, tradeCostPct };
+    }
   }
   return { outcome: 'undecided', entry, stop, tp, rr: plan.rr, entryTime: candles[entryIdx].time };
 }
@@ -405,7 +414,8 @@ export function calibrateSweeps({
   maxStopAtr = 3, minDepthAtr = 0.15, maxDepthAtr = 3,
   maxRangePos = 0.8, minBuyRatioPct = 48,
   sessionTierOf = null, requireSessionPrime = false,
-  entryMode = 'retest', retestTolAtr = 0.3, retestWindow = 12
+  entryMode = 'retest', retestTolAtr = 0.3, retestWindow = 12,
+  feePct = 0, slippagePct = 0
 }) {
   const trades = [];
   const rejected = {};
@@ -424,12 +434,12 @@ export function calibrateSweeps({
     if (zone.state !== 'swept' || !zone.sweptAt) continue;
     const sweepIndex = byTime.get(Number(zone.sweptAt));
     if (sweepIndex == null) continue;
-    for (const minRR of rrGrid) {
+      for (const minRR of rrGrid) {
       const sim = simulateSweep({
         candles, sweepIndex, zone, atr: zone.atr, bandPct, maxBars, minRR, maxReclaimBars,
         maxStopAtr, minDepthAtr, maxDepthAtr, maxRangePos, minBuyRatioPct,
         sessionTierOf, requireSessionPrime, takerBuy,
-        entryMode, retestTolAtr, retestWindow
+        entryMode, retestTolAtr, retestWindow, feePct, slippagePct
       });
       if (sim.outcome !== 'decided') { if (minRR === rrGrid[0]) bump(sim.reason ?? 'غير محسوم'); continue; }
       // المدة المشروطة (عقيدة §10): زمن الحسم − زمن الدخول بالمللي ثانية + سمات التكييف
@@ -444,6 +454,8 @@ export function calibrateSweeps({
         minRR,
         win: sim.win,
         rr: sim.rr,
+        netRr: Number.isFinite(Number(sim.netRr)) ? Number(sim.netRr) : null,
+        tradeCostPct: Number(sim.tradeCostPct) || 0,
         bars: sim.bars,
         ts: Number(zone.sweptAt),
         symbol: String(zone?.symbol ?? '').toUpperCase() || null,

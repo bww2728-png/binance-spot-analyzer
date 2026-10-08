@@ -1630,6 +1630,28 @@ app.post('/api/live-opportunities/calibrate', handle(async (req, res) => {
   void liveOppEngine.runCalibration({ symbols, timeframes }).catch(() => undefined);
 }));
 
+// شارت بصري لمنطقة قيد المراقبة: نفس محرك الرسم — المرجع/السيولة فقط (بلا خطة بعد)
+app.get('/api/live-opportunities/watch/:symbol/:timeframe/:zoneId/screenshot', handle(async (req, res) => {
+  const symbol = String(req.params.symbol || '').toUpperCase();
+  const timeframe = String(req.params.timeframe || '').toLowerCase();
+  const zoneId = String(req.params.zoneId || '');
+  const zone = (liquidityState.liveResults ?? []).find(z =>
+    String(z?.symbol).toUpperCase() === symbol && String(z?.timeframe).toLowerCase() === timeframe && String(z?.id) === zoneId);
+  if (!zone || !Number.isFinite(Number(zone.referenceLevel))) return res.status(404).json({ error: 'منطقة غير موجودة في المخزون الحي' });
+  const raw = await db.binance.klines(symbol, timeframe, 160);
+  const candles = normalizeCandles(raw);
+  const zoneLike = {
+    symbol, timeframe, kind: zone.kind ?? 'ssl',
+    state: `مراقبة · ثقة ${zone.confidence ?? '?'} · لمسات ${zone.touches ?? '?'}`,
+    referenceLevel: Number(zone.referenceLevel),
+    liquidityLevel: Number(zone.liquidityLevel ?? zone.referenceLevel),
+    detectedAt: Date.now(),
+    extraLevels: [],
+    reasons: [`مرجع ${zone.referenceLevel} · سيولة ${zone.liquidityLevel ?? '—'}`]
+  };
+  res.type('image/svg+xml').send(renderZoneChart(zoneLike, candles, candles.length - 1));
+}));
+
 // شارت بصري لفرصة: الشموع الحقيقية + خط الدخول/الوقف/الهدف + نقطة السويب
 app.get('/api/live-opportunities/:id/screenshot', handle(async (req, res) => {
   const op = liveOppEngine.findOpportunity(String(req.params.id));

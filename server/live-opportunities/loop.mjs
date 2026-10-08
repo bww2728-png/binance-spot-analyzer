@@ -63,6 +63,8 @@ const DEFAULT_CONFIG = {
     concurrency: 4,
     minDepthAtr: 0.15, maxDepthAtr: 3, maxRangePos: 0.8, minBuyRatioPct: 48,
     requireSessionPrime: false,
+    // تكاليف التداول للبحث الصادق (عقيدة §15): افتراضي 0 (قرارات حية بلا تغيير) — تُضبط في أبحاث OOS
+    feePct: 0, slippagePct: 0,
     // شبكة أهداف R:R: النسبة تعتمد جوهرياً على بُعد الهدف، والشرائح تختار الأنسب
     rrGrid: [1.0, 1.2, 1.5, 2, 2.5],
     // نافذة الاستعادة أوسع (12 شمعة): 6 شموع ترفض معظم السويبات فيقلّ حجم العيّنة كثيراً
@@ -735,14 +737,15 @@ export function createLiveOpportunityEngine(deps) {
               maxZones: 120
             });
             // نفس بوابات المحرك الحي: عمق السويب · الموقع · الجلسة · التدفق · R:R
-            const { trades, rejected: rej } = calibrateSweeps({
-              candles, zones, timeframe: tf, raw,
-              bandPct: cfg.bandPct, maxBars: cfg.maxBars, minRR: cfg.minRR,
-              maxReclaimBars: cfg.calibration.maxReclaimBars,
-              rrGrid: cfg.calibration.rrGrid, maxStopAtr: cfg.maxStopAtr,
-              maxDepthAtr: cfg.calibration.maxDepthAtr, minDepthAtr: cfg.calibration.minDepthAtr,
-              maxRangePos: cfg.calibration.maxRangePos, minBuyRatioPct: cfg.calibration.minBuyRatioPct,
-              sessionTierOf: (tsSec) => sessionFactor(Number(tsSec) * 1000).tier,
+      const { trades, rejected: rej } = calibrateSweeps({
+        candles, zones, timeframe: tf, raw,
+        bandPct: cfg.bandPct, maxBars: cfg.maxBars, minRR: cfg.minRR,
+        maxReclaimBars: cfg.calibration.maxReclaimBars,
+        rrGrid: cfg.calibration.rrGrid, maxStopAtr: cfg.maxStopAtr,
+        maxDepthAtr: cfg.calibration.maxDepthAtr, minDepthAtr: cfg.calibration.minDepthAtr,
+        maxRangePos: cfg.calibration.maxRangePos, minBuyRatioPct: cfg.calibration.minBuyRatioPct,
+        feePct: cfg.calibration.feePct, slippagePct: cfg.calibration.slippagePct,
+        sessionTierOf: (tsSec) => sessionFactor(Number(tsSec) * 1000).tier,
               requireSessionPrime: cfg.calibration.requireSessionPrime,
               entryMode: 'retest',
               retestTolAtr: cfg.calibration.retestTolAtr,

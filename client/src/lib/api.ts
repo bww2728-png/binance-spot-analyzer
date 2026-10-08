@@ -475,6 +475,8 @@ const liveOpportunitiesApi = {
   runBuyCalibration: (body?: { symbols?: string[]; timeframes?: string[] }) =>
     fetch(`${BASE}/live-opportunities/calibrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(j<{ ok: boolean; started: boolean; symbols: number | null; timeframes: number | null }>),
   buyOpportunityChartUrl: (id: string) => `${BASE}/live-opportunities/${encodeURIComponent(id)}/screenshot`,
+  watchZoneChartUrl: (symbol: string, timeframe: string, zoneId: string) =>
+    `${BASE}/live-opportunities/watch/${encodeURIComponent(symbol)}/${encodeURIComponent(timeframe)}/${encodeURIComponent(zoneId)}/screenshot`,
 
   /* ---- الفرص الحية — استراتيجيتي (محرك SMC المستقل) ---- */
   getStrategy2Feed: (opts: { symbol?: string; tf?: string; model?: string; tier?: string; htfDir?: string; sort?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal) => {
