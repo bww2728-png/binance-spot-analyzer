@@ -21,8 +21,10 @@ import {
 } from './tracker.mjs';
 import {
   buildLongPlan, calibrateSweeps, compositeScore, confBand, flowScore, gates,
-  longTargets, nextSslBelow, segmentLookupKeys, summarizeSegments, buildDecisionSnapshot
+  longTargets, nextSslBelow, segmentLookupKeys, summarizeSegments, buildDecisionSnapshot,
+  rankBatch
 } from './scanner.mjs';
+import { toLifecycleRow, rehydrateState } from './lifecycle.mjs';
 
 const DEFAULT_CONFIG = {
   cycleMs: 5_000,
@@ -595,9 +597,27 @@ export function createLiveOpportunityEngine(deps) {
           trackers.set(key, next);
           phaseCount[next.phase] = (phaseCount[next.phase] ?? 0) + 1;
           for (const e of events) {
-            if (e.type === 'sweep') { status.funnel.swept += 1; sweepEvents.push({ symbol, timeframe: zone.timeframe, zoneId: zone.id, at: e.at, price: e.price }); }
+            if (e.type === 'sweep') {
+              status.funnel.swept += 1;
+              sweepEvents.push({
+                symbol, timeframe: zone.timeframe, zoneId: zone.id, key,
+                at: e.at, price: e.price, kind: zone.kind,
+                referenceLevel: Number(zone.referenceLevel),
+                liquidityLevel: Number(zone.liquidityLevel),
+                sweepLow: Number(next.sweepLow)
+              });
+            }
             else if (e.type === 'expired') status.funnel.noReclaim += 1;
             else if (e.type === 'late_reclaim') status.funnel.lateReclaim += 1;
+            else if (e.type === 'reclaim') {
+              sweepEvents.push({
+                symbol, timeframe: zone.timeframe, zoneId: zone.id, key,
+                at: e.at, price: e.price, kind: zone.kind, reclaim: true,
+                elapsedMs: e.elapsedMs ?? null, elapsedBars: e.elapsedBars ?? null,
+                referenceLevel: Number(zone.referenceLevel),
+                liquidityLevel: Number(zone.liquidityLevel)
+              });
+            }
           }
           const close = next.geometry?.toLiquidityAtr;
           const veryClose = Number.isFinite(close) && close <= cfg.watchApproachAtr;
@@ -625,6 +645,16 @@ export function createLiveOpportunityEngine(deps) {
       }
 
       for (const ev of sweepEvents.slice(0, 30)) broadcast({ type: 'live_sweep_detected', ...ev });
+      // تسجيل دورة الحياة الدائم (أخذ عينات: swept/reclaimed فقط — بلا ضجيج)
+      for (const ev of sweepEvents.slice(0, 30)) {
+        void persist(toLifecycleRow(ev.reclaim ? 'reclaim' : 'sweep', {
+          symbol: ev.symbol, timeframe: ev.timeframe, zoneId: ev.zoneId, key: ev.key,
+          at: ev.at,
+          payload: ev.reclaim
+            ? { elapsedMs: ev.elapsedMs, elapsedBars: ev.elapsedBars, referenceLevel: ev.referenceLevel, liquidityLevel: ev.liquidityLevel }
+            : { kind: ev.kind, referenceLevel: ev.referenceLevel, liquidityLevel: ev.liquidityLevel, sweepLow: ev.sweepLow }
+        })).catch(() => undefined);
+      }
 
       // 2) الترتيب + إزالة تكرار الحدث الواحد عبر الفريمات (عقيدة §11):
       //    نفس السويب على عدة فريمات = حدث واحد أساسه الأدق فريماً والبقية شهود (dupTfs)
@@ -771,7 +801,18 @@ export function createLiveOpportunityEngine(deps) {
 
   /** القائمة الحية للواجهة */
   function getFeed() {
-    const ops = [...opportunities.values()].sort((a, b) => b.composite - a.composite || b.detectedAt - a.detectedAt);    const watch = [];
+    const ops = [...opportunities.values()].sort((a, b) => b.composite - a.composite || b.detectedAt - a.detectedAt);
+    // الترتيب الجديد دفعي نسبي (عقيدة §10): القاعدة 2 — بلا لقطة محفوظة لا درجة
+    // (الفرز المعروض يبقى composite حتى OOS؛ rank للشفافية والبحث)
+    const rankable = ops.filter(o => o?.snapshot);
+    const ranked = new Map(rankBatch(rankable.map(o => ({ id: o.id, snapshot: o.snapshot }))).map(r => [r.id, r]));
+    for (const o of ops) {
+      const r = ranked.get(o.id);
+      o.rank = r ? r.score : null;
+      o.rankParts = r ? r.parts : null;
+      o.rankMargin = r ? r.marginToNext : null;
+      o.rankRefDurationMs = r && r.parts ? r.parts.refDurationMs : null;
+    }    const watch = [];
     for (const st of trackers.values()) {
       if (st.phase === 'published') continue;
       const close = st.geometry?.toLiquidityAtr;
@@ -839,6 +880,8 @@ export function createLiveOpportunityEngine(deps) {
       busy: status.busy,
       cycle: status.cycle,
       scope: status.scope,
+      rehydrated: status.rehydrated ?? null,
+      rehydratedAt: status.rehydratedAt ?? null,
       pairsTotal: status.pairsTotal,
       zonesTracked: status.zonesTracked,
       phases: status.phases,
@@ -875,6 +918,49 @@ export function createLiveOpportunityEngine(deps) {
     return trackers.get(key) ?? null;
   }
 
+  /**
+   * استعادة الحالات النشطة بعد إعادة التشغيل (عقيدة §12):
+   * rows = أحداث live_lifecycle + فرص live_opportunity/live_opportunity_closed المحفوظة.
+   * تُسقط السويبات الميتة زمنيا — لا إحياء للموتى.
+   */
+  function rehydrate(rows) {
+    const live = [];
+    for (const r of rows ?? []) {
+      let meta = null;
+      try { meta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? null); } catch { meta = null; }
+      if (r.type === 'live_lifecycle') {
+        live.push({
+          kind: meta?.kind ?? r.kind, symbol: r.symbol, timeframe: meta?.timeframe ?? null,
+          zoneId: meta?.zoneId ?? null, key: meta?.key ?? null, at: Number(r.ts),
+          phase: null, payload: meta?.payload ?? meta ?? null
+        });
+      } else if (r.type === 'live_opportunity' || r.type === 'live_opportunity_closed') {
+        const op = meta?.opportunity ?? null;
+        if (!op) continue;
+        live.push({
+          kind: r.type === 'live_opportunity_closed' ? 'closed' : 'published',
+          symbol: op.symbol, timeframe: op.timeframe, zoneId: op.zoneId,
+          key: trackerKey(op.symbol, op.timeframe, op.zoneId),
+          at: Number(r.ts), payload: { opportunity: op }
+        });
+      }
+    }
+    const { trackers: ts, opportunities: ops } = rehydrateState(live, {
+      nowMs: now(), freshnessBars: cfg.freshnessBars, tfSecondsOf: (tf) => tfSeconds(tf)
+    });
+    let restoredTrackers = 0, restoredOpps = 0;
+    for (const st of ts) {
+      if (!trackers.has(st.key)) { trackers.set(st.key, st); restoredTrackers += 1; }
+    }
+    for (const op of ops) {
+      if (!op.outcome && !opportunities.has(op.id)) { opportunities.set(op.id, op); restoredOpps += 1; }
+    }
+    status.rehydratedAt = now();
+    status.rehydrated = { trackers: restoredTrackers, opportunities: restoredOpps };
+    log.log?.(`[live-opp] rehydrated ${restoredTrackers} trackers / ${restoredOpps} opportunities`);
+    return status.rehydrated;
+  }
+
   function start() {
     if (running) return;
     running = true;
@@ -904,7 +990,7 @@ export function createLiveOpportunityEngine(deps) {
   }
 
   return {
-    start, stop, runCycle, runCalibration, loadCalibration,
+    start, stop, runCycle, runCalibration, loadCalibration, rehydrate,
     getFeed, getStatus, getHistory, getCalibration, findOpportunity, getTracker,
     _internals: { trackers, opportunities, history, segments, rejected, status, calibration, cfg }
   };

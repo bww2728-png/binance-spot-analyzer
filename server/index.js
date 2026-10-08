@@ -1240,7 +1240,7 @@ const liveOppEngine = createLiveOpportunityEngine({
   readCalibration: readLiveCalibration,
   broadcast: (msg) => broadcast(msg),
   persist: (row) => saveLiquidityEvent(
-    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : row?.type === 'live_rejected' ? 'live_opportunity_rejected' : 'live_opportunity',
+    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : row?.type === 'live_rejected' ? 'live_opportunity_rejected' : row?.type === 'live_lifecycle' ? 'live_lifecycle' : 'live_opportunity',
     { symbol: row?.symbol || 'GLOBAL' },
     row?.type === 'live_calibration'
       ? `معايرة الفرص الحية: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
@@ -1248,8 +1248,10 @@ const liveOppEngine = createLiveOpportunityEngine({
         ? `نتيجة فرصة ${row.symbol} ${row.timeframe}: ${row.outcome === 'target' ? 'وصل الهدف' : 'ضرب الوقف'}`
         : row?.type === 'live_rejected'
           ? `رفض ما بعد السويب ${row.symbol} ${row.timeframe}: ${row.reason}`
-          : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
-    { opportunity: row }
+          : row?.type === 'live_lifecycle'
+            ? `دورة حياة ${row.kind} ${row.symbol} ${row.timeframe ?? ''}`
+            : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
+    row?.type === 'live_lifecycle' ? row : { opportunity: row }
   ),
   log: console,
   config: {
@@ -1262,7 +1264,23 @@ const liveOppEngine = createLiveOpportunityEngine({
     }
   }
 });
-setTimeout(() => liveOppEngine.start(), 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
+setTimeout(() => {
+  // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
+  void (async () => {
+    try {
+      const day = 86_400_000;
+      const [lc, ops] = await Promise.all([
+        db.events.liveLifecycle(Date.now() - day).catch(() => []),
+        db.events.liveOppEvents(Date.now() - 7 * day).catch(() => [])
+      ]);
+      liveOppEngine.rehydrate([...(lc || []), ...(ops || [])]);
+    } catch (e) {
+      console.error('[live-opp] rehydrate failed:', e.message);
+    } finally {
+      liveOppEngine.start();
+    }
+  })();
+}, 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
 
 // ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══
 // هيكل خارجي/داخلي · بريميوم/ديسكاونت · choch up · نموذجا دخول · نقاط فشل موثقة.
