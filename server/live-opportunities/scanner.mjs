@@ -290,11 +290,13 @@ export function nextSslBelow(zones, price, { excludeIds = [], maxDistancePct = 0
  */
 export function simulateSweep({
   candles, sweepIndex, zone, atr, bandPct = 0.0025,
-  maxReclaimBars = 6, maxBars = 96, minRR = 2, priorWindow = 30,
+  maxBars = 96, maxReclaimBars = 6, minRR = 2, priorWindow = 30,
   maxStopAtr = 3, minDepthAtr = 0.15, maxDepthAtr = 3,
   maxRangePos = 0.8, minBuyRatioPct = 48,
   sessionTierOf = null, requireSessionPrime = false, takerBuy = null,
-  entryMode = 'close', retestTolAtr = 0.3, retestWindow = 12
+  entryMode = 'close', retestTolAtr = 0.3, retestWindow = 12,
+  // تكاليف التداول (بحث OOS — عقيدة §15): تُسجَّل ولا تغيّر القرار الحي
+  feePct = 0, slippagePct = 0
 } = {}) {
   if (!Array.isArray(candles) || candles.length < 30) return { outcome: 'no_entry', reason: 'شموع غير كافية' };
   const i0 = Number(sweepIndex);
@@ -381,10 +383,17 @@ export function simulateSweep({
   const plan = buildLongPlan({ entry, sweepLow: protectedLow, atr: a, bandPct, targets, minRR });
   if (!plan.tp || !plan.valid) return { outcome: 'no_entry', reason: plan.violations?.join(' · ') || 'R:R دون الحد', rr: plan.rr };
   const { stop, tp } = plan;
+  // صافي التكاليف: تُخصم من العائد المعلن (لا تغيّر منطق الدخول/الخروج — للبحث الصادق فقط)
+  const tradeCostPct = Number(feePct) * 2 + Number(slippagePct);
   for (let i = entryIdx + 1; i < Math.min(entryIdx + maxBars, candles.length); i += 1) {
     const c = candles[i];
-    if (Number(c.low) <= stop) return { outcome: 'decided', win: 0, exit: stop, bars: i - entryIdx, rr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time };
-    if (Number(c.high) >= tp) return { outcome: 'decided', win: 1, exit: tp, bars: i - entryIdx, rr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time };
+    if (Number(c.low) <= stop) return { outcome: 'decided', win: 0, exit: stop, bars: i - entryIdx, rr: plan.rr, netRr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time, tradeCostPct };
+    if (Number(c.high) >= tp) {
+      const grossPct = (tp - entry) / Math.max(entry, 1e-12) * 100;
+      const netPct = grossPct - tradeCostPct;
+      const netRr = (entry - stop) > 0 ? netPct / (((entry - stop) / Math.max(entry, 1e-12)) * 100) : plan.rr;
+      return { outcome: 'decided', win: 1, exit: tp, bars: i - entryIdx, rr: plan.rr, netRr: Number(netRr.toFixed(2)), entry, stop, tp, entryTime: candles[entryIdx].time, tradeCostPct };
+    }
   }
   return { outcome: 'undecided', entry, stop, tp, rr: plan.rr, entryTime: candles[entryIdx].time };
 }
@@ -405,7 +414,8 @@ export function calibrateSweeps({
   maxStopAtr = 3, minDepthAtr = 0.15, maxDepthAtr = 3,
   maxRangePos = 0.8, minBuyRatioPct = 48,
   sessionTierOf = null, requireSessionPrime = false,
-  entryMode = 'retest', retestTolAtr = 0.3, retestWindow = 12
+  entryMode = 'retest', retestTolAtr = 0.3, retestWindow = 12,
+  feePct = 0, slippagePct = 0
 }) {
   const trades = [];
   const rejected = {};
@@ -424,22 +434,35 @@ export function calibrateSweeps({
     if (zone.state !== 'swept' || !zone.sweptAt) continue;
     const sweepIndex = byTime.get(Number(zone.sweptAt));
     if (sweepIndex == null) continue;
-    for (const minRR of rrGrid) {
+      for (const minRR of rrGrid) {
       const sim = simulateSweep({
         candles, sweepIndex, zone, atr: zone.atr, bandPct, maxBars, minRR, maxReclaimBars,
         maxStopAtr, minDepthAtr, maxDepthAtr, maxRangePos, minBuyRatioPct,
         sessionTierOf, requireSessionPrime, takerBuy,
-        entryMode, retestTolAtr, retestWindow
+        entryMode, retestTolAtr, retestWindow, feePct, slippagePct
       });
       if (sim.outcome !== 'decided') { if (minRR === rrGrid[0]) bump(sim.reason ?? 'غير محسوم'); continue; }
+      // المدة المشروطة (عقيدة §10): زمن الحسم − زمن الدخول بالمللي ثانية + سمات التكييف
+      const tfMs = tfMsOf(timeframe);
+      const durationMs = Number.isFinite(Number(sim.bars)) ? Number(sim.bars) * tfMs : null;
+      const session = typeof sessionTierOf === 'function' && Number.isFinite(Number(sim.entryTime))
+        ? sessionTierOf(Number(sim.entryTime)) // entryTime بالثواني (normalizeCandles) وsessionTierOf يستقبل tsSec
+        : null;
       trades.push({
         timeframe,
         band: confBand(zone.confidence),
         minRR,
         win: sim.win,
         rr: sim.rr,
+        netRr: Number.isFinite(Number(sim.netRr)) ? Number(sim.netRr) : null,
+        tradeCostPct: Number(sim.tradeCostPct) || 0,
         bars: sim.bars,
-        ts: Number(zone.sweptAt)
+        ts: Number(zone.sweptAt),
+        symbol: String(zone?.symbol ?? '').toUpperCase() || null,
+        model: entryMode,
+        session,
+        regime: null, // مخطط: يُملأ من محرك الأنظمة عند توفره تاريخيا
+        durationMs
       });
     }
   }
@@ -458,6 +481,37 @@ export function calibrateSweeps({
  *      probationary — غير مثبتة لكن ليست أسوأ من الصدفة: posterior ≥ 0.5 (تُنشر بشارة شفافة)
  *      weak         — أسوأ من الصدفة إحصائياً (لا تُنشر)
  */
+/** وسيط قائمة أرقام (مقاوم للشواذ — عقيدة §10) */
+export function median(values) {
+  const xs = [...(values ?? [])].map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const m = xs.length >> 1;
+  return xs.length % 2 ? xs[m] : (xs[m - 1] + xs[m]) / 2;
+}
+
+/**
+ * انكماش الوسيط نحو العام عند صغر العينة (عقيدة §10):
+ * n ≥ minN → الوسيط المحلي؛ وإلا متوسط مرجح نحو العام — لا رقم وهمي ولا حذف صامت.
+ */
+export function shrinkMedian(localValues, globalMedian, { minN = 8 } = {}) {
+  const xs = [...(localValues ?? [])].map(Number).filter(Number.isFinite);
+  const m = median(xs);
+  const g = Number(globalMedian);
+  if (m == null) return { value: Number.isFinite(g) ? g : null, shrunk: true, n: 0 };
+  if (xs.length >= minN) return { value: m, shrunk: false, n: xs.length };
+  if (!Number.isFinite(g)) return { value: m, shrunk: false, n: xs.length };
+  const w = xs.length / minN;
+  return { value: Number((w * m + (1 - w) * g).toFixed(0)), shrunk: true, n: xs.length };
+}
+
+const TF_MS = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+const tfMsOf = (tf) => {
+  const s = String(tf ?? '');
+  const n = parseInt(s, 10) || 1;
+  const unit = s.replace(/[0-9]/g, '');
+  return n * (TF_MS[unit] || TF_MS.h);
+};
+
 function wilsonLowerBound(wins, n, z = 1.96) {
   if (!n) return 0;
   const p = wins / n;
@@ -468,16 +522,19 @@ function wilsonLowerBound(wins, n, z = 1.96) {
 }
 
 export function summarizeSegments(trades, {
-  prior = null, priorWeight = 6, targetWinRate = 0.6, minTrades = 8
+  prior = null, priorWeight = 6, targetWinRate = 0.6, minTrades = 8, minDurN = 8
 } = {}) {
   // الـprior العالمي: المعدل العام لكل الصفقات الممرَّرة (empirical Bayes)
   let totalWins = 0, total = 0;
+  const allDurations = [];
   for (const t of trades ?? []) {
     if (t.win !== 0 && t.win !== 1) continue;
     total += 1;
     if (t.win === 1) totalWins += 1;
+    if (Number.isFinite(Number(t.durationMs))) allDurations.push(Number(t.durationMs));
   }
   const globalPrior = prior ?? (total > 0 ? totalWins / total : 0.5);
+  const globalMedianDurationMs = median(allDurations);
 
   const map = new Map();
   for (const t of trades ?? []) {
@@ -486,10 +543,11 @@ export function summarizeSegments(trades, {
     for (const key of [`${t.timeframe}|all|${t.band}`, `${t.timeframe}|all|all`]) {
       if (!map.has(key)) map.set(key, new Map());
       const byRR = map.get(key);
-      const row = byRR.get(rrKey) ?? { trades: 0, wins: 0, rrSum: 0, rrCount: 0 };
+      const row = byRR.get(rrKey) ?? { trades: 0, wins: 0, rrSum: 0, rrCount: 0, durations: [] };
       row.trades += 1;
       if (t.win === 1) row.wins += 1;
       if (Number.isFinite(t.rr)) { row.rrSum += t.rr; row.rrCount += 1; }
+      if (Number.isFinite(Number(t.durationMs))) row.durations.push(Number(t.durationMs));
       byRR.set(rrKey, row);
     }
   }
@@ -504,6 +562,8 @@ export function summarizeSegments(trades, {
     const variants = [...byRR.entries()].map(([minRR, r]) => {
       const raw = r.trades ? r.wins / r.trades : null;
       const smoothed = (r.wins + globalPrior * priorWeight) / (r.trades + priorWeight);
+      // المدة الوسيطة المشروطة بالشريحة + انكماش نحو العامة تحت حد العينة (عقيدة §10)
+      const dur = shrinkMedian(r.durations ?? [], globalMedianDurationMs, { minN: minDurN });
       return {
         minRR,
         trades: r.trades,
@@ -512,6 +572,9 @@ export function summarizeSegments(trades, {
         smoothedWinRate: Number(smoothed.toFixed(3)),
         wilsonLB: Number(wilsonLowerBound(r.wins, r.trades).toFixed(3)),
         avgRR: r.rrCount ? Number((r.rrSum / r.rrCount).toFixed(2)) : null,
+        medianDurationMs: dur.value,
+        durationN: dur.n,
+        durationShrunk: dur.shrunk,
         tier: classify(r, smoothed),
         qualified: smoothed >= targetWinRate && wilsonLowerBound(r.wins, r.trades) >= 0.5 && r.trades >= minTrades
       };
@@ -523,4 +586,117 @@ export function summarizeSegments(trades, {
     out.push({ key, ...chosen, variants: variants.length });
   }
   return out.sort((a, b) => b.trades - a.trades);
+}
+
+/**
+ * درجة الترتيب المطبَّعة (عقيدة §10 + قاعدة لا تسريب):
+ *  rank = P × R × السرعة × جودة_المسار — كل عامل في [0,1] بأوزان صريحة مسجلة.
+ *  المدخلات لقطة قرار مجمدة فقط + medianDurationMs من معايرة سابقة للقرار.
+ *  أي معايرة أحدث من لحظة القرار = رمي فوري (تسريب مستقبلي).
+ *  تُستخدم للترتيب بين المؤهلين فقط — لا تُسقط أحدا (الإسقاط للـveto حصرا).
+ */
+export function rankScore(snapshot, {
+  refDurationMs = null, weights = null
+} = {}) {
+  const calAt = Number(snapshot?.calibration?.at);
+  const takenAt = Number(snapshot?.takenAt);
+  if (Number.isFinite(calAt) && Number.isFinite(takenAt) && calAt > takenAt) {
+    throw new Error('future leakage: calibration newer than decision');
+  }
+  const clamp01 = (v) => Math.min(1, Math.max(0, Number(v)));
+  const w = { p: 0.35, rr: 0.25, speed: 0.2, path: 0.2, ...(weights ?? {}) };
+  const pN = clamp01(snapshot?.calibration?.smoothedWinRate ?? 0.5);
+  const rrN = Math.min(4, Math.max(0, Number(snapshot?.plan?.rr) || 0)) / 4;
+  const dur = Number(snapshot?.calibration?.medianDurationMs);
+  const ref = Number(refDurationMs);
+  const speedUnknown = !(dur > 0 && ref > 0);
+  const speedN = speedUnknown ? 0 : clamp01(ref / dur);
+  // جودة المسار = متوسط العوامل المتاحة فقط (الاتجاه مخطط مستقبلي — يُستبعد لا يُصفَّر)
+  const zc = Number(snapshot?.zone?.confidence);
+  const liq = Number(snapshot?.zone?.liquidityLevel);
+  const slow = Number(snapshot?.sweep?.low);
+  const atr = Number(snapshot?.zone?.atr);
+  const depthN = (Number.isFinite(liq) && Number.isFinite(slow) && atr > 0)
+    ? clamp01((liq - slow) / (2 * atr)) : null;
+  const flowN = Number.isFinite(Number(snapshot?.flow?.score)) ? clamp01(Number(snapshot?.flow?.score) / 100) : null;
+  const pathFactors = [Number.isFinite(zc) ? clamp01(zc) : null, depthN, flowN].filter(v => v != null);
+  const pathN = pathFactors.length ? pathFactors.reduce((a, b) => a + b, 0) / pathFactors.length : 0;
+  const score = 100 * (w.p * pN + w.rr * rrN + w.speed * speedN + w.path * pathN);
+  return {
+    score: Number(score.toFixed(2)),
+    parts: {
+      p: Number(pN.toFixed(3)), rr: Number(rrN.toFixed(3)),
+      speed: Number(speedN.toFixed(3)), speedUnknown,
+      path: Number(pathN.toFixed(3)), pathFactors: pathFactors.length,
+      weights: { ...w }, refDurationMs: Number.isFinite(ref) ? ref : null
+    }
+  };
+}
+
+/**
+ * ترتيب دفعة لقطات + هوامش (لاختبار استقرار top-1..3 — عقيدة §15):
+ * المرجع الزمني = وسيط مدد الدفعة (ترتيب نسبي معلن) ما لم يُمرَّر صريحا.
+ * حتمي: نفس الدفعة → نفس الترتيب والهوامش.
+ */
+export function rankBatch(items, opts = {}) {
+  const durs = (items ?? []).map(i => Number(i?.snapshot?.calibration?.medianDurationMs)).filter(d => d > 0).sort((a, b) => a - b);
+  const ref = Number(opts.refDurationMs) > 0 ? Number(opts.refDurationMs)
+    : durs.length ? durs[durs.length >> 1] : null;
+  const scored = (items ?? []).map(i => ({ id: i?.id ?? null, ...rankScore(i?.snapshot, { ...opts, refDurationMs: ref }) }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s, idx) => ({ ...s, marginToNext: idx + 1 < scored.length ? Number((s.score - scored[idx + 1].score).toFixed(2)) : null }));
+}
+
+/**
+ * لقطة القرار غير القابلة للتغيير (Decision Snapshot — قاعدة ملزمة): * عند لحظة النشر تُحفظ كل المدخلات التي صنعت القرار — لا يُعتمد مستقبلًا على
+ * إعادة حسابها من البيانات الحالية لأن البيانات أو الخوارزميات قد تتغير.
+ * نقية: نفس المدخلات → نفس اللقطة. (القاعدة 2: لا Ranking بلا Snapshot محفوظ)
+ */
+export function buildDecisionSnapshot({
+  zone, state, flow, session, location, profile, plan, segment,
+  calibrationAt = null, thresholds = {}, codeRef = 'live-opp/1'
+} = {}) {
+  const snap = Object.freeze({
+    codeRef,
+    takenAt: null, // يملؤها الناشر (detectedAt) — تُمرَّر هنا لتثبيت عدم التسريب
+    zone: Object.freeze({
+      id: zone?.id ?? null, symbol: zone?.symbol ?? null, timeframe: zone?.timeframe ?? null,
+      kind: zone?.kind ?? null, referenceLevel: Number(zone?.referenceLevel),
+      liquidityLevel: Number(zone?.liquidityLevel), confidence: Number(zone?.confidence),
+      touches: Number(zone?.touches ?? 0), atr: Number(zone?.atr)
+    }),
+    sweep: Object.freeze({
+      observedAt: state?.sweepObservedAt ?? null, low: Number(state?.sweepLow),
+      sawSweep: Boolean(state?.sawSweep)
+    }),
+    reclaim: Object.freeze({
+      at: state?.reclaimAt ?? null, elapsedMs: state?.reclaimElapsedMs ?? null,
+      elapsedBars: state?.reclaimBars ?? null, windowBars: Number(thresholds?.reclaimWindowBars ?? 3)
+    }),
+    flow: Object.freeze({
+      score: Number(flow?.score), tier: flow?.tier ?? null,
+      components: flow?.components ? { ...flow.components } : null,
+      reasons: Array.isArray(flow?.reasons) ? [...flow.reasons] : []
+    }),
+    context: Object.freeze({
+      session: session?.tier ?? null,
+      location: location?.state ?? null,
+      poc: Number(profile?.poc), vah: Number(profile?.vah), val: Number(profile?.val)
+    }),
+    plan: Object.freeze({
+      entry: Number(plan?.entry), stop: Number(plan?.stop), tp: Number(plan?.tp),
+      rr: Number(plan?.rr), stopAtr: Number(plan?.stopAtr),
+      targetLabel: plan?.targetLabel ?? null, minRR: Number(thresholds?.minRR ?? 2)
+    }),
+    calibration: Object.freeze({
+      at: calibrationAt, segmentKey: segment?.key ?? null,
+      smoothedWinRate: Number(segment?.smoothedWinRate), trades: Number(segment?.trades ?? 0),
+      tier: segment?.tier ?? null,
+      // وسيط المدة المشروط بالشريحة (ماضٍ فقط — يُحسب من المعايرة السابقة للقرار)
+      medianDurationMs: Number.isFinite(Number(segment?.medianDurationMs)) ? Number(segment?.medianDurationMs) : null,
+      durationShrunk: Boolean(segment?.durationShrunk)
+    }),
+    thresholds: Object.freeze({ ...thresholds })
+  });
+  return snap;
 }

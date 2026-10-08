@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
-import type { BuyFeed, BuyOpportunity, BuyWatchRow, BuyCalibrationSegment } from '../lib/types';
+import type { BuyFeed, BuyHistoryEvent, BuyOpportunity, BuyWatchRow, BuyCalibrationSegment } from '../lib/types';
 import type { LiveOppTickRow, LiveWatchTickRow } from '../lib/binance';
 import LiveDashboard from './LiveDashboard';
 import { TIMEFRAMES } from '../lib/types';
@@ -61,8 +61,12 @@ export default function LiveOpportunitiesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [tfFilter, setTfFilter] = useState('');
   const [scopeFilter, setScopeFilter] = useState<'all' | 'halal'>('halal');
-  const [section, setSection] = useState<'opps' | 'dashboard' | 'watch' | 'results' | 'rejected'>('opps');
+  const [section, setSection] = useState<'opps' | 'dashboard' | 'watch' | 'results' | 'rejected' | 'closed'>('opps');
   const [chartId, setChartId] = useState<string | null>(null);
+  const [chartSrc, setChartSrc] = useState<string | null>(null);
+  const [showFailedWatch, setShowFailedWatch] = useState(false);
+  const [closed, setClosed] = useState<BuyHistoryEvent[] | null>(null);
+  const [closedError, setClosedError] = useState<string | null>(null);
   const [busyMsg, setBusyMsg] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const timer = useRef<number | null>(null);
@@ -144,6 +148,24 @@ export default function LiveOpportunitiesScreen() {
   const watching = feed?.watching ?? [];
   const rejected = feed?.rejected ?? [];
   const segments: BuyCalibrationSegment[] = feed?.calibration.segments ?? [];
+  // السويب الفاشل مخفي من العرض افتراضيا (التتبع الخلفي مستمر في الخادم) — مع عدّاد شفاف
+  const failedWatch = watching.filter(w => w.phase === 'invalidated');
+  const visibleWatch = showFailedWatch ? watching : watching.filter(w => w.phase !== 'invalidated');
+  const segByKey = useMemo(() => {
+    const m = new Map<string, BuyCalibrationSegment>();
+    for (const s of segments) m.set(s.key, s);
+    return m;
+  }, [segments]);
+
+  const loadClosed = useCallback(async () => {
+    try {
+      setClosedError(null);
+      const data = await api.getBuyHistoryEvents(30);
+      setClosed(data.timeline ?? []);
+    } catch (e) {
+      setClosedError(e instanceof Error ? e.message : 'تعذر جلب المحسومة');
+    }
+  }, []);
 
   /* اللقطة الحية من قناة WebSocket — تُدمج فوق بيانات الجلب */
   const liveTick = useStore(s => s.liveOppTick);
@@ -254,6 +276,7 @@ export default function LiveOpportunitiesScreen() {
         <button onClick={() => setSection('opps')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'opps' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'opps' ? 'var(--accent)' : 'var(--text-2)' }}>الفرص المنشورة ({opportunities.length})</button>
         <button onClick={() => setSection('dashboard')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'dashboard' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'dashboard' ? 'var(--accent)' : 'var(--text-2)' }}>لوحة التحكم</button>
         <button onClick={() => setSection('watch')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'watch' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'watch' ? 'var(--accent)' : 'var(--text-2)' }}>قيد المراقبة ({feed?.watchingTotal ?? 0})</button>
+        <button onClick={() => { setSection('closed'); void loadClosed(); }} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'closed' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'closed' ? 'var(--accent)' : 'var(--text-2)' }}>المحسومة (دائم){closed?.length ? ` (${closed.length})` : ''}</button>
         <button onClick={() => setSection('results')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'results' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'results' ? 'var(--accent)' : 'var(--text-2)' }}>المعايرة والنتائج ({segments.length})</button>
         <button onClick={() => setSection('rejected')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: section === 'rejected' ? 'var(--accent-soft)' : 'var(--surface-1)', color: section === 'rejected' ? 'var(--accent)' : 'var(--text-2)' }}>لم تجتز البوابات ({rejected.length})</button>
       </div>
@@ -268,7 +291,7 @@ export default function LiveOpportunitiesScreen() {
             </div>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
-            {opportunities.map(o => <OpportunityCard key={o.id} op={o} now={now} targetRate={targetRate} onChart={() => setChartId(o.id)} tick={tickOpp(o.id)} />)}
+            {opportunities.map(o => <OpportunityCard key={o.id} op={o} now={now} targetRate={targetRate} onChart={() => { setChartId(o.id); setChartSrc(null); }} tick={tickOpp(o.id)} seg={segByKey.get(o.segmentKey) ?? null} />)}
           </div>
         </>
       )}
@@ -279,6 +302,20 @@ export default function LiveOpportunitiesScreen() {
             <div className="rounded-xl py-16 text-center text-sm" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>لا مناطق SSL قريبة من السعر حالياً — المراقبة مستمرة بلا انقطاع</div>
           )}
           {watching.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+                السويب الفاشل مخفي من العرض والتتبع الخلفي مستمر —
+              </span>
+              <button
+                onClick={() => setShowFailedWatch(v => !v)}
+                className="px-3 py-1.5 rounded-md text-[11px] font-bold"
+                style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+              >
+                {showFailedWatch ? 'إخفاء الفاشلة' : `عرض الفاشلة المخفية (${failedWatch.length})`}
+              </button>
+            </div>
+          )}
+          {visibleWatch.length > 0 && (
             <div className="rounded-xl overflow-hidden" style={{ background: 'var(--surface-1)' }}>
               <table className="w-full text-[12px]">
                 <thead>
@@ -291,10 +328,18 @@ export default function LiveOpportunitiesScreen() {
                     <th className="text-right px-3 py-2">المسافة (ATR)</th>
                     <th className="text-right px-3 py-2">المحاولات</th>
                     <th className="text-right px-3 py-2">السبب</th>
+                    <th className="text-right px-3 py-2">شارت</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {watching.map(w => <WatchRow key={`${w.symbol}|${w.timeframe}|${w.zoneId}`} row={w} tick={tickWatch(`${w.symbol}|${w.timeframe}|${w.zoneId}`)} />)}
+                  {visibleWatch.map(w => (
+                    <WatchRow
+                      key={`${w.symbol}|${w.timeframe}|${w.zoneId}`}
+                      row={w}
+                      tick={tickWatch(`${w.symbol}|${w.timeframe}|${w.zoneId}`)}
+                      onChart={() => { setChartId(null); setChartSrc(api.watchZoneChartUrl(w.symbol, w.timeframe, w.zoneId)); }}
+                    />
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -384,12 +429,67 @@ export default function LiveOpportunitiesScreen() {
         </>
       )}
 
-      {chartId && <ChartModal id={chartId} onClose={() => setChartId(null)} />}
+      {section === 'closed' && (
+        <>
+          {closedError && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{closedError}</div>}
+          {closed === null && !closedError && (
+            <div className="rounded-xl py-16 text-center text-sm" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>جارٍ جلب السجل الدائم…</div>
+          )}
+          {closed !== null && !closed.length && (
+            <div className="rounded-xl py-16 text-center text-sm" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>لا فرص محسومة في آخر 30 يوما</div>
+          )}
+          {(closed ?? []).length > 0 && (
+            <div className="rounded-xl overflow-hidden" style={{ background: 'var(--surface-1)' }}>
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr style={{ color: 'var(--text-3)' }}>
+                    <th className="text-right px-3 py-2">العملة</th>
+                    <th className="text-right px-3 py-2">الفريم</th>
+                    <th className="text-right px-3 py-2">الدخول</th>
+                    <th className="text-right px-3 py-2">الوقف</th>
+                    <th className="text-right px-3 py-2">الهدف</th>
+                    <th className="text-right px-3 py-2">R:R</th>
+                    <th className="text-right px-3 py-2">المعايَرة</th>
+                    <th className="text-right px-3 py-2">النتيجة</th>
+                    <th className="text-right px-3 py-2">حُسمت</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(closed ?? []).map(e => (
+                    <tr key={`${e.id ?? e.ts}-${e.symbol}`} style={{ borderTop: '1px solid var(--border-1)' }}>
+                      <td className="px-3 py-2 font-bold num" style={{ color: 'var(--text-1)' }}>{e.symbol}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--text-3)' }}>{e.timeframe ?? '—'}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{e.entry ?? '—'}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--down)' }}>{e.stop ?? '—'}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--up)' }}>{e.tp ?? '—'}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{e.rr ?? '—'}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{e.calibratedWinRate == null ? '—' : pct(e.calibratedWinRate)}</td>
+                      <td className="px-3 py-2 font-bold" style={{ color: e.outcome === 'target' || e.outcome === 'target2' ? 'var(--up)' : e.outcome === 'stop' ? 'var(--down)' : 'var(--text-3)' }}>
+                        {e.outcome === 'target' || e.outcome === 'target2' ? 'وصل الهدف' : e.outcome === 'stop' ? 'ضرب الوقف' : e.outcome ?? '—'}
+                      </td>
+                      <td className="px-3 py-2 text-[11px] num" style={{ color: 'var(--text-3)' }}>{e.resolvedAt ? ago(e.resolvedAt, now) + ' مضت' : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {(chartId || chartSrc) && (
+        <ChartModal
+          id={chartId}
+          src={chartSrc}
+          title={chartSrc ? 'شارت المنطقة — المرجع والسيولة' : 'شارت الفرصة — الشموع الحقيقية وخطوط الخطة'}
+          onClose={() => { setChartId(null); setChartSrc(null); }}
+        />
+      )}
     </section>
   );
 }
 
-function WatchRow({ row, tick }: { row: BuyWatchRow; tick: LiveWatchTickRow | null }) {
+function WatchRow({ row, tick, onChart }: { row: BuyWatchRow; tick: LiveWatchTickRow | null; onChart: () => void }) {
   // الطور اللحظي من البث يتقدم على المرجع الثابت — يُستخدم متى وصلت نبضة أحدث
   const livePhase = tick?.phase ?? row.phase;
   const liveAtr = tick?.toLiquidityAtr ?? row.toLiquidityAtr;
@@ -407,13 +507,21 @@ function WatchRow({ row, tick }: { row: BuyWatchRow; tick: LiveWatchTickRow | nu
       <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{liveAtr?.toFixed(2) ?? '—'}</td>
       <td className="px-3 py-2 num" style={{ color: row.attempts > 0 ? 'var(--warn)' : 'var(--text-3)' }}>{row.attempts}</td>
       <td className="px-3 py-2 text-[11px]" style={{ color: 'var(--text-3)' }}>{row.reason ?? '—'}</td>
+      <td className="px-3 py-2">
+        <button onClick={onChart} className="px-2.5 py-1 rounded-md text-[11px] font-bold" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>شارت</button>
+      </td>
     </tr>
   );
 }
 
-function OpportunityCard({ op, now, targetRate, onChart, tick }: { op: BuyOpportunity; now: number; targetRate: number; onChart: () => void; tick: LiveOppTickRow | null }) {
+function OpportunityCard({ op, now, targetRate, onChart, tick, seg }: { op: BuyOpportunity; now: number; targetRate: number; onChart: () => void; tick: LiveOppTickRow | null; seg: BuyCalibrationSegment | null }) {
   const rateOk = op.calibratedWinRate >= targetRate;
   const outcomeColor = op.outcome === 'target' ? 'var(--up)' : op.outcome === 'stop' ? 'var(--down)' : 'var(--accent)';
+  // نسبة الربح المتوقعة للهدف من الدخول (قبل الرسوم — تُخصم في البحث)
+  const profitPct = op.entry > 0 ? ((op.tp - op.entry) / op.entry) * 100 : null;
+  // المدة الوسيطة المشروطة بالشريحة: نطاق لا وقت دقيق (عقيدة §10)
+  const medMs = seg?.medianDurationMs ?? null;
+  const medLabel = medMs == null ? '—' : medMs < 3_600_000 ? `عادة ~${Math.max(1, Math.round(medMs / 60_000))} د${seg?.durationShrunk ? ' (منكمشة)' : ''}` : `عادة ~${(medMs / 3_600_000).toFixed(1)} س${seg?.durationShrunk ? ' (منكمشة)' : ''}`;
   // الحالة اللحظية من البث (كل ثانية): السعر الحالي ومسافة الهدف/الوقف وR الحالي
   const price = tick?.price ?? op.entry;
   const plPct = tick?.plPct ?? 0;
@@ -466,6 +574,12 @@ function OpportunityCard({ op, now, targetRate, onChart, tick }: { op: BuyOpport
 
       <div className="grid grid-cols-4 gap-2 text-[11px]">
         <div><div style={{ color: 'var(--text-3)' }}>R:R</div><div className="num font-bold" style={{ color: op.rr >= 2 ? 'var(--up)' : 'var(--warn)' }}>{op.rr}</div></div>
+        <div><div style={{ color: 'var(--text-3)' }}>ربح الهدف %</div><div className="num font-bold" style={{ color: 'var(--up)' }}>{profitPct == null ? '—' : `+${profitPct.toFixed(2)}%`}</div></div>
+        <div><div style={{ color: 'var(--text-3)' }}>الوصول المتوقع</div><div className="num" style={{ color: 'var(--text-2)' }}>{medLabel}</div></div>
+        <div><div style={{ color: 'var(--text-3)' }}>منذ السويب</div><div className="num" style={{ color: 'var(--text-2)' }}>{op.sweepAt ? `قبل ${ago(op.sweepAt, now)}` : '—'}</div></div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-[11px]">
         <div><div style={{ color: 'var(--text-3)' }}>وقف (ATR)</div><div className="num" style={{ color: 'var(--text-2)' }}>{op.stopAtr}</div></div>
         <div><div style={{ color: 'var(--text-3)' }}>تدفق</div><div className="num" style={{ color: 'var(--text-2)' }}>{op.flowScore} · {tierLabel[op.flowTier] ?? op.flowTier}</div></div>
         <div><div style={{ color: 'var(--text-3)' }}>مسافة السويب</div><div className="num" style={{ color: 'var(--text-2)' }}>{op.distancePct}%</div></div>
@@ -504,15 +618,17 @@ function OpportunityCard({ op, now, targetRate, onChart, tick }: { op: BuyOpport
   );
 }
 
-function ChartModal({ id, onClose }: { id: string; onClose: () => void }) {
+function ChartModal({ id, src, title, onClose }: { id: string | null; src: string | null; title: string; onClose: () => void }) {
+  const url = src ?? (id ? api.buyOpportunityChartUrl(id) : null);
+  if (!url) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={onClose}>
       <div className="rounded-xl p-3 max-w-[1000px] w-full" style={{ background: 'var(--surface-0)' }} onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2">
-          <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>شارت الفرصة — الشموع الحقيقية وخطوط الخطة</span>
+          <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>{title}</span>
           <button onClick={onClose} className="px-3 py-1.5 rounded-md text-[11px] font-bold" style={{ background: 'var(--surface-1)', color: 'var(--text-1)' }}>إغلاق</button>
         </div>
-        <img src={api.buyOpportunityChartUrl(id)} alt="شارت الفرصة" className="w-full rounded-lg" style={{ background: '#fff' }} />
+        <img src={url} alt="الشارت" className="w-full rounded-lg" style={{ background: '#fff' }} />
       </div>
     </div>
   );

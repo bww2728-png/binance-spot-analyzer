@@ -1240,14 +1240,18 @@ const liveOppEngine = createLiveOpportunityEngine({
   readCalibration: readLiveCalibration,
   broadcast: (msg) => broadcast(msg),
   persist: (row) => saveLiquidityEvent(
-    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : 'live_opportunity',
+    row?.closed ? 'live_opportunity_closed' : row?.type === 'live_calibration' ? 'live_calibration' : row?.type === 'live_rejected' ? 'live_opportunity_rejected' : row?.type === 'live_lifecycle' ? 'live_lifecycle' : 'live_opportunity',
     { symbol: row?.symbol || 'GLOBAL' },
     row?.type === 'live_calibration'
       ? `معايرة الفرص الحية: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
       : row?.closed
         ? `نتيجة فرصة ${row.symbol} ${row.timeframe}: ${row.outcome === 'target' ? 'وصل الهدف' : 'ضرب الوقف'}`
-        : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
-    { opportunity: row }
+        : row?.type === 'live_rejected'
+          ? `رفض ما بعد السويب ${row.symbol} ${row.timeframe}: ${row.reason}`
+          : row?.type === 'live_lifecycle'
+            ? `دورة حياة ${row.kind} ${row.symbol} ${row.timeframe ?? ''}`
+            : `فرصة شراء ${row.symbol} ${row.timeframe} — درجة ${row.composite} / R:R ${row.rr}`,
+    row?.type === 'live_lifecycle' ? row : { opportunity: row }
   ),
   log: console,
   config: {
@@ -1260,7 +1264,23 @@ const liveOppEngine = createLiveOpportunityEngine({
     }
   }
 });
-setTimeout(() => liveOppEngine.start(), 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
+setTimeout(() => {
+  // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
+  void (async () => {
+    try {
+      const day = 86_400_000;
+      const [lc, ops] = await Promise.all([
+        db.events.liveLifecycle(Date.now() - day).catch(() => []),
+        db.events.liveOppEvents(Date.now() - 7 * day).catch(() => [])
+      ]);
+      liveOppEngine.rehydrate([...(lc || []), ...(ops || [])]);
+    } catch (e) {
+      console.error('[live-opp] rehydrate failed:', e.message);
+    } finally {
+      liveOppEngine.start();
+    }
+  })();
+}, 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
 
 // ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══
 // هيكل خارجي/داخلي · بريميوم/ديسكاونت · choch up · نموذجا دخول · نقاط فشل موثقة.
@@ -1608,6 +1628,28 @@ app.post('/api/live-opportunities/calibrate', handle(async (req, res) => {
     : null;
   res.json({ ok: true, started: true, symbols: symbols?.length ?? null, timeframes: timeframes?.length ?? null });
   void liveOppEngine.runCalibration({ symbols, timeframes }).catch(() => undefined);
+}));
+
+// شارت بصري لمنطقة قيد المراقبة: نفس محرك الرسم — المرجع/السيولة فقط (بلا خطة بعد)
+app.get('/api/live-opportunities/watch/:symbol/:timeframe/:zoneId/screenshot', handle(async (req, res) => {
+  const symbol = String(req.params.symbol || '').toUpperCase();
+  const timeframe = String(req.params.timeframe || '').toLowerCase();
+  const zoneId = String(req.params.zoneId || '');
+  const zone = (liquidityState.liveResults ?? []).find(z =>
+    String(z?.symbol).toUpperCase() === symbol && String(z?.timeframe).toLowerCase() === timeframe && String(z?.id) === zoneId);
+  if (!zone || !Number.isFinite(Number(zone.referenceLevel))) return res.status(404).json({ error: 'منطقة غير موجودة في المخزون الحي' });
+  const raw = await db.binance.klines(symbol, timeframe, 160);
+  const candles = normalizeCandles(raw);
+  const zoneLike = {
+    symbol, timeframe, kind: zone.kind ?? 'ssl',
+    state: `مراقبة · ثقة ${zone.confidence ?? '?'} · لمسات ${zone.touches ?? '?'}`,
+    referenceLevel: Number(zone.referenceLevel),
+    liquidityLevel: Number(zone.liquidityLevel ?? zone.referenceLevel),
+    detectedAt: Date.now(),
+    extraLevels: [],
+    reasons: [`مرجع ${zone.referenceLevel} · سيولة ${zone.liquidityLevel ?? '—'}`]
+  };
+  res.type('image/svg+xml').send(renderZoneChart(zoneLike, candles, candles.length - 1));
 }));
 
 // شارت بصري لفرصة: الشموع الحقيقية + خط الدخول/الوقف/الهدف + نقطة السويب

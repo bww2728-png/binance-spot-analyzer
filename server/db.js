@@ -435,6 +435,15 @@ const db = {
       q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
       return rest(`/events_log?${q}`);
     },
+    /** أحداث دورة الحياة (sweep/reclaim/published/closed) — وقود الاستعادة بعد إعادة التشغيل */
+    liveLifecycle: (sinceTs, limit = 2000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'eq.live_lifecycle');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      q.set('order', 'ts.asc,id.asc');
+      q.set('limit', String(Math.min(Number(limit) || 2000, 5000)));
+      return rest(`/events_log?${q}`);
+    },
     /** أحداث «الفرص الحية — استراتيجيتي» (نشر + حسم) — استمرارية دائمة بلا DDL */
     strategy2Events: (sinceTs, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });
