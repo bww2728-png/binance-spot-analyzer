@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
+import { BigChart } from './ChartModal';
 import type { BuyFeed, BuyHistoryEvent, BuyOpportunity, BuyWatchRow, BuyCalibrationSegment } from '../lib/types';
 import type { LiveOppTickRow, LiveWatchTickRow } from '../lib/binance';
 import LiveDashboard from './LiveDashboard';
@@ -63,7 +64,7 @@ export default function LiveOpportunitiesScreen() {
   const [scopeFilter, setScopeFilter] = useState<'all' | 'halal'>('halal');
   const [section, setSection] = useState<'opps' | 'dashboard' | 'watch' | 'results' | 'rejected' | 'closed'>('opps');
   const [chartId, setChartId] = useState<string | null>(null);
-  const [chartSrc, setChartSrc] = useState<string | null>(null);
+  const [watchChart, setWatchChart] = useState<BuyWatchRow | null>(null);
   const [showFailedWatch, setShowFailedWatch] = useState(false);
   const [closed, setClosed] = useState<BuyHistoryEvent[] | null>(null);
   const [closedError, setClosedError] = useState<string | null>(null);
@@ -291,7 +292,7 @@ export default function LiveOpportunitiesScreen() {
             </div>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
-            {opportunities.map(o => <OpportunityCard key={o.id} op={o} now={now} targetRate={targetRate} onChart={() => { setChartId(o.id); setChartSrc(null); }} tick={tickOpp(o.id)} seg={segByKey.get(o.segmentKey) ?? null} />)}
+            {opportunities.map(o => <OpportunityCard key={o.id} op={o} now={now} targetRate={targetRate} onChart={() => { setWatchChart(null); setChartId(o.id); }} tick={tickOpp(o.id)} seg={segByKey.get(o.segmentKey) ?? null} />)}
           </div>
         </>
       )}
@@ -337,7 +338,7 @@ export default function LiveOpportunitiesScreen() {
                       key={`${w.symbol}|${w.timeframe}|${w.zoneId}`}
                       row={w}
                       tick={tickWatch(`${w.symbol}|${w.timeframe}|${w.zoneId}`)}
-                      onChart={() => { setChartId(null); setChartSrc(api.watchZoneChartUrl(w.symbol, w.timeframe, w.zoneId)); }}
+                      onChart={() => { setChartId(null); setWatchChart(w); }}
                     />
                   ))}
                 </tbody>
@@ -477,12 +478,11 @@ export default function LiveOpportunitiesScreen() {
         </>
       )}
 
-      {(chartId || chartSrc) && (
-        <ChartModal
-          id={chartId}
-          src={chartSrc}
-          title={chartSrc ? 'شارت المنطقة — المرجع والسيولة' : 'شارت الفرصة — الشموع الحقيقية وخطوط الخطة'}
-          onClose={() => { setChartId(null); setChartSrc(null); }}
+      {(chartId || watchChart) && (
+        <LiveChartModal
+          op={chartId ? opportunities.find(o => o.id === chartId) ?? null : null}
+          watch={chartId ? null : watchChart}
+          onClose={() => { setChartId(null); setWatchChart(null); }}
         />
       )}
     </section>
@@ -618,18 +618,74 @@ function OpportunityCard({ op, now, targetRate, onChart, tick, seg }: { op: BuyO
   );
 }
 
-function ChartModal({ id, src, title, onClose }: { id: string | null; src: string | null; title: string; onClose: () => void }) {
-  const url = src ?? (id ? api.buyOpportunityChartUrl(id) : null);
-  if (!url) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={onClose}>
-      <div className="rounded-xl p-3 max-w-[1000px] w-full" style={{ background: 'var(--surface-0)' }} onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>{title}</span>
-          <button onClick={onClose} className="px-3 py-1.5 rounded-md text-[11px] font-bold" style={{ background: 'var(--surface-1)', color: 'var(--text-1)' }}>إغلاق</button>
+/**
+ * نافذة الشارت التفاعلي (تحريك/تكبير/تقاطع/بث حي/تحميل التاريخ) — نفس محرك شارت اللوحة.
+ * للفرصة: خطوط الدخول/الوقف/الهدف/قاع السويب فوق المرجع والسيولة.
+ * للمراقبة: خطا المرجع والسيولة فوق الشموع الحقيقية.
+ */
+function LiveChartModal({ op, watch, onClose }: { op: BuyOpportunity | null; watch: BuyWatchRow | null; onClose: () => void }) {
+  const noop = () => undefined;
+  if (op) {
+    const isSsl = String(op.kind ?? '').includes('ssl');
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={onClose}>
+        <div className="rounded-xl p-3 max-w-[1100px] w-full" style={{ background: 'var(--surface-0)' }} onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>
+              {op.symbol} · {op.timeframe} — حرّك واسحب للتكبير · البث حي
+            </span>
+            <button onClick={onClose} className="px-3 py-1.5 rounded-md text-[11px] font-bold" style={{ background: 'var(--surface-1)', color: 'var(--text-1)' }}>إغلاق</button>
+          </div>
+          <BigChart
+            symbol={op.symbol}
+            timeframe={op.timeframe}
+            zones={{ ssl: isSsl ? op.liquidityLevel : null, bsl: isSsl ? null : op.liquidityLevel }}
+            zoneList={[]}
+            annotate={false}
+            showAuto={false}
+            onChartClick={noop}
+            highlightId={null}
+            scrollTarget={null}
+            height={460}
+            extraLines={[
+              { price: op.referenceLevel, color: '#64748b', title: 'المرجع' },
+              { price: op.entry, color: '#0ea5e9', title: 'الدخول' },
+              { price: op.stop, color: '#dc2626', title: 'الوقف' },
+              { price: op.tp, color: '#16a34a', title: 'الهدف' },
+              { price: op.sweepLow, color: '#7c3aed', title: 'قاع السويب' }
+            ]}
+          />
         </div>
-        <img src={url} alt="الشارت" className="w-full rounded-lg" style={{ background: '#fff' }} />
       </div>
-    </div>
-  );
+    );
+  }
+  if (watch) {
+    const isSsl = String(watch.kind ?? '').includes('ssl');
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={onClose}>
+        <div className="rounded-xl p-3 max-w-[1100px] w-full" style={{ background: 'var(--surface-0)' }} onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>
+              {watch.symbol} · {watch.timeframe} — {phaseLabel[watch.phase] ?? watch.phase} · حرّك واسحب للتكبير · البث حي
+            </span>
+            <button onClick={onClose} className="px-3 py-1.5 rounded-md text-[11px] font-bold" style={{ background: 'var(--surface-1)', color: 'var(--text-1)' }}>إغلاق</button>
+          </div>
+          <BigChart
+            symbol={watch.symbol}
+            timeframe={watch.timeframe}
+            zones={{ ssl: isSsl ? watch.liquidityLevel : null, bsl: isSsl ? null : watch.liquidityLevel }}
+            zoneList={[]}
+            annotate={false}
+            showAuto={false}
+            onChartClick={noop}
+            highlightId={null}
+            scrollTarget={null}
+            height={460}
+            extraLines={[{ price: watch.referenceLevel, color: '#64748b', title: 'المرجع' }]}
+          />
+        </div>
+      </div>
+    );
+  }
+  return null;
 }

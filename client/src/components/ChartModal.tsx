@@ -39,7 +39,7 @@ const TF_SECONDS: Record<string, number> = {
   '1d': 86400, '3d': 259200, '1w': 604800
 };
 
-function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true, containerCb, extraLines = [] }: {
+export function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAuto, onChartClick, highlightId, scrollTarget, height, showAutoMarkers = true, containerCb, extraLines = [] }: {
   symbol: string;
   timeframe: string;
   zones: { ssl: number | null; bsl: number | null };
