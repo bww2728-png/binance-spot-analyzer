@@ -40,6 +40,11 @@ export function createMarketStreams({
     proactiveReconnectMs: 23.5 * 3600_000,
     livenessTimeoutMs: 90_000,
     seedLimit: 250,               // خفّض من 500: يكفي warmup (220) + هامش، ويخفض ذاكرة البذر ~50%
+    // حجر المفاتيح الميتة (علة OOM مثبتة بالسجلات): رموز محجوبة جغرافياً (451) كانت
+    // تُعاد محاولتها بلا نهاية (REST ×3 مضيفين + سجلات) فتخنق الذاكرة والشبكة والسجلات
+    maxSeedFails451: 2,            // إخفاقان 451 متتاليان = حظر دائم → حجر فوري
+    maxSeedFailsOther: 15,         // الأعطال العابرة تُمهل أكثر (انقطاع مؤقت لا يُحجر سريعا)
+    quarantineMs: 6 * 3600_000,    // مدة الحجر ثم إعادة محاولة تلقائية (شفاء ذاتي لو تغيرت المنطقة)
     maxBarsKept: 400,             // سقف الشموع المحفوظة لكل مفتاح — يمنع نمو المخزن بلا حد (تسرب ذاكرة)
     reconcileMs: 5 * 60_000,
     reconcileBatch: 20,
@@ -55,6 +60,7 @@ export function createMarketStreams({
   const prices = new Map();          // symbol → { price, at }
   const klines = new Map();          // "SYM|tf" → Map(openTime → rawRow)
   const klineSeeding = new Map();    // "SYM|tf" → Promise (منع البذر المزدوج)
+  const seedFails = new Map();       // "SYM|tf" → { fails, quarantinedUntil } (حجر المفاتيح الميتة)
   const trades = new Map();          // symbol → [{price, qty, isBuyerMaker, at}]
   let candleCloseHandlers = new Set();
 
@@ -236,9 +242,18 @@ export function createMarketStreams({
     }
   }
 
+  /** هل المفتاح محجور حالياً؟ (يُمسح الحجر المنتهي تلقائياً) */
+  function quarantinedUntil(key) {
+    const rec = seedFails.get(key);
+    if (!rec?.quarantinedUntil) return 0;
+    if (now() >= rec.quarantinedUntil) { seedFails.delete(key); return 0; }
+    return rec.quarantinedUntil;
+  }
+
   /** بذر مخزن شموع من REST مرة واحدة (للمفاتيح غير المزروعة) */
   function ensureKlineSeed(key) {
     if (klines.has(key) || klineSeeding.has(key) || !seedKlines) return klineSeeding.get(key) ?? Promise.resolve();
+    if (quarantinedUntil(key)) return Promise.resolve(); // مفتاح ميت — بلا شبكة بلا سجلات
     const [symbol, tf] = key.split('|');
     const p = (async () => {
       try {
@@ -247,8 +262,20 @@ export function createMarketStreams({
         for (const row of raw ?? []) buf.set(Number(row[0]), row);
         klines.set(key, buf);
         trimKlines(key);
+        seedFails.delete(key); // نجاح يصفّر العداد
       } catch (e) {
-        log.warn?.(`[market-streams] seed failed ${key}: ${e?.message ?? e}`);
+        const msg = String(e?.message ?? e);
+        const geo = msg.includes('451');
+        const rec = seedFails.get(key) ?? { fails: 0, quarantinedUntil: 0 };
+        rec.fails += 1;
+        const limit = geo ? cfg.maxSeedFails451 : cfg.maxSeedFailsOther;
+        if (rec.fails >= limit) {
+          rec.quarantinedUntil = now() + cfg.quarantineMs;
+          log.warn?.(`[market-streams] quarantine ${key} after ${rec.fails} fails (${geo ? 'geo-blocked 451' : 'transient'}) until ${new Date(rec.quarantinedUntil).toISOString()}`);
+        } else {
+          log.warn?.(`[market-streams] seed failed ${key}: ${msg}`);
+        }
+        seedFails.set(key, rec);
       } finally {
         klineSeeding.delete(key);
       }
@@ -392,6 +419,7 @@ export function createMarketStreams({
     const base = Math.floor(Math.random() * keys.length);
     for (let i = 0; i < Math.min(cfg.reconcileBatch, keys.length); i += 1) {
       const key = keys[(base + i) % keys.length];
+      if (quarantinedUntil(key)) continue; // لا تسوية لمفتاح محجور
       const [symbol, tf] = key.split('|');
       void (async () => {
         try {
@@ -484,6 +512,8 @@ export function createMarketStreams({
     getKlines,
     flowSnapshot,
     stats() {
+      let quarantined = 0;
+      for (const [, rec] of seedFails) if (Number(rec?.quarantinedUntil) > now()) quarantined += 1;
       return {
         connected: conns.some(c => c.ws.readyState === WebSocket.OPEN),
         connections: conns.length,
@@ -491,6 +521,7 @@ export function createMarketStreams({
         klineSubs: wantedKlines.size,
         aggTradeSubs: wantedFlow.size,
         priceSymbols: prices.size,
+        quarantinedKeys: quarantined,
         messages: messageCount,
         lastMessageAt,
         startedAt
