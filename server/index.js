@@ -1223,7 +1223,14 @@ const readLiveCalibration = async () => {
 const liveOppEngine = createLiveOpportunityEngine({
   // نداء واحد لكل أسعار السوق ثم فلترة محلية: طلب الأزواج دفعةً واحدة يفشل بسبب
   // رموز غير مدعومة على المضيف المتاح (HTTP 400)، بينما النداء الشامل ينجح دائماً.
+  // الأولوية للبث الحي (!miniTicker يغذي كل السوق بلا REST) — يوفر معظم egress ويتجاوز حجب 451.
   fetchPrices: async (symbols) => {
+    try {
+      if (marketStreams.connected()) {
+        const live = marketStreams.getPrices(symbols);
+        if (symbols.every(s => Number.isFinite(live[s]))) return live;
+      }
+    } catch { /* سقط للاحتياطي REST */ }
     const all = await db.binance.allTickerPrices().catch(() => null);
     if (all && Object.keys(all).length) {
       const out = {};
@@ -1319,6 +1326,12 @@ const strategy2Engine = createStrategyEngine({
   resolveTargets: () => resolveTargets(),
   fetchRawKlines: (symbol, timeframe, limit, startTime) => db.binance.klines(symbol, timeframe, limit, startTime),
   fetchPrices: async (symbols) => {
+    try {
+      if (marketStreams.connected()) {
+        const live = marketStreams.getPrices(symbols);
+        if (symbols.every(s => Number.isFinite(live[s]))) return live;
+      }
+    } catch { /* سقط للاحتياطي REST */ }
     const all = await db.binance.allTickerPrices().catch(() => null);
     if (all && Object.keys(all).length) {
       const out = {};
