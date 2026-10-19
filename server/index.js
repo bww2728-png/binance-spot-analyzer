@@ -1471,9 +1471,14 @@ runtime.dataFresh = () => {
   if (s.stalePriceRatio !== null && s.stalePriceRatio > maxStaleRatio) {
     problems.push(`${s.stalePrices} رمزاً سعره متقادم (${Math.round(s.stalePriceRatio * 100)}%)`);
   }
-  if (s.staleCandles > 0) {
-    const maxStaleKeys = Number(process.env.STALE_CANDLE_KEYS_MAX || 0);
-    if (s.staleCandles > maxStaleKeys) problems.push(`${s.staleCandles} مفتاح شموع متأخر`);
+  /**
+   * «مفتاح شموع متأخر» على كل الاشتراكات ليس عيباً بذاته: بينانس لا تدفع تحديث شمعة
+   * لرمز بلا صفقات. العيب الحقيقي أن يكون الرمز قد تداول فعلاً ولم تُدفع شمعته —
+   * وهذا ما يقيسه `tradingStaleCandles`. الأول يُعرض للعلم، والثاني هو إشارة الجاهزية.
+   */
+  const maxSilentKeys = Number(process.env.STALE_CANDLE_KEYS_MAX || 0);
+  if (s.tradingStaleCandles > maxSilentKeys) {
+    problems.push(`${s.tradingStaleCandles} مفتاح شموع صامت لرموز تداولت خلال آخر دقيقة`);
   }
   if (!s.klineSubs) problems.push('لا شموع مشتركة بعد');
   return {

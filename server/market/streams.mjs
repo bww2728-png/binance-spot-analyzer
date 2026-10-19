@@ -71,6 +71,12 @@ export function createMarketStreams({
     reconcileMs: 5 * 60_000,
     reconcileBatch: 20,
     tradeWindowMs: 10 * 60_000,
+    /**
+     * نافذة «رمز تداول فعلاً» لقياس صمت دفق الشموع. أقصر بكثير من نافذة التدفق:
+     * بينانس تدفع تحديث الشمعة فور وقوع صفقة، فإن تداول الرمز خلال آخر دقيقة ولم
+     * تُدفع شمعته فالدفق معطوب لهذا الرمز. نافذة التدفق (10 دقائق) فضفاضة لهذا الغرض.
+     */
+    tradingWindowMs: 60_000,
     maxTradesPerSymbol: 1500,     // خفّض من 4000: يخفض ذاكرة التدفق ~62%
     aggTradeSubLimit: 0,          // 0 = بلا قص (التوزيع على الاتصالات يتكفل بالحدود)
     klineSubLimit: 0,             // 0 = بلا قص — كل المطلوب يُشترك فعلاً عبر اتصالات إضافية
@@ -800,12 +806,31 @@ export function createMarketStreams({
         if (rec.src === 'rest') restSourcedCount += 1;
         if (t - rec.at > cfg.priceStaleMs) stalePrices += 1;
       }
+      /**
+       * صمت دفق الشموع — بمعيارين، لأن الخلط بينهما كان يجعل المقياس كاذباً:
+       *  - `staleCandles`: كل مفتاح لم تُدفع شمعته خلال فريمين. بينانس لا تدفع تحديث
+       *    شمعة لرمز بلا صفقات أصلاً، فرقم كبير هنا متوقّع ولا يعني عطلاً.
+       *  - `tradingStaleCandles`: مفتاح رمز **تداول فعلاً** خلال آخر دقيقة ومع ذلك
+       *    شمعته صامتة. هذا هو العطل الحقيقي (انقطاع دفق الشموع لهذا الرمز).
+       * الفرق ضروري: الأول معلوماتي، والثاني هو إشارة الجاهزية.
+       */
+      const tradingCutoff = t - cfg.tradingWindowMs;
+      const recentTraders = new Set();
+      for (const sym of wantedFlow) {
+        const arr = trades.get(sym);
+        const at = arr?.length ? arr[arr.length - 1].at : 0;
+        if (at >= tradingCutoff) recentTraders.add(sym);
+      }
       let staleCandles = 0;
+      let tradingStaleCandles = 0;
       for (const key of wantedKlines) {
-        const tfMs = tfMsOf(key.split('|')[1]);
+        const [sym, tf] = key.split('|');
+        const tfMs = tfMsOf(tf);
         if (!tfMs) continue;
         const last = klineLastBar.get(key) ?? 0;
-        if (!last || t - last > 2 * tfMs + 5000) staleCandles += 1;
+        if (last && t - last <= 2 * tfMs + 5000) continue;
+        staleCandles += 1;
+        if (recentTraders.has(sym)) tradingStaleCandles += 1;
       }
       const silent = conns
         .filter(c => c.ws.readyState === WebSocket.OPEN && t - (c.lastMsgAt || 0) > cfg.livenessTimeoutMs)
@@ -833,6 +858,8 @@ export function createMarketStreams({
         stalePrices,
         stalePriceRatio: analyzed.size ? Number((stalePrices / analyzed.size).toFixed(3)) : null,
         staleCandles,
+        tradingStaleCandles,
+        recentTraders: recentTraders.size,
         klineKeys: klines.size,
         silentConns: silent,
         silentRecycles: conns.reduce((a, c) => a + (c.silentRecycles || 0), 0)

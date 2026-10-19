@@ -8,6 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import v8 from 'node:v8';
 
 const SAMPLER_MS = 5 * 60 * 1000;
 
@@ -58,12 +59,28 @@ function emptyEngine(name) {
   };
 }
 
-export function createHealth({ startedAt = Date.now(), stalls = {} } = {}) {
+export function createHealth({ startedAt = Date.now(), stalls = {}, log = console } = {}) {
   /** أقسام إضافية تُدرَج في العيّنات المحفوظة (تُربط من الخادم بعد تهيئة المحركات) */
   const extraSections = {};
   const engines = new Map();
   const counters = { persistFailures: 0, persistWrites: 0, lastPersistAt: 0, lastPersistError: null };
   const marks = {};
+
+  /**
+   * فحص الإقلاع: هل سقف الـheap أقل من حدّ الحاوية بهامش يكفي لغير الـheap؟
+   * الهدف: أن يقتل V8 العملية بخطأ JS واضح عند الضغط، لا أن يقتلها الـcgroup صامتاً.
+   * لا يُصلح السقف تلقائياً — لا يمكن تغيير `--max-old-space-size` بأمان بعد الإقلاع —
+   * لكنه يجعل التعارض ظاهراً في كل عيّنة صحة بدل أن يظهر كتوقف بلا سبب.
+   */
+  const bootLimits = containerLimits();
+  const bootHeapLimitMb = Math.round(v8.getHeapStatistics().heap_size_limit / 1048576);
+  if (bootLimits.memoryLimitMb && bootHeapLimitMb > 0.7 * bootLimits.memoryLimitMb) {
+    const warn = `سقف heap (${bootHeapLimitMb}MB) يتجاوز 70% من حدّ الحاوية (${bootLimits.memoryLimitMb}MB) — خطر قتل OOM صامت`;
+    marks.heapCapWarning = warn;
+    try { log.warn?.(`[health] ${warn}`); } catch { /* التسجيل لا يوقف الإقلاع */ }
+  } else {
+    marks.heapCapWarning = null;
+  }
 
   const lag = monitorEventLoopDelay({ resolution: 20 });
   lag.enable();
@@ -134,6 +151,7 @@ export function createHealth({ startedAt = Date.now(), stalls = {} } = {}) {
     const mem = process.memoryUsage();
     const limits = containerLimits();
     const rssMb = Math.round(mem.rss / 1048576);
+    const heapLimitMb = Math.round(v8.getHeapStatistics().heap_size_limit / 1048576);
     return {
       ok: true,
       now,
@@ -150,6 +168,12 @@ export function createHealth({ startedAt = Date.now(), stalls = {} } = {}) {
         cpuCores: limits.cpuCores,
         ...hostMemory()
       },
+      /**
+       * حد الـheap الفعلي داخل V8 (`--max-old-space-size`). يُسجَّل لأن أهم خطر على
+       * التشغيل المستمر هو أن يتجاوز سقف heap حدّ الحاوية فيقتل الـcgroup العملية
+       * قبل أن يضغط V8 نفسه. الرقم هنا هو الدليل، لا الافتراض.
+       */
+      heapLimitMb,
       lagMs: {
         p50: Number((lag.percentile(50) / 1e6).toFixed(1)),
         p95: Number((lag.percentile(95) / 1e6).toFixed(1)),

@@ -164,6 +164,47 @@ test('stats تُبلّغ عن اكتمال المفاتيح وعددها', async
   assert.equal(s.staleCandles, 1, 'شمعة بُذرت من زمن قديم تُعدّ متأخرة');
 });
 
+test('صمت دفق الشموع يُقاس على الرموز التي تداولت فعلاً لا على الخامل', async () => {
+  const { srv, streams } = await connectedStreams();
+  try {
+    streams.setAggTradeSubscriptions(['BTCUSDT', 'ETHUSDT']);
+    const oldBar = Date.now() - 10 * 60_000; // شمعة قديمة لكلا الرمزين
+    for (const sym of ['BTCUSDT', 'ETHUSDT']) {
+      srv.push(`${sym.toLowerCase()}@kline_1m`, {
+        s: sym, k: { t: oldBar, i: '1m', o: '1', h: '2', l: '0.5', c: '1.5', v: '1', x: false }
+      });
+    }
+    // BTC تداول الآن (يجب أن تُدفع شمعته ولم تُدفع) — ETH خامل بلا صفقات
+    srv.push('btcusdt@aggTrade', { s: 'BTCUSDT', p: '50000', q: '1', m: false, T: Date.now() });
+    await sleep(200);
+    const s = streams.stats();
+    assert.equal(s.recentTraders, 1, 'رمز واحد تداول فعلاً خلال النافذة');
+    assert.equal(s.staleCandles, 2, 'كلتا الشمعتين قديمتان (معلوماتي)');
+    assert.equal(s.tradingStaleCandles, 1, 'العطل الحقيقي: رمز تداول ولم تُدفع شمعته');
+  } finally {
+    streams.stop();
+    await srv.close();
+  }
+});
+
+test('الرمز الذي تداول ولم تُدفع شمعته لا يُعدّ عطلاً بعد وصول شمعته', async () => {
+  const { srv, streams } = await connectedStreams();
+  try {
+    streams.setAggTradeSubscriptions(['BTCUSDT']);
+    srv.push('btcusdt@aggTrade', { s: 'BTCUSDT', p: '50000', q: '1', m: false, T: Date.now() });
+    await sleep(80);
+    assert.equal(streams.stats().tradingStaleCandles >= 1, true, 'عطل مرصود قبل وصول الشمعة');
+    srv.push('btcusdt@kline_1m', {
+      s: 'BTCUSDT', k: { t: Date.now(), i: '1m', o: '1', h: '2', l: '0.5', c: '1.5', v: '1', x: false }
+    });
+    await sleep(200);
+    assert.equal(streams.stats().tradingStaleCandles, 0, 'زوال العطل بعد وصول الشمعة');
+  } finally {
+    streams.stop();
+    await srv.close();
+  }
+});
+
 test('السعر يُشتق من الشمعة الحية لرموز التحليل (لا من !miniTicker@arr وحده)', async () => {
   const { srv, streams } = await connectedStreams();
   try {
