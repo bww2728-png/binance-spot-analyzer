@@ -1,7 +1,8 @@
 import { applyFeedback } from './liquidity/engine.mjs';
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://supabase-api-prod.verdent.ai/p/pfb660a6a9d32c0417a38';
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoyMTA0Njg2NzkxLCJpYXQiOjE3ODkwNjc1OTEsImlzcyI6InN1cGFiYXNlIiwicHJvamVjdF9yZWYiOiJwZmI2NjBhNmE5ZDMyYzA0MTdhMzgiLCJyb2xlIjoiYW5vbiJ9.alrTK9tAI5EqmkVr05n2ClNFwuufhCB5_bEEMAe48l4';
+// تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
 
 const baseHeaders = {
   apikey: SUPABASE_KEY,
