@@ -387,7 +387,21 @@ export function simulateSweep({
   const tradeCostPct = Number(feePct) * 2 + Number(slippagePct);
   for (let i = entryIdx + 1; i < Math.min(entryIdx + maxBars, candles.length); i += 1) {
     const c = candles[i];
-    if (Number(c.low) <= stop) return { outcome: 'decided', win: 0, exit: stop, bars: i - entryIdx, rr: plan.rr, netRr: plan.rr, entry, stop, tp, entryTime: candles[entryIdx].time, tradeCostPct };
+    if (Number(c.low) <= stop) {
+      /**
+       * إصلاح B8: كان الخاسر يُسجَّل بـnetRr = plan.rr أي بقيمة موجبة تماثل الرابح
+       * الكامل، فيبدو توزيع النتائج الصافي بلا خسائر ويُضلَّل تقييم الأداء.
+       * الصافي الصحيح عند ضرب الوقف: −1R ناقص التكاليف معبَّراً عنها بوحدات R.
+       * plan.rr (العائد الإجمالي المخطط) يبقى كما هو — لم تُمس شروط الاستراتيجية.
+       */
+      const riskPct = ((entry - stop) / Math.max(entry, 1e-12)) * 100;
+      const netRrLoss = riskPct > 0 ? (-riskPct - tradeCostPct) / riskPct : -1;
+      return {
+        outcome: 'decided', win: 0, exit: stop, bars: i - entryIdx, rr: plan.rr,
+        netRr: Number(netRrLoss.toFixed(2)), entry, stop, tp,
+        entryTime: candles[entryIdx].time, tradeCostPct
+      };
+    }
     if (Number(c.high) >= tp) {
       const grossPct = (tp - entry) / Math.max(entry, 1e-12) * 100;
       const netPct = grossPct - tradeCostPct;

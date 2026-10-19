@@ -59,6 +59,8 @@ function emptyEngine(name) {
 }
 
 export function createHealth({ startedAt = Date.now(), stalls = {} } = {}) {
+  /** أقسام إضافية تُدرَج في العيّنات المحفوظة (تُربط من الخادم بعد تهيئة المحركات) */
+  const extraSections = {};
   const engines = new Map();
   const counters = { persistFailures: 0, persistWrites: 0, lastPersistAt: 0, lastPersistError: null };
   const marks = {};
@@ -162,12 +164,21 @@ export function createHealth({ startedAt = Date.now(), stalls = {} } = {}) {
 
   function resetLag() { lag.reset(); }
 
-  function startSampler({ db, intervalMs = SAMPLER_MS, log = console } = {}) {
+  function startSampler({ db, intervalMs = SAMPLER_MS, log = console, sections = {} } = {}) {
     let timer = null;
     const write = async () => {
       try {
         const snap = snapshot();
-        await db.health.append({ ts: snap.now, data: snap });
+        /**
+         * إثراء العيّنة بمقاييس الجاهزية: التخزين الدائم جزء من الدليل المطلوب
+         * للحكم بعد 72 ساعة (عمر آخر سعر، حداثة الشموع، المستهدفة، حالة العمال،
+         * إخفاقات الحفظ). عيّنة الذاكرة وحدها لا تثبت صحة التشغيل.
+         */
+        const extra = {};
+        for (const [key, fn] of Object.entries(extraSections)) {
+          try { extra[key] = fn(); } catch (e) { extra[key] = { error: String(e?.message ?? e).slice(0, 160) }; }
+        }
+        await db.health.append({ ts: snap.now, data: { ...snap, ...extra } });
         resetLag();
       } catch (e) {
         counters.persistFailures += 1;
@@ -181,7 +192,10 @@ export function createHealth({ startedAt = Date.now(), stalls = {} } = {}) {
     return { stop: () => clearInterval(timer), write };
   }
 
-  return { register, snapshot, startSampler, notePersist, mark, resetLag };
+  /** ربط قسم إضافي بالعيّنات المحفوظة (market/targets/shariah/dataFresh/workers) */
+  function addSection(key, fn) { if (typeof fn === 'function') extraSections[key] = fn; }
+
+  return { register, snapshot, startSampler, notePersist, mark, resetLag, addSection };
 }
 
 export default createHealth;

@@ -72,7 +72,9 @@ const DEFAULT_CONFIG = {
     // دخول إعادة الاختبار (فابيو): دخول أقرب للوقف بعد الاستعادة → نسبة نجاح أعلى لنفس الهدف
     retestTolAtr: 0.3,
     retestWindow: 12
-  }
+  },
+  /** نافذة منع تكرار حفظ الرفض لنفس السبب (ساعة افتراضياً) — إصلاح إغراق السجل */
+  rejectionDedupeMs: Number(process.env.REJECTION_DEDUPE_MS) || 60 * 60 * 1000
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -153,6 +155,31 @@ export function createLiveOpportunityEngine(deps) {
   const verifying = new Set();  // مرشحون قيد التحقق الآن (منع التكرار بين الدورات المتقاربة)
 
   /** محدد توازٍ — ينفّذ مهام متعددة بحد أقصى n متزامن (بلا مكتبات خارجية) */
+  /**
+   * حفظ الرفض مرة واحدة لكل (رمز، فريم، منطقة، سبب) خلال نافذة زمنية.
+   * إصلاح A10: كان كل رفض يُحفظ في **كل دورة** (كل 5 ثوان لكل فرصة مرشحة)، فسجل
+   * الأحداث ينمو بلا معنى: 121,507 حدثاً قديماً غالبه تكرار لنفس الرفض، ويهدّد سعة
+   * القاعدة (500MB مجاناً / 2GB للمدفوع). الآن يُسجَّل الرفض مرة، وتُهمَل التكرارات.
+   * ملاحظة: لا يمس هذا أي قرار نشر — الرفض نفسه وسببه كما هما، والفرق فقط ألا
+   * نكتب السطر نفسه 720 مرة في الساعة.
+   */
+  const rejectionSeen = new Map();
+  function persistRejectionOnce(row) {
+    const key = `${row.symbol}|${row.timeframe}|${row.zoneId ?? '-'}|${row.reason}`;
+    const t = now();
+    const prev = rejectionSeen.get(key);
+    if (prev != null && t - prev < cfg.rejectionDedupeMs) return;
+    rejectionSeen.set(key, t);
+    if (rejectionSeen.size > 4000) {
+      // تقليم الأقدم: كل ما تجاوز النافذة لم يعد مفيداً
+      for (const [k, at] of rejectionSeen) {
+        if (t - at > cfg.rejectionDedupeMs) rejectionSeen.delete(k);
+        if (rejectionSeen.size <= 3000) break;
+      }
+    }
+    void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+  }
+
   function createLimiter(n) {
     let active = 0;
     const queue = [];
@@ -251,7 +278,7 @@ export function createLiveOpportunityEngine(deps) {
       };
       rejected.push(row);
       // ما بعد السويب يُحفظ للبحث (لماذا لم تتحول إلى فرصة؟) — ذهب البحث لاحقا
-      if (st.sawSweep) void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+      if (st.sawSweep) persistRejectionOnce(row);
       return null;
     }
 
@@ -296,7 +323,7 @@ export function createLiveOpportunityEngine(deps) {
         chain: stageChain(st, { flow, veto: 'no_valid_plan' })
       };
       rejected.push(row);
-      if (st.sawSweep) void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+      if (st.sawSweep) persistRejectionOnce(row);
       return null;
     }
 
@@ -334,7 +361,7 @@ export function createLiveOpportunityEngine(deps) {
         chain: stageChain(st, { flow, veto: vetoKind })
       };
       rejected.push(row);
-      if (st.sawSweep) void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+      if (st.sawSweep) persistRejectionOnce(row);
       return null;
     }
 
@@ -411,8 +438,23 @@ export function createLiveOpportunityEngine(deps) {
     trackers.set(key, markPublished(st, key, now()));
     opportunities.set(key, opportunity);
     if (opportunities.size > cfg.publishLimit) {
+      /**
+       * إصلاح B5 (جزء الأشباح): كان الأقدم يُحذف من الذاكرة فقط بلا حفظ، فيُستعاد
+       * عند إعادة التشغيل كفرصة مفتوحة لم تُحسم — «فرصة شبح» تُظهر منشوراً لم يعد
+       * له متابعة ولا نتيجة. الآن يُحفظ كمنتهٍ بسبب صريح قبل إخلائه.
+       * لا يغيّر هذا أي شرط استراتيجية: الفرصة كانت مُخلاة أصلاً، والفرق فقط أن
+       * إخلاءها صار مسجَّلاً.
+       */
       const oldest = [...opportunities.values()].sort((a, b) => a.detectedAt - b.detectedAt)[0];
-      if (oldest) opportunities.delete(oldest.id);
+      if (oldest) {
+        const closed = {
+          ...oldest, closed: true, outcome: oldest.outcome ?? 'expired',
+          exitReason: oldest.exitReason ?? 'evicted-limit',
+          closedAt: now()
+        };
+        opportunities.delete(oldest.id);
+        void persist(closed).catch(() => undefined);
+      }
     }
     status.published += 1;
     status.funnel.published += 1;

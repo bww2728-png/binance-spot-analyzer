@@ -12,6 +12,7 @@
 import {
   analyzeCandles, isBullishPair
 } from './structure.mjs';
+import { loadKlinesPaginated } from '../backtest/engine.mjs';
 import {
   computeDirectionState, updateWithPrice, classifyChange
 } from './directions.mjs';
@@ -109,7 +110,8 @@ export function createStrategyEngine(deps) {
     readFeedbackEvents = null,     // اختياري: أحداث strategy2_feedback الدائمة (تعليق بشري)
     now = () => Date.now(),
     log = console,
-    config = {}
+    config = {},
+    shadow = null
   } = deps;
 
   const cfg = { ...DEFAULT_CONFIG, ...config, calibration: { ...DEFAULT_CONFIG.calibration, ...(config.calibration ?? {}) } };
@@ -136,6 +138,7 @@ export function createStrategyEngine(deps) {
   const csseStates = new Map();      // "SYM|tf" → حالة CSSE
   const feedbackByElement = new Map(); // elementId → [تصحيحات بشرية نشطة] (تعليق فقط)
 
+  let shadowTick = 0;
   const status = {
     busy: false, cycle: 0, scope: 'halal_no_barcode', pairsTotal: 0,
     analyzing: 0, published: 0, resolved: 0, wins: 0, losses: 0,
@@ -383,6 +386,35 @@ export function createStrategyEngine(deps) {
       });
       status.analyzing += 1;
       clearFailure(`${symbol}|${tf}|analysis`);
+
+      /**
+       * ★1 (قياس فقط — لا يُفعَّل): يقيس أثر تحليل الشموع **المكتملة** بدل الجارية.
+       * العلة المرصودة (A3): المحرك يحلل الشمعة الجارية قبل اكتمالها، ثم يتخطى
+       * المكتملة لأن زمن افتتاحها سُجّل في lastProcessed — فقد تختلف الإشارة عن
+       * حقيقتها بعد الإغلاق، ولا يطابق الحي المعايرة (المكتملة فقط).
+       * لا نغيّر القرار المنشور: نقارن ونُسجّل الفرق فقط، ويُعرض الدليل للموافقة.
+       * القياس مُعيّن (كل 8 نداءات) لتقييد الكلفة.
+       */
+      if (shadow?.enabled && candles.length > cfg.warmupBars + 1) {
+        shadowTick = (shadowTick + 1) % 8;
+        if (shadowTick === 0) {
+          try {
+            const closedOnly = candles.slice(0, -1);
+            const candAn = analyzeCandles(closedOnly, {
+              price: Number(closedOnly[closedOnly.length - 1].close),
+              discountPos: cfg.discountPos, bandPct: cfg.bandPct, minRR: cfg.minRR
+            });
+            const pick = (a) => a?.decision ?? a?.signal ?? a?.setup?.direction ?? a?.signalKind ?? null;
+            shadow.compare(
+              's2-closed-bars-only',
+              { decision: pick(an), bar: Number(candles[candles.length - 1].timeMs) },
+              { decision: pick(candAn), bar: Number(closedOnly[closedOnly.length - 1].timeMs) },
+              (a, b) => a?.decision === b?.decision,
+              { symbol, tf }
+            );
+          } catch { /* القياس لا يعطّل المحرك أبداً */ }
+        }
+      }
       // ذاكرة الشارت المستمرة: حدّث الحالة تدريجياً (لا تعيد البناء من الصفر)
       csseTrack(symbol, tf, candles, an);
 
@@ -712,7 +744,19 @@ export function createStrategyEngine(deps) {
       const trades = [];
       const runTask = async ({ symbol, tf }) => {
         try {
-          const raw = await fetchRawKlines(symbol, tf, cfg.calibration.bars).catch(() => null);
+          /**
+           * إصلاح B7: كان الطلب 1500 شمعة في نداء واحد وحدّ Binance 1000، فتعود
+           * النتيجة ناقصة (أو تفشل) فتضيع آخر 500 شمعة — وهي الأحدث والأهم للمعايرة.
+           * الآن يُجلب على صفحات (1000 لكل نداء) حتى بلوغ العدد المطلوب فعلاً.
+           * الشرط والتقييم لم يتغيرا: نفس عدد الشموع المطلوب، لكنه يصل كاملاً.
+           */
+          const raw = fetchRawKlines
+            ? await loadKlinesPaginated(
+              { binance: { klines: (sym, tfx, lim, start) => fetchRawKlines(sym, tfx, lim, start) } },
+              symbol, tf, cfg.calibration.bars,
+              { maxPages: Math.ceil(cfg.calibration.bars / 1000) + 1, pageMs: 350 }
+            ).catch(() => null)
+            : null;
           if (raw && raw.length > 300) {
             const candles = raw.map(k => ({
               time: Math.floor(Number(k[0]) / 1000), timeMs: Number(k[0]),

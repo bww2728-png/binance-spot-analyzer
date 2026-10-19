@@ -27,8 +27,12 @@ import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams } from './market/streams.mjs';
 import { createHealth } from './health.mjs';
 import { cpus } from 'node:os';
+import { createRateLimiter } from './net/limiter.mjs';
+import { setRateLimiter } from './db.js';
 import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
+import { startRetention } from './services/retention.mjs';
+import { createShadow } from './services/shadow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +50,25 @@ const app = express();
  * الحجم محدود بحصة المعالج المعلنة في الحاوية، مع عامل احتياطي للتزامن.
  */
 // لا يزيد العمال على حصة المعالج المتاحة: نواة واحدة = عامل واحد (منع التنافس على الحلقة)
+/**
+ * محدّد معدل بينانس الموحّد (إصلاح B6): كان المكتوب في net/limiter.mjs غير موصول
+ * بأي مكان، فطلبات المحركات تتصادم بلا تنظيم وتردّ 429/418. الآن كل نداء REST يمر
+ * عبره بأولويات: حي > معايرة > تاريخي، مع احترام Retry-After.
+ */
+const rateLimiter = createRateLimiter({
+  minuteBudget: Number(process.env.BINANCE_MINUTE_BUDGET) || 4200,
+  log: console
+});
+setRateLimiter(rateLimiter);
+
+/**
+ * وضع الظل (★): يقيس الإصلاحات التي تُغيّر الفرص **بلا تفعيلها**.
+ * المبدأ الملزم: المنطق المنشور لا يتغير؛ الجديد يعمل بالتوازي للقياس فقط،
+ * ويُعرض على المستخدم بالدليل قبل أي تفعيل.
+ */
+const shadow = createShadow({ dir: process.env.SHADOW_DIR || '/tmp/shadow', log: console });
+shadow.load();
+
 const HEAVY_WORKERS = Math.max(1, Math.min(4, Number(process.env.HEAVY_WORKERS) || Math.max(1, Math.min(2, cpus().length - 1 || 1))));
 const workerPool = createWorkerPool({
   size: HEAVY_WORKERS,
@@ -87,6 +110,15 @@ app.get('/readyz', (req, res) => {
  * الذاكرة وحدّ الحاوية، تأخر حلقة الأحداث، حداثة بيانات السوق، دورات كل محرك،
  * وأعطال الحفظ. تُقرأ آلياً ومن لوحة التحكم. لا تعتمد على أي خدمة خارجية.
  */
+/**
+ * تقرير وضع الظل — دليل الفروق للإصلاحات ★ قبل طلب الموافقة على تفعيلها.
+ * للقراءة فقط: لا يغيّر أي قرار منشور.
+ */
+app.get('/api/shadow/report', (_req, res) => {
+  try { res.json(shadow.summary()); }
+  catch (e) { res.status(500).json({ error: String(e?.message ?? e) }); }
+});
+
 app.get('/api/health/deep', (req, res) => {
   const snap = health.snapshot();
   let fresh = { ok: null, reason: 'غير مُهيّأ' };
@@ -95,6 +127,8 @@ app.get('/api/health/deep', (req, res) => {
     ...snap,
     market: (() => { try { return runtime.marketStats(); } catch { return null; } })(),
     workers: (() => { try { return runtime.workers?.() ?? null; } catch { return null; } })(),
+    rateLimiter: (() => { try { return runtime.rateLimiter?.() ?? null; } catch { return null; } })(),
+    shadow: (() => { try { const s = runtime.shadow?.(); return s ? { enabled: s.enabled, fixes: Object.keys(s.fixes ?? {}).length, records: s.records.map(r => ({ key: r.key, samples: r.samples, diff: r.diff, diffRate: r.diffRate })) } : null; } catch { return null; } })(),
     targets: (() => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } })(),
     shariah: (() => { try { return runtime.shariahVerdicts(); } catch { return null; } })(),
     dataFresh: fresh
@@ -378,23 +412,66 @@ app.get('/api/shariah', handle(async (_req, res) => {
   })));
 }));
 
+/**
+ * حقول الحقائق الشرعية المسموح بتوثيقها — قائمة بيضاء صريحة.
+ * إصلاح C1: كان المسار يقبل أي جسم بلا تحقق، فيمكن حقن حقائق مشوّهة أو حقول غريبة
+ * تُحفظ كما هي (رأينا فعلاً مفتاحاً غريباً PYUSDT_BASE في البيانات) وتؤثر على الحكم
+ * الذي تبني عليه المحركات قراراتها. التحقق هنا شكلٌ لا يغيّر أي قيمة شرعية.
+ */
+const SHARIAH_FACT_KEYS = new Set([
+  'has_utility', 'is_memecoin', 'has_lending_interest', 'has_fixed_yield',
+  'linked_haram_activity', 'is_asset_backed', 'pure_speculation', 'privacy_concern'
+]);
+const SHARIAH_VERDICTS = new Set(['halal', 'haram', 'uncertain']);
+const MAX_TEXT = 8000;
+
+/** تطبيع حقائق واردة من الواجهة: المفاتيح المعروفة فقط، والقيم true/false/null فقط */
+function sanitizeFacts(input) {
+  let raw = input;
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return {}; } }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!SHARIAH_FACT_KEYS.has(k)) continue;   // يمنع إدخال حقول غريبة
+    out[k] = v === true ? true : v === false ? false : null;
+  }
+  return out;
+}
+
+/** تطبيع مصفوفة JSON بحد أقصى للطول (منع تضخيم الصفوف) */
+function sanitizeJsonArray(input, max = MAX_TEXT) {
+  let raw = input;
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return '[]'; } }
+  if (!Array.isArray(raw)) return '[]';
+  return JSON.stringify(raw).slice(0, max);
+}
+
 app.put('/api/shariah/:symbol', handle(async (req, res) => {
-  const symbol = req.params.symbol.toUpperCase();
+  const symbol = String(req.params.symbol ?? '').toUpperCase().trim();
+  if (!/^[A-Z0-9_]{2,24}$/.test(symbol)) return res.status(400).json({ error: 'رمز غير صالح' });
+  const verdict = String(req.body?.verdict ?? 'uncertain').toLowerCase();
+  if (!SHARIAH_VERDICTS.has(verdict)) {
+    return res.status(400).json({ error: 'حكم غير صالح', allowed: [...SHARIAH_VERDICTS] });
+  }
   const body = {
-    verdict: req.body.verdict || 'uncertain',
-    facts: req.body.facts !== undefined ? (typeof req.body.facts === 'string' ? req.body.facts : JSON.stringify(req.body.facts)) : '{}',
-    reasons: req.body.reasons !== undefined ? (typeof req.body.reasons === 'string' ? req.body.reasons : JSON.stringify(req.body.reasons)) : '[]',
-    evidence: req.body.evidence !== undefined ? (typeof req.body.evidence === 'string' ? req.body.evidence : JSON.stringify(req.body.evidence)) : '[]',
-    source: req.body.source || null,
-    notes: req.body.notes || null,
+    verdict,
+    facts: JSON.stringify(sanitizeFacts(req.body?.facts)),
+    reasons: sanitizeJsonArray(req.body?.reasons),
+    evidence: sanitizeJsonArray(req.body?.evidence),
+    source: req.body?.source ? String(req.body.source).slice(0, 300) : null,
+    notes: req.body?.notes ? String(req.body.notes).slice(0, MAX_TEXT) : null,
     updated_at: Date.now()
   };
   const rows = await db.coinShariah.upsert({ symbol, ...body });
+  invalidateTargets();   // الحكم تغيّر → أعد حساب المستهدفة فوراً
   res.json(rows[0]);
 }));
 
 app.delete('/api/shariah/:symbol', handle(async (req, res) => {
-  await db.coinShariah.remove(req.params.symbol.toUpperCase());
+  const symbol = String(req.params.symbol ?? '').toUpperCase().trim();
+  if (!/^[A-Z0-9_]{2,24}$/.test(symbol)) return res.status(400).json({ error: 'رمز غير صالح' });
+  await db.coinShariah.remove(symbol);
+  invalidateTargets();
   res.json({ ok: true });
 }));
 
@@ -1377,6 +1454,9 @@ const marketStreams = createMarketStreams({
 setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
 // ربط حالة السوق بصفحة الصحة العميقة
 runtime.marketStats = () => marketStreams.stats();
+// ربط المحدد ووضع الظل بالتشخيص (بعد تهيئة runtime — منع TDZ)
+runtime.rateLimiter = () => rateLimiter.stats();
+runtime.shadow = () => shadow.summary();
 runtime.dataFresh = () => {
   const s = marketStreams.stats();
   const problems = [];
@@ -1597,7 +1677,8 @@ const strategy2Engine = createStrategyEngine({
       bars: Number(process.env.STRATEGY2_CALIB_BARS) || 1500,
       concurrency: Number(process.env.STRATEGY2_CALIB_CONC) || 2
     }
-  }
+  },
+  shadow
 });
 setTimeout(() => strategy2Engine.start(), 95_000); // بعد محرك الفرص الأول (اشتراكات WS متسلسلة)
 
@@ -2193,12 +2274,33 @@ app.get('/api/events/:id', handle(async (req, res) => {
   res.json(row);
 }));
 
+/**
+ * الأنواع المسموح بكتابتها من الواجهة — قائمة بيضاء صريحة.
+ * العلة (C1): كان المسار يقبل أي نوع حدث، فيمكن حقن «فرصة» أو «نتيجة» مزيفة تُستعاد
+ * بعد إعادة التشغيل كأنها حقيقية، وتُفسد إحصاءات الأداء وسجل القرارات. الأنواع
+ * التشخيصية التي يكتبها الخادم نفسه لم تعد قابلة للكتابة من الخارج إطلاقاً.
+ */
+const CLIENT_WRITABLE_EVENT_TYPES = new Set([
+  'decision_analysis', 'decision_analysis_edit', 'decision_entry', 'decision_no_entry',
+  'decision_exit', 'decision_note', 'zone_reviewed', 'zone_feedback',
+  'strategy2_feedback', 'manual_note', 'central_notification', 'choch_check'
+]);
+const MAX_EVENT_TEXT = 4000;
+
 app.post('/api/events', handle(async (req, res) => {
-  const { symbol, type, message, meta } = req.body;
+  const { symbol, type, message, meta } = req.body ?? {};
   if (!symbol || !type || !message) return res.status(400).json({ error: 'symbol, type, message required' });
+  if (!CLIENT_WRITABLE_EVENT_TYPES.has(String(type))) {
+    return res.status(400).json({ error: 'نوع الحدث غير مسموح من الواجهة', allowed: [...CLIENT_WRITABLE_EVENT_TYPES] });
+  }
+  const sym = String(symbol).toUpperCase().slice(0, 24);
+  if (!/^[A-Z0-9_]{2,24}$/.test(sym)) return res.status(400).json({ error: 'رمز غير صالح' });
   const rows = await db.events.create({
-    symbol: symbol.toUpperCase(), type, message,
-    meta: meta ? JSON.stringify(meta) : null,
+    symbol: sym,
+    type: String(type),
+    // تقليم النصوص: يمنع تضخيم السجل ومحتوى ضار
+    message: String(message).slice(0, MAX_EVENT_TEXT),
+    meta: meta ? String(typeof meta === 'string' ? meta : JSON.stringify(meta)).slice(0, 20000) : null,
     ts: Date.now()
   });
   res.json(rows[0]);
@@ -2397,6 +2499,14 @@ const shutdown = async (signal) => {
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
+// ربط أقسام الجاهزية بالعيّنات المحفوظة (دليل الحكم على 72 ساعة)
+health.addSection('market', () => { try { return runtime.marketStats(); } catch { return null; } });
+health.addSection('targets', () => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } });
+health.addSection('shariah', () => { try { return runtime.shariahVerdicts(); } catch { return null; } });
+health.addSection('dataFresh', () => { try { return runtime.dataFresh(); } catch { return null; } });
+health.addSection('workers', () => { try { return runtime.workers?.() ?? null; } catch { return null; } });
+health.addSection('rateLimiter', () => { try { return runtime.rateLimiter?.() ?? null; } catch { return null; } });
+
 // عيّنات الصحة الدورية — دليل التشغيل المستمر يُكتب في القاعدة كل 5 دقائق
 const healthSampler = health.startSampler({
   db,
@@ -2488,6 +2598,17 @@ const runShariahJob = async (label) => {
 };
 setTimeout(() => void runShariahJob('إقلاع'), 12_000);
 setInterval(() => void runShariahJob('دوري'), 30 * 60 * 1000);
+
+/**
+ * سياسة الاحتفاظ بالبيانات — تمنع امتلاء القاعدة بتشخيصات متكررة.
+ * القواعد المحمية (النتائج، القرارات، المعايرات، التحليلات، الأحكام) لا تُمس.
+ */
+const retention = startRetention({
+  db,
+  intervalMs: Number(process.env.RETENTION_HOURS || 12) * 3600_000,
+  log: console
+});
+const retentionJob = health.register('retention', { stallMs: 26 * 3600_000 });
 
 // ---- مزامنة دورية بالفرق + بث التغييرات لحظياً ----
 const SYNC_MS = (Number(process.env.SYMBOLS_SYNC_MIN) || 30) * 60 * 1000;

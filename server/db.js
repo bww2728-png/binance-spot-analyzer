@@ -33,12 +33,58 @@ const BINANCE_HOSTS = [
   'https://api-gcp.binance.com'
 ];
 
-async function fetchBinanceJson(path, timeoutMs = 30000) {
+/**
+ * محدّد معدل موحّد لكل نداءات بينانس REST (إصلاح B6).
+ * قبل التوصيل: كل محرك كان يطلق طلباته بلا تنظيم مشترك، وعند 429/418 كان الكود
+ * ينتقل لمضيف آخر — وهو ما يزيد خطر الحظر الفعلي لعنوان الخادم لأن الرفض بسبب
+ * المعدل لا المضيف. الآن: دلو أوزان بأولويات (حي > معايرة > تاريخي)، واحترام
+ * Retry-After، وتهدئة إجبارية عند الرفض.
+ * ملاحظة: rateLimiter قابل للحقن من الاختبارات (بلا شبكة).
+ */
+let rateLimiter = null;
+export function setRateLimiter(limiter) { rateLimiter = limiter; }
+
+function pathWeightOf(path) {
+  const p = String(path).split('?')[0];
+  const W = {
+    '/api/v3/klines': 2,
+    '/api/v3/ticker/price': 2,
+    '/api/v3/exchangeInfo': 20,
+    '/api/v3/depth': 5,
+    '/api/v3/aggTrades': 2
+  };
+  return W[p] ?? 2;
+}
+
+/** أولوية الطلب مشتقة من مساره: الاستطلاع الحي أولى، والبيانات العميقة أخيراً */
+function priorityOf(path, explicit) {
+  if (explicit) return explicit;
+  if (String(path).includes('/ticker/price')) return 'live';
+  if (String(path).includes('/klines')) return 'calibration';
+  return 'history';
+}
+
+async function fetchBinanceJson(path, timeoutMs = 30000, { priority, weight } = {}) {
+  // الحصول على دور قبل أي نداء — نقطة الاختناق الوحيدة
+  if (rateLimiter) {
+    await rateLimiter.acquire(priorityOf(path, priority), weight ?? pathWeightOf(path));
+  }
   let lastErr;
   for (const host of BINANCE_HOSTS) {
     try {
       const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!res.ok) { lastErr = new Error(`HTTP ${res.status} from ${host}`); continue; }
+      if (!res.ok) {
+        const status = res.status;
+        // 429/418 بسبب المعدل: تُبلَّغ للمحدد ليوقف كل الطلبات بدل تجربة مضيف آخر
+        if (status === 429 || status === 418) {
+          const retryAfter = Number(res.headers.get('retry-after'));
+          rateLimiter?.report(status, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0);
+          lastErr = new Error(`HTTP ${status} (rate limited) from ${host}`);
+          continue;
+        }
+        lastErr = new Error(`HTTP ${status} from ${host}`);
+        continue;
+      }
       return await res.json();
     } catch (e) {
       lastErr = e;
@@ -444,6 +490,47 @@ const db = {
     },
     get: (id) => rest(`/events_log?id=eq.${Number(id)}&select=*&limit=1`).then(rows => rows[0] ?? null),
     create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
+    /* ——— عمليات سياسة الاحتفاظ (حذف مقيّد بالموافقة المعتمدة) ——— */
+    /** قراءة خفيفة لنوع واحد (معرّفات فقط عادةً) — للقطات المناطق */
+    listByType: (type, { select = 'id,symbol', limit = 20000 } = {}) => {
+      const q = new URLSearchParams({ select });
+      q.set('type', `eq.${type}`);
+      q.set('order', 'ts.desc,id.desc');
+      q.set('limit', String(Math.min(Number(limit) || 20000, 50000)));
+      return rest(`/events_log?${q}`);
+    },
+    /** حذف أحداث نوع معيّن قبل طابع زمني */
+    deleteBefore: (type, beforeTs) => rest(
+      `/events_log?type=eq.${encodeURIComponent(type)}&ts=lt.${Number(beforeTs)}`,
+      { method: 'DELETE', prefer: 'return=minimal,count=exact' }
+    ),
+    /** حذف بمعرّفات محددة (دفعات صغيرة لتفادي طول الطلب) */
+    deleteByIds: async (ids) => {
+      let done = 0;
+      for (let i = 0; i < ids.length; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        await rest(`/events_log?id=in.(${chunk.join(',')})`, { method: 'DELETE', prefer: 'return=minimal' });
+        done += chunk.length;
+      }
+      return done;
+    },
+    /** إسقاط الصور من صفوف قديمة مع إبقاء الحدث نفسه (الصور هي الأثقل) */
+    clearImagesBefore: async (type, beforeTs, { limit = 200 } = {}) => {
+      const q = new URLSearchParams({ select: 'id', meta: 'not.is.null' });
+      q.set('type', `eq.${type}`);
+      q.set('ts', `lt.${Number(beforeTs)}`);
+      q.set('limit', String(limit));
+      const rows = await rest(`/events_log?${q}`);
+      if (!rows?.length) return 0;
+      const ids = rows.map(r => r.id);
+      // الحقول التي تحمل الصور في صفوف الأحداث
+      await rest(`/events_log?id=in.(${ids.join(',')})`, {
+        method: 'PATCH',
+        body: { meta: null, image: null, screenshot: null },
+        prefer: 'return=minimal'
+      });
+      return ids.length;
+    },
     /** سجل أحداث الفرص الحية (نشر + حسم) — التاريخ الدائم للوحة التحكم */
     liveOppEvents: (sinceTs, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });
@@ -453,14 +540,19 @@ const db = {
       q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
       return rest(`/events_log?${q}`);
     },
-    /** أحداث دورة الحياة (sweep/reclaim/published/closed) — وقود الاستعادة بعد إعادة التشغيل */
+    /**
+     * أحداث دورة الحياة (sweep/reclaim/published/closed) — وقود الاستعادة بعد إعادة التشغيل.
+     * إصلاح A9: كان الترتيب تصاعدياً مع حد أقصى، فيجلب **أقدم** الأحداث ويُسقط الأحدث —
+     * فتُستعاد حالة قديمة أو ناقصة بعد إعادة التشغيل. الآن يجلب الأحدث (تنازلياً) ثم
+     * يُعيد ترتيبها تصاعدياً ليبقى عقد المستدعين كما هو.
+     */
     liveLifecycle: (sinceTs, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });
       q.set('type', 'eq.live_lifecycle');
       q.set('ts', `gte.${Number(sinceTs) || 0}`);
-      q.set('order', 'ts.asc,id.asc');
+      q.set('order', 'ts.desc,id.desc');
       q.set('limit', String(Math.min(Number(limit) || 2000, 5000)));
-      return rest(`/events_log?${q}`);
+      return rest(`/events_log?${q}`).then(rows => rows.reverse());
     },
     /** أحداث «الفرص الحية — استراتيجيتي» (نشر + حسم) — استمرارية دائمة بلا DDL */
     strategy2Events: (sinceTs, limit = 2000) => {
@@ -485,14 +577,18 @@ const db = {
       },
       prefer: 'return=representation'
     }),
-    /** كل تصحيحات strategy2 (بما فيها الإلغاءات) — يطبق المحرك الإلغاء على النسخ */
+    /**
+     * كل تصحيحات strategy2 (بما فيها الإلغاءات) — يطبق المحرك الإلغاء على النسخ.
+     * إصلاح A9: نفس علة liveLifecycle — كان يجلب أقدم التصحيحات فيضيع أحدثها.
+     * إلغاء تصحيح سابق يعتمد على أحدث حدث، فغيابه يعني تطبيق حالة ملغاة.
+     */
     strategy2FeedbackEvents: (sinceTs = 0, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });
       q.set('type', 'eq.strategy2_feedback');
       q.set('ts', `gte.${Number(sinceTs) || 0}`);
-      q.set('order', 'ts.asc,id.asc');
+      q.set('order', 'ts.desc,id.desc');
       q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
-      return rest(`/events_log?${q}`).then(rows => rows.map(r => {
+      return rest(`/events_log?${q}`).then(rows => rows.reverse()).then(rows => rows.map(r => {
         try { return JSON.parse(r.meta ?? '{}'); } catch { return null; }
       }).filter(Boolean));
     },
