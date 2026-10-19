@@ -3,6 +3,8 @@ FROM node:22-alpine AS client-build
 WORKDIR /app/client
 COPY client/package.json client/package-lock.json ./
 RUN npm ci
+# الوحدة المشتركة (منطق التصنيف الشرعي) تقرأها الواجهة من خارج مجلدها
+COPY shared/ /app/shared/
 COPY client/ ./
 RUN npm run build
 
@@ -10,13 +12,19 @@ RUN npm run build
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-# سقف heap يترك هامشاً للذاكرة الأصلية داخل حاوية Railway الصغيرة (إصلاح OOM: كان 455MB بلا سقف فينهار)
-ENV NODE_OPTIONS=--max-old-space-size=460
+# سقف heap صريح: بدونه يتضخّم الـ heap حتى حد الحاوية فيُقتل الخادم بـOOM بلا سبب ظاهر.
+# قياس على التشغيل الحقيقي: الـ heap بلغ 512MB مع الشموع المخزّنة كنصوص (237K شمعة)،
+# وكان السقف السابق 460MB أي أن الخادم كان يُقتل عند أول حمل حقيقي.
+# بعد تخزين الشموع كأرقام وإزاحة الفحص الثقيل إلى worker، صار السقف 900MB كافياً
+# مع هامش للتشغيل الطويل، وأي تجاوز يظهر كخطأ JS واضح لا كقتل صامت.
+ENV NODE_OPTIONS=--max-old-space-size=900
 
 # نسخ كامل مجلد الخادم (index/db/research/cases/archive/liquidity/...)
 # مهم: أي ملف جديد يضاف إلى server/ يُلتقط تلقائياً — القوائم الجزئية كانت تُسقط ملفات وتُسقط العقدة
 COPY server/ /app/server/
 RUN cd /app/server && npm ci --omit=dev
+# الوحدة المشتركة: يستوردها الخادم لحساب الحكم الشرعي بلا متصفح
+COPY shared/ /app/shared/
 COPY --from=client-build /app/client/dist ./client/dist
 
 EXPOSE 8080

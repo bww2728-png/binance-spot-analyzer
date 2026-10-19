@@ -25,10 +25,52 @@ import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
 import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams } from './market/streams.mjs';
+import { createHealth } from './health.mjs';
+import { cpus } from 'node:os';
+import { buildVerdictRow, builtinBases } from './shariah.mjs';
+import { createWorkerPool } from './services/workerPool.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const STARTED_AT = Date.now();
+/** قياس صحة النظام من داخل العملية (ذاكرة/تأخر حلقة/دورات المحركات) */
+const health = createHealth({ startedAt: STARTED_AT });
+
 const app = express();
+
+/**
+ * مُجمّع عمال للأعمال الثقيلة (فحص السيولة التاريخي).
+ * العلة المُصلَحة (مقيسة بالتنميط): scanHistory يشتغل مرة لكل شمعة (O(n²)) ومعماريته
+ * البصرية استهلكت 59% من زمن المعالج بشكل متزامن، فجمّدت معالجة البث حتى 3.9 ثانية
+ * وتأخّرت طلبات HTTP. هنا يُنفَّذ في خيوط منفصلة بنتيجة مطابقة حرفياً.
+ * الحجم محدود بحصة المعالج المعلنة في الحاوية، مع عامل احتياطي للتزامن.
+ */
+// لا يزيد العمال على حصة المعالج المتاحة: نواة واحدة = عامل واحد (منع التنافس على الحلقة)
+const HEAVY_WORKERS = Math.max(1, Math.min(4, Number(process.env.HEAVY_WORKERS) || Math.max(1, Math.min(2, cpus().length - 1 || 1))));
+const workerPool = createWorkerPool({
+  size: HEAVY_WORKERS,
+  taskTimeoutMs: Number(process.env.WORKER_TASK_TIMEOUT_MS) || 180_000,
+  log: console
+});
+/** تنفيذ فحص السيولة خارج حلقة الأحداث مع احتياطي متزامن عند غياب العمال */
+const scanHistoryAsync = async (args, timeoutMs = Number(process.env.WORKER_TASK_TIMEOUT_MS) || 180_000) => {
+  try {
+    return await workerPool.run('scanHistory', args, { timeoutMs });
+  } catch (e) {
+    health.notePersist({ ok: false, error: `worker: ${e.message}` });
+    console.error('[workers] تعذّر الفحص خارج الحلقة — تحويل للمسار المتزامن:', e.message);
+    return scanHistory(args);
+  }
+};
+
+/** حالة تشغيل مشتركة تُبلّغ عنها المحركات (تُقرأ في /api/health/deep) */
+const runtime = {
+  marketStats: () => null,
+  targets: () => ({ count: null, at: 0 }),
+  targetsSource: () => null,
+  shariahVerdicts: () => ({ count: null, at: 0 }),
+  dataFresh: () => ({ ok: null, reason: 'غير مُهيّأ' }),
+};
 
 // نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
 app.get('/healthz', (req, res) => res.json({ ok: true, up: Date.now() }));
@@ -38,6 +80,25 @@ app.get('/readyz', (req, res) => {
   const distDir = path.join(__dirname, '..', 'client', 'dist');
   const dist = fs.existsSync(path.join(distDir, 'index.html'));
   res.status(dist ? 200 : 503).json({ ok: dist, dist, up: Date.now(), uptime: process.uptime() });
+});
+
+/**
+ * صفحة الصحة العميقة — الحالة الحقيقية للنظام في نداء واحد:
+ * الذاكرة وحدّ الحاوية، تأخر حلقة الأحداث، حداثة بيانات السوق، دورات كل محرك،
+ * وأعطال الحفظ. تُقرأ آلياً ومن لوحة التحكم. لا تعتمد على أي خدمة خارجية.
+ */
+app.get('/api/health/deep', (req, res) => {
+  const snap = health.snapshot();
+  let fresh = { ok: null, reason: 'غير مُهيّأ' };
+  try { fresh = runtime.dataFresh() ?? fresh; } catch (e) { fresh = { ok: false, reason: `فشل القياس: ${e.message}` }; }
+  res.json({
+    ...snap,
+    market: (() => { try { return runtime.marketStats(); } catch { return null; } })(),
+    workers: (() => { try { return runtime.workers?.() ?? null; } catch { return null; } })(),
+    targets: (() => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } })(),
+    shariah: (() => { try { return runtime.shariahVerdicts(); } catch { return null; } })(),
+    dataFresh: fresh
+  });
 });
 // ترتيب Express حرج: هذه الوسائط قبل أي مسار وإلا لا تُنفّذ عليه (المسارات المسجلة أولاً تتجاوز المسجلة لاحقاً)
 // ترويسات أمنية أساسية — بدون CSP صارم يكسر CDN، وSAMEORIGIN يحفظ الإطارات الداخلية
@@ -353,27 +414,29 @@ const persistAutoFacts = async (symbol, research) => {
   });
   const existing = await db.coinShariah.list();
   const prev = existing.find(r => r.symbol === symbol);
+  const factsObj = hasAny ? gated : (prev ? JSON.parse(prev.facts || '{}') : {});
+  // الحكم يُحسب على الخادم (المنطق الحتمي نفسه) بدل تثبيته "غير محسوم" انتظاراً للمتصفح.
+  // قبل الإصلاح: كل صف آلي كان يبقى uncertain فلا يدخل أي محرك التحليل بلا فتح التطبيق.
+  const computed = buildVerdictRow(symbol, { ...(prev || {}), facts: JSON.stringify(factsObj) }, {
+    previous: prev?.verdict ?? null
+  });
   const row = {
     symbol,
-    verdict: hasAny ? 'uncertain' : (prev?.verdict || 'uncertain'),
-    facts: JSON.stringify(hasAny ? gated : (prev ? JSON.parse(prev.facts || '{}') : {})),
-    reasons: JSON.stringify([hasAny
-      ? 'حقائق موثقة آلياً من المصادر — يقيّمها محرك القواعد الحتمي في الواجهة'
-      : (research.status === 'not_found'
+    verdict: computed.verdict,
+    facts: JSON.stringify(factsObj),
+    reasons: hasAny
+      ? JSON.stringify(computed.reasons)
+      : JSON.stringify([research.status === 'not_found'
         ? 'العملة غير موجودة في CoinGecko ولا CoinMarketCap — لا يتوفر بحث آلي لها، والتوثيق اليدوي متاح'
-        : 'لا توجد بيانات كافية بثقة مقبولة — تبقى للتحقق وإعادة البحث دورياً')]),
-    evidence: '[]',
-    source: hasAny
-      ? `${AUTO_SOURCE} — ${research.geckoId}`
-      : (research.status === 'not_found'
-        ? 'بحث آلي: غير موجودة في CoinGecko ولا CoinMarketCap'
-        : `${AUTO_SOURCE} (بلا نتيجة كافية)`),
+        : 'لا توجد بيانات كافية بثقة مقبولة — تبقى للتحقق وإعادة البحث دورياً']),
+    evidence: JSON.stringify(computed.evidence ?? []),
+    source: hasAny ? `${AUTO_SOURCE} — ${computed.source || ''} (${research.geckoId ?? '-'})` : `${AUTO_SOURCE} (بلا نتيجة كافية)`,
     notes: meta,
     updated_at: Date.now()
   };
   const saved = await db.coinShariah.upsert(row);
-  /* سجل تغيير الحكم: عند إعادة بحث صف آلي سابق تختلف نتيجته المحسوبة عن سابقه */
-  return { saved: saved[0], previous: prev, hasAny };
+  invalidateTargets(); // الحكم تغيّر → أعد حساب المستهدفة فوراً
+  return { saved: saved[0], previous: prev, hasAny, verdict: computed.verdict };
 };
 
 app.post('/api/shariah-research/changes', handle(async (req, res) => {
@@ -604,38 +667,143 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
 
 // ==================== الباك تيست + الفرص الحية (walk-forward + حلقة تعلم مستمرة) ====================
 
-// قائمة المستهدفة: الحلال + غير الباركود فقط — بأسماء الأعمدة الفعلية:
-// coin_shariah.verdict ('halal' | 'haram')، coin_flags.barcode (bool بأساس بدون لاحقة مثل 'BTC')
+// قائمة المستهدفة: العملات التي حكمها «حلال» بصيغة زوج USDT حقيقي.
+// التغيير الجوهري عن السابق:
+//  1) الحكم يُحسب على الخادم (server/shariah.mjs) فلا يتوقف النظام على فتح المتصفح.
+//  2) جدول التصنيف يُقرأ مرة كل دقيقة ويُخزَّن كأسماء فقط (بلا نصوص الأدلة الضخمة)
+//     بدل جلبه كاملاً في كل نداء من كل محرك.
+//  3) الباركود لم يُعد مُستبعِداً: صار وسم تحذيري يُمرَّر مع الفرصة (التعليم لا الإخفاء)،
+//     وفق القرار المعتمد.
+const TARGETS_TTL_MS = Number(process.env.TARGETS_CACHE_MS) || 60_000;
+let targetsCache = { at: 0, list: [], source: 'غير محسوبة', halal: 0, haram: 0, uncertain: 0 };
+
+/** إبطال فوري لكاش المستهدفات بعد أي تغيير في التصنيف */
+const invalidateTargets = () => { targetsCache = { ...targetsCache, at: 0 }; };
+
+/**
+ * قائمة المستهدفة = الحلال ∩ القابل للتداول فعلاً في السبوت.
+ * سبب التقاطع: 43 رمزاً محكوماً «حلال» بلا سوق على بينانس (رموز مسحوبة أو مفاتيح
+ * مشوّهة مثل PYUSDT_BASEUSDT وUSDTUSDT). إبقاؤها كان يجعل المحركات تجلب لبيانات
+ * معدومة في كل دورة بلا نتيجة، ويسهّل تفسير «فرص» لا حقيقة لها.
+ * هذا ليس تخفيفاً لشرط استراتيجية: الرمز بلا سوق لا يمكن أن يعطي فرصة صحيحة.
+ */
+const computeTargets = async () => {
+  const rows = await db.coinShariah.list().catch(() => []);
+  const counts = { halal: 0, haram: 0, uncertain: 0 };
+  const halalAll = [];
+  const seen = new Set();
+  for (const r of rows || []) {
+    const verdict = String(r?.verdict ?? '').toLowerCase().trim();
+    if (counts[verdict] !== undefined) counts[verdict] += 1;
+    if (verdict !== 'halal') continue;
+    const symbol = String(r?.symbol ?? '').toUpperCase().trim();
+    if (!symbol) continue;
+    if (!/^[A-Z0-9]+USDT$/.test(symbol)) continue;   // يمنع USDTUSDT و PYUSDT_BASEUSDT
+    if (seen.has(symbol)) continue;
+    seen.add(symbol);
+    halalAll.push(symbol);
+  }
+  // القابل للتداول: له سعر حي — مصدر الحقيقة هو سوق بينانس نفسه
+  let tradable = null;
+  try {
+    const prices = await db.binance.allTickerPrices();
+    tradable = new Set(Object.keys(prices || {}));
+  } catch { /* تعذّر الجلب: لا نستبعد شيئاً هذه الدورة (احتياط محافظ) */ }
+  const list = tradable ? halalAll.filter(sym => tradable.has(sym)) : halalAll;
+  return {
+    list, counts, total: (rows || []).length,
+    halalAll: halalAll.length,
+    excluded: halalAll.length - list.length
+  };
+};
+
 const resolveTargets = async (limit = Number.POSITIVE_INFINITY) => {
-  const [sh, flags] = await Promise.all([
-    db.coinShariah.list().catch(() => []),
-    db.coinFlags.list().catch(() => [])
-  ]);
-  const barcode = new Set();
-  for (const f of (flags || [])) {
-    if (f.barcode === true || f.is_barcode === true) {
-      const base = String(f.symbol || '').toUpperCase().trim();
-      if (!base) continue;
-      barcode.add(base);            // أساس
-      barcode.add(base + 'USDT');   // زوج يوسدت
-      barcode.add(base + 'FDUSD');  // زدوج فيديوسدت
+  if (Date.now() - targetsCache.at > TARGETS_TTL_MS) {
+    const { list, counts, total, halalAll, excluded } = await computeTargets();
+    targetsCache = {
+      at: Date.now(), list, halal: counts.halal, haram: counts.haram,
+      uncertain: counts.uncertain, total, halalAll, excluded,
+      source: 'coin_shariah ∩ سوق بينانس'
+    };
+  }
+  const out = targetsCache.list;
+  return limit === Number.POSITIVE_INFINITY ? out : out.slice(0, limit);
+};
+
+/** آخر قائمة مستهدفات محسوبة (للتشخيص بلا إعادة حساب) */
+const targetsSnapshot = () => targetsCache;
+
+// ربط التشخيص بالحالة الفعلية
+runtime.targets = () => ({
+  count: targetsCache.list.length,
+  at: targetsCache.at,
+  halal: targetsCache.halal,
+  excludedNotTradable: targetsCache.excluded ?? null,
+  excludedBarcode: 0   // الباركود لم يعد مُستبعِداً — وسم تحذيري فقط
+});
+runtime.targetsSource = () => targetsCache.source;
+runtime.shariahVerdicts = () => ({
+  at: shariahState.lastRunAt,
+  computed: shariahState.computed,
+  total: shariahState.total ?? null,
+  changed: shariahState.changed,
+  errors: shariahState.errors,
+  lastError: shariahState.lastError
+});
+
+/**
+ * حساب الحكم الشرعي للمشاريع المعروفة على الخادم (بلا متصفح).
+ * يعمل عند الإقلاع ثم دورياً، ويكتب فقط عند تغيّر الحكم (سجل نظيف بلا إغراق).
+ * لا يمسّ أي حكم وثّقه المستخدم يدوياً: حقائقه المحفوظة لها الأولوية دائماً.
+ */
+const shariahState = { lastRunAt: 0, computed: 0, changed: 0, errors: 0, lastError: null };
+
+const resolveShariahOnServer = async ({ onlyMissing = false } = {}) => {
+  const symbols = builtinBases().map(b => `${b}USDT`);
+  const existing = await db.coinShariah.list().catch(() => []);
+  const bySymbol = new Map((existing || []).map(r => [String(r.symbol).toUpperCase(), r]));
+  const rows = [];
+  const changes = [];
+  for (const symbol of symbols) {
+    const prior = bySymbol.get(symbol) ?? null;
+    if (onlyMissing && prior) continue;
+    try {
+      const row = buildVerdictRow(symbol, prior, { previous: prior?.verdict ?? null });
+      const { _changed, _from, _factsSource, ...clean } = row;
+      // لا نكتب إلا ما تغيّر فعلاً أو ما لم يكن محفوظاً — يمنع 1000 كتابة كل دورة
+      if (!prior || prior.verdict !== clean.verdict || prior.source !== clean.source) rows.push(clean);
+      if (prior && prior.verdict !== clean.verdict) {
+        changes.push({ symbol, from: prior.verdict, to: clean.verdict, factsSource: _factsSource });
+      }
+    } catch (e) {
+      shariahState.errors += 1;
+      shariahState.lastError = String(e?.message ?? e).slice(0, 200);
     }
   }
-  const halal = (sh || [])
-    .filter(r => {
-      const verdict = String(r.verdict ?? '').toLowerCase().trim();
-      if (verdict) return verdict === 'halal';
-      return r.is_halal !== false; // احتياطي فقط لو تغيّر المخطط
-    })
-    .map(r => r.symbol)
-    .filter(s => /^[A-Z0-9]+USDT$/.test(s)); // زوج يوسدت حقيقي
-  const seen = new Set();
-  return halal.filter(s => {
-    if (seen.has(s) || barcode.has(s)) return false;
-    seen.add(s);
-    return true;
-  }).slice(0, limit === Number.POSITIVE_INFINITY ? undefined : limit);
+  const chunk = 200;
+  for (let i = 0; i < rows.length; i += chunk) {
+    await db.coinShariah.upsertChunk(rows.slice(i, i + chunk)).catch((e) => {
+      shariahState.errors += 1;
+      shariahState.lastError = String(e?.message ?? e).slice(0, 200);
+    });
+  }
+  for (const c of changes) {
+    await db.events.append({
+      symbol: c.symbol,
+      type: 'shariah_auto_change',
+      message: `تغيّر الحكم الآلي: ${c.from} ← ${c.to}`,
+      meta: JSON.stringify(c),
+      ts: Date.now()
+    }).catch(() => undefined);
+  }
+  shariahState.lastRunAt = Date.now();
+  shariahState.computed = rows.length;
+  shariahState.changed = changes.length;
+  shariahState.total = symbols.length;
+  if (changes.length || rows.length) invalidateTargets();
+  return { computed: rows.length, changed: changes.length, total: symbols.length };
 };
+
 
 // محرك مناطق السيولة مستقل: لا يستخدم backtestState أو liveState ولا يقفل أياً منهما.
 const liquidityState = {
@@ -749,6 +917,7 @@ const runLiquidityLiveRotation = async () => {
     liquidityState.error = e.message;
   } finally {
     liquidityState.liveBusy = false;
+    liquidityJob.beat({ extra: { pairsDone: liquidityState.livePairsDone, pairsTotal: liquidityState.livePairsTotal, results: liquidityState.liveResults.length } });
   }
 };
 
@@ -769,7 +938,7 @@ const runLiquidityHistoryRotation = async () => {
         try {
           const raw = await db.binance.klines(symbol, timeframe, 1000);
           const candles = normalizeCandles(raw);
-          const zones = scanHistory({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200, biasPerKind: liquidityState.adjustment.visualBias || {} });
+          const zones = await scanHistoryAsync({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200, biasPerKind: liquidityState.adjustment.visualBias || {} });
           liquidityState.historyResults = mergeLiquidityResults(liquidityState.historyResults, zones.map(zone => ({ ...zone, mode: 'history', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex })));
         } catch { /* مستقل */ }
       }
@@ -891,7 +1060,8 @@ app.post('/api/liquidity-zones/run-custom', handle(async (req, res) => {
   if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return res.status(400).json({ error: 'مدى زمني غير صالح' });
   const raw = await loadKlinesPaginated(db, symbol, timeframe, 5000, { startTime: fromTs, endTime: toTs, maxPages: 8 });
   const candles = normalizeCandles(raw);
-  const results = scanHistory({ symbol, timeframe, candles, step: 1, maxZones: 1000 });
+  // كانت تُنفَّذ في حلقة الأحداث داخل الطلب فتجمّد الخادم دقائق (step:1 = فحص لكل شمعة)
+  const results = await scanHistoryAsync({ symbol, timeframe, candles, step: 1, maxZones: 1000 });
   // شموع نفس النافذة (مضغوطة) للشارت المستقل — بلا إعادة جلب من العميل
   const candlesCompact = candles.map(c => [c.time, c.open, c.high, c.low, c.close]);
   res.json({ ok: true, symbol, timeframe, fromTs, toTs, results, candles: candlesCompact });
@@ -973,7 +1143,7 @@ app.get('/api/market-read', handle(async (req, res) => {
       const raw = await loadKlinesPaginated(db, symbol, timeframe, 300, { maxPages: 2 });
       const candles = normalizeCandles(raw);
       if (candles.length < 30) continue;
-      const zones = scanHistory({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200 });
+      const zones = await scanHistoryAsync({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200 });
       const lastPrice = candles[candles.length - 1].close;
       const structure = findStructure(candles);
       const map = activeZonesMap(zones, lastPrice);
@@ -1134,6 +1304,7 @@ const runCycle = async () => {
     console.error('[backtest] cycle failed:', e.message);
   } finally {
     backtestState.busy = false;
+    backtestJob.beat({ extra: { cycles: backtestState.cycles ?? null } });
   }
 };
 
@@ -1200,9 +1371,38 @@ const marketStreams = createMarketStreams({
     maxBarsKept: Number(process.env.MARKET_MAX_BARS) || 400,
     maxTradesPerSymbol: Number(process.env.MARKET_MAX_TRADES) || 1500,
     maxConns: Number(process.env.MARKET_MAX_CONNS) || 6
-  }
+  },
+  fetchAllPrices: () => db.binance.allTickerPrices()
 });
 setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
+// ربط حالة السوق بصفحة الصحة العميقة
+runtime.marketStats = () => marketStreams.stats();
+runtime.dataFresh = () => {
+  const s = marketStreams.stats();
+  const problems = [];
+  const cfg = marketStreams.config ?? {};
+  if (!s.connected) problems.push('بث السوق غير متصل');
+  if (s.priceAgeMs === null) problems.push('لا أسعار بعد');
+  else if (s.priceAgeMs > marketStreams.priceStaleMs) problems.push(`آخر سعر عمره ${Math.round(s.priceAgeMs / 1000)}ث`);
+  if (s.silentConns > 0) problems.push(`${s.silentConns} اتصال صامت`);
+  // نقيس *نسبة* العملات المتقادمة لا «أحدث سعر في السوق» فقط:
+  // وجود سعر واحد حديث لا يعني أن السوق متابَع — 39% من الرموز قد تكون مجمّدة.
+  const maxStaleRatio = Number(process.env.STALE_PRICE_RATIO_MAX || 0.05);
+  if (s.stalePriceRatio !== null && s.stalePriceRatio > maxStaleRatio) {
+    problems.push(`${s.stalePrices} رمزاً سعره متقادم (${Math.round(s.stalePriceRatio * 100)}%)`);
+  }
+  if (s.staleCandles > 0) {
+    const maxStaleKeys = Number(process.env.STALE_CANDLE_KEYS_MAX || 0);
+    if (s.staleCandles > maxStaleKeys) problems.push(`${s.staleCandles} مفتاح شموع متأخر`);
+  }
+  if (!s.klineSubs) problems.push('لا شموع مشتركة بعد');
+  return {
+    ok: problems.length === 0,
+    reason: problems.join(' · ') || 'البيانات حديثة',
+    stalePriceRatioMax: maxStaleRatio,
+    stats: s
+  };
+};
 
 // ═══ محرك «الفرص الحية» — دخول شراء عبر سويب مناطق SSL + أدوات الأوردر فلو ═══
 // مصدر المناطق: مخزون محرك مناطق السيولة الحي (بلا إعادة كشف). التتبع مستمر بلا انقطاع،
@@ -1269,7 +1469,8 @@ const liveOppEngine = createLiveOpportunityEngine({
       bars: Number(process.env.LIVE_CALIB_BARS) || 1000,
       concurrency: Number(process.env.LIVE_CALIB_CONC) || 2
     }
-  }
+  },
+  workers: workerPool
 });
 setTimeout(() => {
   // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
@@ -2172,6 +2373,121 @@ server.listen(PORT, () => {
   const distOk = fs.existsSync(path.join(distDir, 'index.html'));
   console.log(`[server] listening on http://localhost:${PORT} (+ ws:/ws) dist=${distOk ? 'ok' : 'MISSING'}`);
 });
+
+// عدّاد الأعمال الثقيلة في صفحة الصحة (طابور العمال ومهلهم وأعطالهم)
+runtime.workers = () => workerPool.snapshot();
+runtime.marketStatsRaw = runtime.marketStats;
+
+/**
+ * إغلاق سليم: يحفظ نبضة أخيرة ثم يوقف العمال.
+ * عند أي خطأ قاتل يخرج الخادم فوراً بلا حفظ — وهذا يُصلحه.
+ */
+let shuttingDown = false;
+const shutdown = async (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] إغلاق سليم (${signal})…`);
+  try { await healthSampler.write(); } catch { /* نبضة أخيرة اختيارية */ }
+  try { await workerPool.close(); } catch { /* ignore */ }
+  try { marketStreams.stop(); } catch { /* ignore */ }
+  try { server.close(); } catch { /* ignore */ }
+  // مهلة قصوى للإغلاق ثم خروج إجباري
+  setTimeout(() => process.exit(0), 3000).unref?.();
+};
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+
+// عيّنات الصحة الدورية — دليل التشغيل المستمر يُكتب في القاعدة كل 5 دقائق
+const healthSampler = health.startSampler({
+  db,
+  intervalMs: Number(process.env.HEALTH_SAMPLE_MIN || 5) * 60 * 1000,
+  log: console
+});
+
+// مراقب دوري لحداثة بيانات السوق: يحاول إصلاح فجوات الشموع ويُظهر الحالة
+setInterval(() => {
+  try {
+    const r = marketStreams.refreshStaleKlines({ maxKeys: 30 });
+    if (r > 0) console.log(`[market-streams] re-seeded ${r} stale kline keys`);
+  } catch (e) {
+    console.error('[market-streams] stale repair failed:', e.message);
+  }
+}, 60_000);
+
+// ——— الحكم الشرعي على الخادم: النظام يعمل بلا متصفح ———
+// الإصلاح الجوهري: كانت الأحكام تُحسب في المتصفح فقط، فتبقى كل العملات «غير محسومة»
+// حتى يفتح أحدٌ التطبيق، فترفض المحركات كل المستهدفات وتتوقف عن العمل.
+const shariahJob = health.register('shariah-resolver', { stallMs: 30 * 60 * 1000 });
+
+/**
+ * نبضات المحركات الخلفية — أساس كشف التعليق في التشغيل المستمر.
+ * مُهل التعليق مشتقة من دورة كل محرك الفعلية (لا أرقام عشوائية).
+ */
+const liquidityJob = health.register('liquidity-zones', { stallMs: 1_800_000 });   // كل 5 دقائق
+const liveJob = health.register('live-opportunities', { stallMs: 900_000 });        // كل 5 ثوان
+const backtestJob = health.register('backtest', { stallMs: 1_800_000 });            // كل 5 دقائق
+const strategy2Job = health.register('strategy2', { stallMs: 900_000 });            // كل 15 ثانية
+const marketJob = health.register('market-streams', { stallMs: 300_000 });          // دورية دقيقة
+
+/**
+ * نبضات محركات الفرص واستراتيجيتي: تُقرأ حالتهما المعلنة دورياً.
+ * إن توقف العدّاد (cycle) عن التقدّم فالتقرير يكشف التعليق قبل تراكم الأثر.
+ */
+let lastLiveCycle = -1;
+let lastS2Cycle = -1;
+setInterval(() => {
+  try {
+    const st = liveOppEngine.getStatus?.();
+    if (st) {
+      const advanced = st.cycle !== lastLiveCycle;
+      lastLiveCycle = st.cycle;
+      liveJob.beat({ extra: { cycle: st.cycle, tracked: st.tracked ?? null, lastRunMs: st.lastRunMs ?? null } });
+      if (!advanced && st.busy) liveJob.set({ busy: true });
+    }
+  } catch (e) { liveJob.fail(e); }
+  try {
+    const st2 = strategy2Engine.getStatus?.();
+    if (st2) {
+      lastS2Cycle = st2.cycle;
+      strategy2Job.beat({ extra: { cycle: st2.cycle, scope: st2.scope, busy: st2.busy } });
+    }
+  } catch (e) { strategy2Job.fail(e); }
+}, 30_000);
+/** الإبلاغ عن التعليق من قراءة الحالة لا من الدورة نفسها */
+setInterval(() => {
+  for (const [job, name] of [[liveJob, 'live-opportunities'], [strategy2Job, 'strategy2']]) {
+    const snap = health.snapshot().engines.find(e => e.name === name);
+    if (snap?.stalled) console.error(`[health] تحذير: المحرك ${name} متوقف منذ ${Math.round(snap.sinceCycleMs / 1000)}ث`);
+  }
+}, 120_000);
+
+/** نبضة دورية للسوق: تُسجّل حالة الاتصال والتقادم فلا تبدو الحلقة ميتة */
+setInterval(() => {
+  try {
+    const st = marketStreams.stats();
+    marketJob.beat({ extra: {
+      connected: st.connected, streams: st.streams,
+      stalePriceRatio: st.stalePriceRatio, staleCandles: st.staleCandles,
+      quarantined: st.quarantinedKeys
+    } });
+  } catch (e) { marketJob.fail(e); }
+}, 60_000);
+
+const runShariahJob = async (label) => {
+  const t0 = Date.now();
+  try {
+    const r = await resolveShariahOnServer();
+    shariahJob.beat({ ms: Date.now() - t0, extra: { computed: r.computed, changed: r.changed, total: r.total } });
+    if (r.computed || r.changed) {
+      console.log(`[shariah] ${label}: حُسب ${r.computed} من ${r.total} — تغيّر ${r.changed}`);
+    }
+  } catch (e) {
+    shariahJob.fail(e);
+    console.error(`[shariah] ${label} فشل:`, e.message);
+  }
+};
+setTimeout(() => void runShariahJob('إقلاع'), 12_000);
+setInterval(() => void runShariahJob('دوري'), 30 * 60 * 1000);
 
 // ---- مزامنة دورية بالفرق + بث التغييرات لحظياً ----
 const SYNC_MS = (Number(process.env.SYMBOLS_SYNC_MIN) || 30) * 60 * 1000;

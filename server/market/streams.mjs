@@ -29,16 +29,38 @@ export function createMarketStreams({
   log = console,
   now = () => Date.now(),
   seedKlines = null, // (symbol, tf, limit) => Promise<rawRows[]>
+  fetchAllPrices = null, // () => Promise<{ [SYMBOL]: price }> — استطلاع REST احتياطي للسعر
   config = {}
 } = {}) {
   const cfg = {
-    maxStreamsPerConn: 900,
+    /**
+     * سقف الستريمات لكل اتصال. حدّ بينانس الشكلي 1024، لكن حشو كل الستريمات على
+     * اتصال واحد يجعل الإنتاج الفعلي أبطأ من الطلب، فتتأخر نبضات الأسعار وتتقادم
+     * (قياس: 880 ستريماً على اتصال واحد أعطى ~33 رسالة/ث بينما المطلوب ~860، فتراجعت
+     * نسبة الرموز حديثة السعر من 105/180 إلى 65/180 خلال 20 ثانية).
+     * التوزيع على اتصالات متعددة يرفع الإنتاجية ويعطي عزلاً عند انقطاع اتصال.
+     */
+    maxStreamsPerConn: Number(process.env.MAX_STREAMS_PER_CONN) || 250,
     controlBatchMs: 300,
     controlBatchSize: 200,        // عدد الستريمات في رسالة SUBSCRIBE الواحدة
     reconnectBaseMs: 2000,
     reconnectMaxMs: 30_000,
     proactiveReconnectMs: 23.5 * 3600_000,
     livenessTimeoutMs: 90_000,
+    /** عمر السعر الذي يُعدّ بعده قديماً (تُوقف القرارات وتُعلن الحالة) */
+    priceStaleMs: 10_000,
+    /** سقف اشتراكات السعر لكل رمز (نبض 1 ثانية) */
+    maxPriceSubs: Number(process.env.MAX_PRICE_SUBS) || 400,
+    /** سقف عدد الرموز في كاش الأسعار (كل السوق ~1400) */
+    maxPriceSymbols: Number(process.env.MAX_PRICE_SYMBOLS) || 2000,
+    /**
+     * فاصل استطلاع أسعار السوق عبر REST. العلة:
+     * مضيفات البث الإنتاجية محجوبة (451) من عنوان الحاوية، والمتاح `*.vision` يدفع
+     * نبضات السعر على دفعات متقطعة بفجوات تجاوزت 10 ثوان، فتتقادم أسعار الرموز الخاملة
+     * (قياس فعلي: 62% من رموز القرار متقادمة). هذا الاستطلاع يضمن حداثة كل رمز.
+     * الكلفة: طلب واحد ~26KB مضغوطاً لكل دورة، عبر مسار مستقل عن ستريمات البث.
+     */
+    pricePollMs: Number(process.env.PRICE_POLL_MS) || 5000,
     seedLimit: 250,               // خفّض من 500: يكفي warmup (220) + هامش، ويخفض ذاكرة البذر ~50%
     // حجر المفاتيح الميتة (علة OOM مثبتة بالسجلات): رموز محجوبة جغرافياً (451) كانت
     // تُعاد محاولتها بلا نهاية (REST ×3 مضيفين + سجلات) فتخنق الذاكرة والشبكة والسجلات
@@ -53,6 +75,7 @@ export function createMarketStreams({
     aggTradeSubLimit: 0,          // 0 = بلا قص (التوزيع على الاتصالات يتكفل بالحدود)
     klineSubLimit: 0,             // 0 = بلا قص — كل المطلوب يُشترك فعلاً عبر اتصالات إضافية
     maxConns: 6,                  // خفّض من 8: يحد من استهلاك السوكتات والذاكرة
+    hosts: WS_HOSTS,              // قابلة للاستبدال (اختبار اتصال حقيقي/تثبيت مضيف)
     ...config
   };
 
@@ -63,6 +86,10 @@ export function createMarketStreams({
   const seedFails = new Map();       // "SYM|tf" → { fails, quarantinedUntil } (حجر المفاتيح الميتة)
   const trades = new Map();          // symbol → [{price, qty, isBuyerMaker, at}]
   let candleCloseHandlers = new Set();
+  /** "SYM|tf" → زمن فتح آخر شمعة أُعلن إغلاقها (منع تكرار الإعلان لنفس الشمعة بدقة) */
+  const lastClosedBar = new Map();
+  /** "SYM|tf" → زمن فتح أحدث شمعة محفوظة (لكشف الفجوات والتحقق من الحداثة) */
+  const klineLastBar = new Map();
 
   /* ---- الاشتراكات المطلوبة (مستأجرون متعددون: محرك الفرص + محرك الاستراتيجية) ----
    * كل مستهلك يسجّل طلباته بمفتاح tenant، والاتحاد يُشترك به فعلياً موزعاً على الاتصالات. */
@@ -70,6 +97,10 @@ export function createMarketStreams({
   const flowWants = new Map();       // tenant → Set(symbol)
   let wantedKlines = new Set();      // الاتحاد الفعلي
   let wantedFlow = new Set();
+  let wantedPrices = new Set();      // رموز لها اشتراك سعر مضمون النبض (لكل رمز)
+  let pricePollBusy = false;
+  let pricePollTimer = null;
+  const pricePoll = { lastAt: 0, applied: 0, total: 0, failures: 0, lastError: null };
 
   /* ---- الاتصالات المُوزَّعة ----
    * connOwned(id → Set) يبقى عبر إعادة الاتصال — streamOwner(stream → id) لاصق بلا churn.
@@ -106,7 +137,7 @@ export function createMarketStreams({
 
   function openConn(id) {
     if (stopped) return;
-    const host = WS_HOSTS[hostIndex % WS_HOSTS.length];
+    const host = cfg.hosts[hostIndex % cfg.hosts.length];
     // الاتصال الأول يحمل أسعار السوق الإجمالية في URL — البقية تتصل عاراة وتشترك بطلباتها
     const url = id === 1 ? `${host}/stream?streams=!miniTicker@arr` : `${host}/stream`;
     const ws = new WebSocket(url);
@@ -133,6 +164,16 @@ export function createMarketStreams({
           try { ws.ping(); } catch { /* onclose يتبع */ }
         }
       }, 30_000);
+      // مراقب حياة: اتصال أصمّ بلا رسائل (شبكة معلقة بلا إغلاق) يُقطع لإعادة الفتح
+      conn.livenessTimer = setInterval(() => {
+        if (stopped || ws.readyState !== WebSocket.OPEN) return;
+        const silent = now() - (conn.lastMsgAt || 0);
+        if (silent > cfg.livenessTimeoutMs) {
+          log.warn?.(`[market-streams] shard#${id} silent ${Math.round(silent / 1000)}s — recycling`);
+          conn.silentRecycles = (conn.silentRecycles || 0) + 1;
+          try { ws.terminate(); } catch { /* ignore */ }
+        }
+      }, 15_000);
       // إعادة اتصال استباقية قبل قطع بينانس الإجباري (24 ساعة)
       conn.lifetimeTimer = setTimeout(() => {
         try { ws.terminate(); } catch { /* ignore */ }
@@ -142,6 +183,8 @@ export function createMarketStreams({
       for (const s of owned) {
         if (!conn.active.has(s)) scheduleOn(conn, 'sub', s);
       }
+      // إصلاح الفجوات: الشموع التي تأخّرت بعد الانقطاع تُعاد بذرها من REST
+      if (id > 1 || owned.size) setTimeout(() => { if (!stopped) refreshStaleKlines(); }, 3000);
       log.log?.(`[market-streams] connected: ${host} shard#${id} (${owned.size} owned streams)`);
     });
     ws.on('message', (buf) => {
@@ -154,13 +197,14 @@ export function createMarketStreams({
     ws.on('error', () => { /* onclose يتبع */ });
     ws.on('close', () => {
       clearInterval(conn.keepAlive);
+      clearInterval(conn.livenessTimer);
       clearTimeout(conn.lifetimeTimer);
       if (conn.controlTimer) { clearTimeout(conn.controlTimer); conn.controlTimer = null; }
       conns = conns.filter(c => c !== conn);
       if (stopped) return;
       // تراجع أُسّي مع تدوير النقطة — ثم إعادة فتح نفس الشارد باشتراكاته المحفوظة
       attempt += 1;
-      hostIndex = (hostIndex + 1) % WS_HOSTS.length;
+      hostIndex = (hostIndex + 1) % cfg.hosts.length;
       const delay = Math.min(cfg.reconnectMaxMs, cfg.reconnectBaseMs * 2 ** Math.min(attempt, 5));
       log.warn?.(`[market-streams] shard#${id} lost — reconnect in ${delay}ms (attempt ${attempt})`);
       setTimeout(() => { if (!stopped && connOwned.has(id)) openConn(id); }, delay);
@@ -178,17 +222,32 @@ export function createMarketStreams({
       const t = now();
       for (const tick of data) {
         const p = Number(tick?.c);
-        if (tick?.s && Number.isFinite(p)) prices.set(tick.s, { price: p, at: t });
+        if (tick?.s && Number.isFinite(p)) prices.set(tick.s, { price: p, at: t, src: 'arr' });
+        // سقف صريح لمنع نمو الكاش بلا حد لو ظهرت رموز خارج نطاق التحليل
+        if (prices.size > cfg.maxPriceSymbols) prunePrices();
       }
       return;
     }
     const stream = String(msg.stream ?? '');
+    /**
+     * نبض سعر الرمز الواحد. العلة التي يُصلحها:
+     * `!miniTicker@arr` صار يرسل فقط الرموز التي تغيّر سعرها في الثانية (~50-130)،
+     * وستريم الشموع لا يدفع إلا عند وجود صفقة (10-16 ثانية للرموز الخاملة).
+     * فبقي معجم الأسعار متقادماً لمعظم رموز التحليل → قرارات على أسعار قديمة.
+     * هذا الستريم يدفع كل 1000ms لكل رمز مشترك، فهو مصدر سعر القرار المعتمد.
+     */
+    if (stream.includes('@miniTicker')) {
+      const sym = String(data?.s ?? symbolFromStream(stream));
+      const p = Number(data?.c);
+      if (sym && Number.isFinite(p) && p > 0) prices.set(sym, { price: p, at: now(), src: 'ticker' });
+      return;
+    }
     if (stream.includes('@kline_')) {
       const k = data?.k;
       if (!k || !data?.s) return;
       const tf = String(k.i ?? tfFromStream(stream));
       upsertKline(data.s, tf, k);
-      if (k.x === true) notifyCandleClose(data.s, tf, Number(k.c));
+      if (k.x === true) notifyCandleClose(data.s, tf, Number(k.c), k.t);
       return;
     }
     if (stream.includes('@aggTrade')) {
@@ -213,6 +272,8 @@ export function createMarketStreams({
     return `${String(sym).toLowerCase()}@kline_${tf}`;
   };
   const aggStreamOf = (sym) => `${String(sym).toLowerCase()}@aggTrade`;
+  /** نبض سعر مضمون لكل رمز: stream منفصل يدفع كل ثانية حتى بلا صفقات */
+  const priceStreamOf = (sym) => `${String(sym).toLowerCase()}@miniTicker`;
 
   /** تقليم مخزن الشموع لسقف maxBarsKept (الأحدث يبقى) — يمنع نمو الذاكرة بلا حد */
   function trimKlines(key) {
@@ -223,23 +284,134 @@ export function createMarketStreams({
     for (let i = 0; i < drop; i += 1) buf.delete(keys[i]);
   }
 
-  /** تحديث مخزن الشموع بصيغة صفوف بينانس الخام نفسها (تُقرأ مباشرة بnormalizeCandles/computeCvd) */
+  /**
+   * تحويل صف بينانس (نصوص) إلى أرقام بنفس الترتيب والطول (12 خانة).
+   * سبب هذا الإصلاح (السبب الجذري لانهيار الذاكرة سابقاً):
+   * كان كل صف يُخزَّن كمصفوفة من 12 **نصاً**، وكل نص كائن مستقل يشغل ~40+ بايت
+   * إضافة لمرجع الصف. القياس الفعلي: 337,600 شمعة استهلكت وحدها ~190MB من الـ heap
+   * (heapUsed 512MB في خادم واحد). التخزين كأرقام يخفض ذلك نحو الثلث ويقلّل ضغط GC.
+   * جميع القرّاء يستخدمون Number(k[i]) (normalizeCandles، computeCvd، derivatives)
+   * فالصفوف الرقمية متوافقة تماماً وبلا أي تغيير في القيم المحسوبة.
+   */
+  function toNumericRow(k) {
+    return [
+      Number(k.t), Number(k.o), Number(k.h), Number(k.l), Number(k.c), Number(k.v),
+      Number(k.T ?? 0), Number(k.q ?? 0), Number(k.n ?? 0), Number(k.V ?? 0),
+      Number(k.Q ?? 0), 0
+    ];
+  }
+
+  /** تحديث مخزن الشموع بصيغة صفوف بنفس ترتيب حقول بينانس (تُقرأ بـnormalizeCandles/computeCvd) */
   function upsertKline(symbol, tf, k) {
     const key = `${symbol}|${tf}`;
     let buf = klines.get(key);
     if (!buf) { buf = new Map(); klines.set(key, buf); }
-    buf.set(Number(k.t), [k.t, k.o, k.h, k.l, k.c, k.v, k.T, k.q, k.n, k.V, k.Q, '0']);
+    const openTime = Number(k.t);
+    const prevLast = klineLastBar.get(key) ?? 0;
+    buf.set(openTime, toNumericRow(k));
+    if (openTime > prevLast) klineLastBar.set(key, openTime);
     if (buf.size > cfg.maxBarsKept) trimKlines(key);
+    /**
+     * سعر حي من الشمعة — العلة التي يُصلحها هذا:
+     * `!miniTicker@arr` لم يعد يرسل كل السوق، بل ~50-130 رمزاً «تغيّر سعرها» في الثانية.
+     * فبقيت أسعار الرموز الخاملة متقادمة دقائق، واتُّخذت قرارات دخول على أسعار قديمة.
+     * الشمعة الجارية تصل كل ثانية لكل رمز مشترك فيه (وهو الرمز الذي نحلّله فعلاً) وتحمل سعر
+     * الإغلاق الحي — فهو المصدر الصحيح للقرار: نفس السعر الذي تقيّمه الاستراتيجية.
+     * نحدّث فقط من الشمعة الأحدث، فلا تُلوّث رسالة متأخرة السعر بسعر شمعة قديمة.
+     */
+    if (openTime >= prevLast) {
+      const px = Number(k.c);
+      if (Number.isFinite(px) && px > 0) prices.set(symbol, { price: px, at: now(), src: 'kline' });
+    }
+  }
+
+  /**
+   * اشتراكات السعر المضمونة: تُشتق تلقائياً من رموز التحليل (الشموع + التدفق)،
+   * فلا يحتاج أي محرك لتعديل. عند تخفيف المحركات لنطاقها يتقلّص الاشتراك تلقائياً.
+   * سقف maxPriceSubs يمنع تجاوز حدود بينانس على اتصال واحد.
+   */
+  function refreshPriceSubscriptions() {
+    const next = new Set();
+    const cap = cfg.maxPriceSubs;
+    for (const key of wantedKlines) {
+      if (next.size >= cap) break;
+      next.add(key.split('|')[0]);
+    }
+    for (const sym of wantedFlow) {
+      if (next.size >= cap) break;
+      next.add(sym);
+    }
+    // إخلاء أسعار الرموز التي لم تعد تحت التحليل (منع نمو الكاش بلا حد)
+    for (const sym of [...prices.keys()]) {
+      if (next.has(sym)) continue;
+      const rec = prices.get(sym);
+      if (rec && rec.src === 'ticker' && !next.has(sym)) prices.delete(sym);
+    }
+    wantedPrices = next;
+  }
+
+  /** الرموز التي تُبنى عليها قرارات فعلاً: المشتركة في الشموع أو في التدفق */
+  function analyzedSymbols() {
+    const out = new Set();
+    for (const key of wantedKlines) out.add(key.split('|')[0]);
+    for (const s of wantedFlow) out.add(s);
+    return out;
   }
 
   let lastFastAt = 0;
-  function notifyCandleClose(symbol, tf, closePrice) {
+  /**
+   * إعلان إغلاق شمعة — منع التكرار بمفتاح (رمز|فريم|زمن الشمعة) لا بتخفيف زمني عام.
+   * العلة السابقة: تخفيف 200ms على مستوى السوق كله كان يُسقط إغلاقات كل الرموز
+   * التي تُغلق في نفس اللحظة (كل دقيقة) فلا يصل منها إلا واحد.
+   */
+  function notifyCandleClose(symbol, tf, closePrice, barOpenTime = null) {
+    const key = `${symbol}|${tf}`;
+    // منع التكرار مشروط بزمن شمعة صالح فعلاً: غيابه يعني «أعلن دائماً» لا «أعلن مرة واحدة»
+    const openTime = Number(barOpenTime);
+    if (Number.isFinite(openTime) && openTime > 0) {
+      if (lastClosedBar.get(key) === openTime) return; // نفس الشمعة أُعلنت سابقاً
+      lastClosedBar.set(key, openTime);
+    }
     const t = now();
-    if (t - lastFastAt < 200) return; // تخفيف للمعالجات المتتالية لنفس الشمعة
     lastFastAt = t;
     for (const cb of candleCloseHandlers) {
       try { cb(symbol, tf, closePrice); } catch { /* معالج فاشل لا يوقف البقية */ }
     }
+  }
+
+  /** مدة الفريم بالمللي */
+  function tfMsOf(tf) {
+    const m = /^(\d+)([mhdw])$/.exec(String(tf));
+    if (!m) return null;
+    const n = Number(m[1]);
+    const unit = { m: 60_000, h: 3600_000, d: 86_400_000, w: 604_800_000 }[m[2]];
+    return n * unit;
+  }
+
+  /**
+   * إعادة بذر المفاتيح التي تأخّرت شموعها (فجوة بعد انقطاع أو اتصال أصمّ).
+   * شرط الاستدعاء: اتصال أُعيد فتحه، أو مراقب الحداثة الدوري.
+   */
+  function refreshStaleKlines({ maxKeys = 40 } = {}) {
+    if (!seedKlines) return 0;
+    const t = now();
+    const stale = [];
+    for (const key of klineWantsNow()) {
+      if (quarantinedUntil(key)) continue;
+      const tfMs = tfMsOf(key.split('|')[1]);
+      if (!tfMs) continue;
+      const last = klineLastBar.get(key) ?? 0;
+      // فجوة: آخر شمعة أقدم من شمعتين + هامش 5 ثوانٍ
+      if (klineSeeding.has(key)) continue;
+      if (!last || t - last > 2 * tfMs + 5000) stale.push(key);
+    }
+    for (const key of stale.slice(0, maxKeys)) void ensureKlineSeed(key, { force: true });
+    return Math.min(stale.length, maxKeys);
+  }
+
+  /** المفاتيح المطلوبة فعلياً الآن (اتحاد المستأجرين) */
+  function klineWantsNow() {
+    return wantedKlines;
   }
 
   /** هل المفتاح محجور حالياً؟ (يُمسح الحجر المنتهي تلقائياً) */
@@ -250,16 +422,28 @@ export function createMarketStreams({
     return rec.quarantinedUntil;
   }
 
-  /** بذر مخزن شموع من REST مرة واحدة (للمفاتيح غير المزروعة) */
-  function ensureKlineSeed(key) {
-    if (klines.has(key) || klineSeeding.has(key) || !seedKlines) return klineSeeding.get(key) ?? Promise.resolve();
+  /**
+   * بذر/إعادة بذر مخزن شموع من REST.
+   * force=true يُعيد الجلب حتى لو كان المفتاح مزروعاً — لإصلاح الفجوات بعد انقطاع.
+   */
+  function ensureKlineSeed(key, { force = false } = {}) {
+    if ((!force && klines.has(key)) || klineSeeding.has(key) || !seedKlines) {
+      return klineSeeding.get(key) ?? Promise.resolve();
+    }
     if (quarantinedUntil(key)) return Promise.resolve(); // مفتاح ميت — بلا شبكة بلا سجلات
     const [symbol, tf] = key.split('|');
     const p = (async () => {
       try {
         const raw = await seedKlines(symbol, tf, cfg.seedLimit);
         const buf = klines.get(key) ?? new Map();
-        for (const row of raw ?? []) buf.set(Number(row[0]), row);
+        for (const row of raw ?? []) {
+          const openTime = Number(row[0]);
+          // الصف من REST مصفوفة حقول بينانس بترتيبها نفسه — يُخزَّن رقماً لتوفير الذاكرة
+          buf.set(openTime, Array.isArray(row)
+            ? row.map((v, i) => (i === 11 ? 0 : Number(v)))
+            : row);
+          if (openTime > (klineLastBar.get(key) ?? 0)) klineLastBar.set(key, openTime);
+        }
         klines.set(key, buf);
         trimKlines(key);
         seedFails.delete(key); // نجاح يصفّر العداد
@@ -357,7 +541,61 @@ export function createMarketStreams({
     const out = ['!miniTicker@arr'];
     for (const key of wantedKlines) out.push(klineStreamOf(key));
     for (const sym of wantedFlow) out.push(aggStreamOf(sym));
+    for (const sym of wantedPrices) out.push(priceStreamOf(sym));
     return out;
+  }
+
+  /**
+   * تقليم كاش الأسعار: يُبقي رموز القرار (بلا حد عملي) ثم الأحدث من الباقي.
+   * يمنع النمو غير المحدود الذي كان يُسقط الحاوية (OOM).
+   */
+  function prunePrices() {
+    const keep = analyzedSymbols();
+    const rest = [];
+    for (const [sym, rec] of prices) {
+      if (keep.has(sym)) continue;
+      rest.push([sym, rec.at ?? 0]);
+    }
+    rest.sort((a, b) => b[1] - a[1]);
+    const allowed = Math.max(0, cfg.maxPriceSymbols - keep.size);
+    for (let i = allowed; i < rest.length; i += 1) prices.delete(rest[i][0]);
+  }
+
+  /**
+   * استطلاع أسعار السوق عبر REST ودمجها في كاش الأسعار.
+   * القواعد:
+   *  - لا يطغى على سعر حدّثه البث خلال آخر 1.5 ثانية (البث أسرع حين يعمل).
+   *  - يُحدّث كل رمز أعادته Binance، فيضمن حداثة الرموز الخاملة التي لا يدفعها البث.
+   *  - فشل الاستطلاع لا يؤثر على البث (يُسجَّل ويُعاد في الدورة التالية).
+   */
+  async function pollPrices() {
+    if (!fetchAllPrices || stopped) return;
+    if (pricePollBusy) return;              // لا تتراكم الدورات إن تأخرت الشبكة
+    pricePollBusy = true;
+    try {
+      const all = await fetchAllPrices();
+      const t = now();
+      let applied = 0;
+      for (const [symbol, rawPrice] of Object.entries(all ?? {})) {
+        const price = Number(rawPrice);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        const rec = prices.get(symbol);
+        if (rec && rec.src !== 'rest' && t - rec.at < 1500) continue; // البث أحدث
+        prices.set(symbol, { price, at: t, src: 'rest' });
+        applied += 1;
+      }
+      pricePoll.lastAt = t;
+      pricePoll.applied = applied;
+      pricePoll.total = Object.keys(all ?? {}).length;
+      pricePoll.failures = 0;
+      if (prices.size > cfg.maxPriceSymbols) prunePrices();
+    } catch (e) {
+      pricePoll.failures += 1;
+      pricePoll.lastError = String(e?.message ?? e).slice(0, 200);
+      log.warn?.('[market-streams] فشل استطلاع الأسعار:', pricePoll.lastError);
+    } finally {
+      pricePollBusy = false;
+    }
   }
 
   function syncSubs() {
@@ -453,21 +691,43 @@ export function createMarketStreams({
       syncSubs(); // يفتح الاتصالات المطلوبة ويوزع الاشتراكات
       reconcileTimer = setInterval(reconcileTick, cfg.reconcileMs);
       if (reconcileTimer.unref) reconcileTimer.unref();
+      // استطلاع أسعار REST: يضمن حداثة كل رمز رغم تقطّع نبضات البث المتاح
+      if (fetchAllPrices && cfg.pricePollMs > 0) {
+        pricePollTimer = setInterval(() => { void pollPrices(); }, cfg.pricePollMs);
+        if (pricePollTimer.unref) pricePollTimer.unref();
+        void pollPrices();
+      }
     },
     stop() {
       stopped = true;
       started = false;
       clearInterval(reconcileTimer);
+      clearInterval(pricePollTimer);
       for (const c of conns) {
         clearInterval(c.keepAlive);
+        clearInterval(c.livenessTimer);
         clearTimeout(c.lifetimeTimer);
         try { c.ws.close(); } catch { /* ignore */ }
       }
       conns = [];
     },
-    connected: () => conns.some(c => c.ws.readyState === WebSocket.OPEN) && prices.size > 0,
+    /**
+     * هل البث الحي صالح للاستخدام؟ اتصال مفتوح + أسعار موجودة + آخر رسالة حديثة.
+     * الشرط الأخير ضروري: اتصال «مفتوح» بلا رسائل يعني بيانات مجمّدة، وهي أسوأ من
+     * الرجوع إلى REST لأنها تبدو صالحة. الاستهلاك يعرف الفرق من getPriceAt.
+     */
+    connected: () => conns.some(c => c.ws.readyState === WebSocket.OPEN)
+      && prices.size > 0
+      && (!lastMessageAt || now() - lastMessageAt <= cfg.priceStaleMs),
     getPrice: (symbol) => prices.get(String(symbol).toUpperCase())?.price ?? null,
     getPriceAt: (symbol) => prices.get(String(symbol).toUpperCase())?.at ?? null,
+    /** سعر حديث فقط — null إن كان أقدم من الحد (لقرارات لا تُبنى على بيانات قديمة) */
+    getFreshPrice: (symbol) => {
+      const rec = prices.get(String(symbol).toUpperCase());
+      if (!rec || now() - rec.at > cfg.priceStaleMs) return null;
+      return rec.price;
+    },
+    priceStaleMs: cfg.priceStaleMs,
     getPrices(symbols) {
       const out = {};
       for (const s of symbols ?? []) {
@@ -488,6 +748,7 @@ export function createMarketStreams({
         for (const k of set) if (!seen.has(k)) { seen.add(k); merged.push(k); }
       }
       wantedKlines = new Set(merged);
+      refreshPriceSubscriptions();
       syncSubs();
     },
     setAggTradeSubscriptions(symbols, tenant = 'default') {
@@ -501,6 +762,7 @@ export function createMarketStreams({
         for (const s of set) if (!seen.has(s)) { seen.add(s); merged.push(s); }
       }
       wantedFlow = new Set(merged);
+      refreshPriceSubscriptions();
       syncSubs();
     },
     onCandleClose(cb) {
@@ -508,23 +770,72 @@ export function createMarketStreams({
       return () => candleCloseHandlers.delete(cb);
     },
     hasKline: (key) => klines.has(String(key)),
+    /** زمن فتح أحدث شمعة محفوظة للمفتاح (0 إن لم تُبَذ) */
+    lastBarAt: (symbol, tf) => klineLastBar.get(`${symbol}|${tf}`) ?? 0,
     ensureKlineSeed,
+    /** إصلاح فجوات الشموع يدوياً/دورياً (عدد المفاتيح المُعاد بذرها) */
+    refreshStaleKlines,
     getKlines,
     flowSnapshot,
     stats() {
       let quarantined = 0;
       for (const [, rec] of seedFails) if (Number(rec?.quarantinedUntil) > now()) quarantined += 1;
+      const t = now();
+      /**
+       * حداثة السعر تُقاس على الرموز التي تُبنى عليها القرارات فعلاً، لا على كل ما في
+       * الكاش: `!miniTicker@arr` يغطي السوق أجمع لكنه لا يحدّث إلا ما تغيّر سعره، فقياس
+       * النسبة على كل السوق يُخفي الحقيقة: رموز التحليل قد تكون سليمة بينما الرموز
+       * الخاملة متقادمة دقائق. المقياس الصحيح للجاهزية هو حالة رموز القرار.
+       */
+      const analyzed = analyzedSymbols();
+      let stalePrices = 0;
+      let newestPriceAt = 0;
+      let klineSourced = 0;
+      let restSourcedCount = 0;
+      for (const sym of analyzed) {
+        const rec = prices.get(sym);
+        if (!rec) { stalePrices += 1; continue; }
+        if (rec.at > newestPriceAt) newestPriceAt = rec.at;
+        if (rec.src === 'kline') klineSourced += 1;
+        if (rec.src === 'rest') restSourcedCount += 1;
+        if (t - rec.at > cfg.priceStaleMs) stalePrices += 1;
+      }
+      let staleCandles = 0;
+      for (const key of wantedKlines) {
+        const tfMs = tfMsOf(key.split('|')[1]);
+        if (!tfMs) continue;
+        const last = klineLastBar.get(key) ?? 0;
+        if (!last || t - last > 2 * tfMs + 5000) staleCandles += 1;
+      }
+      const silent = conns
+        .filter(c => c.ws.readyState === WebSocket.OPEN && t - (c.lastMsgAt || 0) > cfg.livenessTimeoutMs)
+        .length;
       return {
         connected: conns.some(c => c.ws.readyState === WebSocket.OPEN),
         connections: conns.length,
         streams: conns.reduce((a, c) => a + c.active.size, 0),
         klineSubs: wantedKlines.size,
         aggTradeSubs: wantedFlow.size,
+        priceSubs: wantedPrices.size,
         priceSymbols: prices.size,
+        analyzedSymbols: analyzed.size,
+        analyzedPriced: analyzed.size - stalePrices,
+        klineSourced,
+        restSourced: restSourcedCount,
+        pricePoll: { ...pricePoll, intervalMs: cfg.pricePollMs },
         quarantinedKeys: quarantined,
         messages: messageCount,
         lastMessageAt,
-        startedAt
+        startedAt,
+        // حداثة البيانات — أساس قرار «هل نمنع القرارات على بيانات قديمة»
+        priceAgeMs: lastMessageAt ? t - lastMessageAt : null,
+        newestPriceAt: newestPriceAt || null,
+        stalePrices,
+        stalePriceRatio: analyzed.size ? Number((stalePrices / analyzed.size).toFixed(3)) : null,
+        staleCandles,
+        klineKeys: klines.size,
+        silentConns: silent,
+        silentRecycles: conns.reduce((a, c) => a + (c.silentRecycles || 0), 0)
       };
     }
   };

@@ -92,7 +92,13 @@ export function createLiveOpportunityEngine(deps) {
     readCalibration = async () => null,
     now = () => Date.now(),
     log = console,
-    config = {}
+    config = {},
+    /**
+     * مُجمّع عمال لتنفيذ فحص السيولة خارج حلقة الأحداث.
+     * بدونه يبقى scanHistory متزامناً ويُجمّد البث (العيب المقيس: 59% من زمن CPU).
+     * النتيجة مطابقة حرفياً في الحالتين — الفرق في أين يُحسب لا فيما يُحسب.
+     */
+    workers = null
   } = deps;
 
   const cfg = { ...DEFAULT_CONFIG, ...config, calibration: { ...DEFAULT_CONFIG.calibration, ...(config.calibration ?? {}) } };
@@ -731,11 +737,15 @@ export function createLiveOpportunityEngine(deps) {
           const raw = await fetchRawKlines(symbol, tf, cfg.calibration.bars);
           const candles = normalizeCandles(raw);
           if (candles.length >= 200) {
-            const zones = scanHistory({
+            const scanArgs = {
               symbol, timeframe: tf, candles,
               step: Math.max(1, Math.floor(candles.length / 120)),
               maxZones: 120
-            });
+            };
+            // خارج حلقة الأحداث إن توفّر المُجمّع؛ وإلا نفس الدالة كما كانت
+            const zones = workers
+              ? await workers.run('scanHistory', scanArgs, { timeoutMs: cfg.scanTimeoutMs ?? 120_000 })
+              : scanHistory(scanArgs);
             // نفس بوابات المحرك الحي: عمق السويب · الموقع · الجلسة · التدفق · R:R
       const { trades, rejected: rej } = calibrateSweeps({
         candles, zones, timeframe: tf, raw,

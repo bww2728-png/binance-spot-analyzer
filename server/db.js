@@ -375,12 +375,29 @@ const db = {
   coinShariah: {
     list: () => rest('/coin_shariah?select=*'),
     upsert: (row) => rest('/coin_shariah?on_conflict=symbol&select=*', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=representation' }),
+    /** إدراج دفعي — يمنع آلاف الطلبات عند حساب الأحكام على الخادم */
+    upsertChunk: (rows) => rest('/coin_shariah?on_conflict=symbol&select=symbol', {
+      method: 'POST', body: rows, prefer: 'resolution=merge-duplicates,return=minimal'
+    }),
     remove: (symbol) => rest(`/coin_shariah?symbol=eq.${encodeURIComponent(symbol)}`, { method: 'DELETE' })
   },
   settings: {
     get: () => rest('/settings?select=*&id=eq.1'),
     create: (row) => rest('/settings?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
     update: (row) => rest('/settings?id=eq.1&select=*', { method: 'PATCH', body: row, prefer: 'return=representation' })
+  },
+  /** عيّنات صحة دورية — دليل التشغيل المستمر */
+  health: {
+    append: (sample) => rest('/health_samples?select=id', {
+      method: 'POST', body: sample, prefer: 'return=minimal'
+    }),
+    recent: (sinceTs = 0, limit = 500) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      q.set('order', 'ts.desc');
+      q.set('limit', String(Math.min(Number(limit) || 500, 2000)));
+      return rest(`/health_samples?${q}`);
+    }
   },
   // سجل القرارات على events_log الإلحاقي (نفس معمارية باقي الوظائف — صفر تغيير مخطط):
   // - قرار واحد = حدث type=decision_<actor> وmeta=payload JSON
