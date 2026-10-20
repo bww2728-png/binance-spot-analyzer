@@ -25,6 +25,7 @@ import {
   rankBatch
 } from './scanner.mjs';
 import { toLifecycleRow, rehydrateState } from './lifecycle.mjs';
+import { buildSegmentShadowReport, countDecidedOnce } from '../services/segmentShadow.mjs';
 
 const DEFAULT_CONFIG = {
   cycleMs: 5_000,
@@ -100,7 +101,12 @@ export function createLiveOpportunityEngine(deps) {
      * بدونه يبقى scanHistory متزامناً ويُجمّد البث (العيب المقيس: 59% من زمن CPU).
      * النتيجة مطابقة حرفياً في الحالتين — الفرق في أين يُحسب لا فيما يُحسب.
      */
-    workers = null
+    workers = null,
+    /**
+     * مجمّع الظل (قياس ★ فقط): يُغذّى بمقارنات لا تؤثر على أي قرار منشور.
+     * بلا هذا تبقى إصلاحات ★ بلا دليل رقمي، والقرار فيها بلا أساس.
+     */
+    shadow = null
   } = deps;
 
   const cfg = { ...DEFAULT_CONFIG, ...config, calibration: { ...DEFAULT_CONFIG.calibration, ...(config.calibration ?? {}) } };
@@ -108,6 +114,14 @@ export function createLiveOpportunityEngine(deps) {
   const trackers = new Map();          // key → حالة
   const opportunities = new Map();     // publishKey → فرصة منشورة
   const liveStats = new Map();         // مفتاح شريحة → {trades, wins} من النتائج الحية (ترقية champion-challenger)
+  /**
+   * ★3 قياس فقط: العدّ الحالي لشريحة الفرصة يزيد في **كل نداء متابعة** (~كل 5 ثوان)
+   * لكل فرصة لم تُحسم بعد، أي أن «الصفقات» تُحتسب مئات المرات لنفس الفرصة، ومنطق
+   * الترقية إلى شرائح مؤهّلة يصبح بلا معنى. هذا الخريطة تُحصي بالقاعدة الصحيحة
+   * (مرة واحدة عند حسم الفرصة) للمقارنة، ولا تؤثر على `liveStats` إطلاقاً.
+   */
+  const shadowDecided = new Map();     // مفتاح شريحة → {trades, wins} بقاعدة «عند الحسم فقط»
+  const shadowCountedOps = new Set();  // مفاتيح الفرص المحسوبة في النسخة الظلّية
   const history = [];                  // فرص محسومة/قديمة (محدودة)
   const segments = new Map();          // مفتاح شريحة → إحصاء
   const rejected = [];                 // مرشحون لم يجتازوا البوابات/الشريحة (شفافية)
@@ -482,6 +496,13 @@ export function createLiveOpportunityEngine(deps) {
         op.outcome = 'target';
         op.outcomeAt = now();
         op.outcomePrice = px;
+      }
+      /**
+       * ★3 قياس فقط: تسجيل الفرصة مرة واحدة عند لحظة حسمها (القاعدة الصحيحة).
+       * لا يُقرأ هذا العدّ في أي قرار — يُقارَن فقط بالعدّ المنشور في التقرير.
+       */
+      if (op.outcome && op.segmentKey) {
+        countDecidedOnce(shadowCountedOps, shadowDecided, op.id, op.outcome, op.segmentKey);
       }
       // تغذية راجعة حية لشريحة الفرصة (champion-challenger) — تُستخدم في الترقية التلقائية
       if (op.segmentKey) {
@@ -948,8 +969,23 @@ export function createLiveOpportunityEngine(deps) {
       calibration: {
         at: calibration.at, busy: calibration.busy, trades: calibration.trades,
         progress: calibration.progress, segments: calibration.segments.length, error: calibration.error
-      }
+      },
+      /** ★3: مقارنة العدّ المنشور بالعدّ الصحيح (عند الحسم فقط) — قياس بلا أثر */
+      segmentsShadow: segmentShadowReport()
     };
+  }
+
+  /**
+   * ★3 — تقرير فرق العدّ (يُبنى بوحدة نقية مُختبَرة). لكل شريحة عدّان:
+   *  - المنشور: يزيد في كل نداء متابعة (~5 ثوان) لكل فرصة لم تُحسم، فيتضخّم بحسب عدد
+   *    المرات التي نظرنا فيها لا بحسب النتائج، فتصبح الترقية إلى «شرائح مؤهّلة» بلا معنى.
+   *  - الظلّي: يزيد مرة واحدة عند حسم الفرصة — وهذا ما تعنيه «صفقة» فعلاً.
+   * يُعرض للمقارنة فقط ولا يُقرأ في أي قرار. الفرق هنا هو دليل قرارك على ★3.
+   */
+  function segmentShadowReport() {
+    try {
+      return buildSegmentShadowReport(liveStats, shadowDecided, calibration.minSegmentTrades ?? cfg.calibration?.minSegmentTrades ?? 30);
+    } catch { return null; }
   }
 
   function getHistory() {

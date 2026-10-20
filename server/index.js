@@ -1698,7 +1698,8 @@ const liveOppEngine = createLiveOpportunityEngine({
       concurrency: Number(process.env.LIVE_CALIB_CONC) || 2
     }
   },
-  workers: workerPool
+  workers: workerPool,
+  shadow
 });
 setTimeout(() => {
   // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
@@ -2738,9 +2739,27 @@ setInterval(() => {
           pairsTotal: st.pairsTotal ?? null,
           deepScans: st.deepScans ?? null,
           bookCalls: st.bookCalls ?? null,
-          updatedAt: st.updatedAt ?? null
+          updatedAt: st.updatedAt ?? null,
+          /** ★3: فرق العدّ المنشور عن العدّ عند الحسم فقط */
+          segmentsShadow: st.segmentsShadow ?? null
         }
       });
+      /**
+       * ★3 قياس: يُغذّى مجمّع الظل بتقرير مقارنة العدّ كل دورة، فتكفي عيّنات قليلة
+       * لإظهار حجم التضخّم وعدد الشرائح التي يتغيّر حكم تأهيلها. القياس لا يقرأه أي قرار.
+       */
+      try {
+        const seg = st.segmentsShadow;
+        if (seg && seg.keys > 0 && shadow) {
+          shadow.compare(
+            'segments-decided-only',
+            { qualified: seg.qualifiedPublished, total: seg.publishedTotal, min: seg.minSegmentTrades },
+            { qualified: seg.qualifiedDecided, total: seg.decidedTotal, min: seg.minSegmentTrades },
+            (a, b) => a?.qualified === b?.qualified,
+            { inflation: seg.inflation }
+          );
+        }
+      } catch { /* القياس لا يعطّل المحرك */ }
       if (!advanced && st.busy) liveJob.set({ busy: true });
     }
   } catch (e) { liveJob.fail(e); }
