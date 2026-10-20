@@ -157,6 +157,8 @@ export function createStrategyEngine(deps) {
   let dirBusy = false;
 
   let cycleTimer = null, tickTimer = null, calibTimer = null, dirPriceTimer = null, unsubClose = null;
+  /** مؤقّتات تُشغَّل مرة واحدة (تسخين المعايرة) — تُلغى في stop مع بقية المؤقّتات */
+  const oneShotTimers = new Set();
   let running = false;
   let lastPrices = {};
   // تخفيف المعالجة الفورية لكل (رمز|فريم) على حدة — الخانق العام السابق كان يسقط إغلاقات
@@ -1148,6 +1150,20 @@ export function createStrategyEngine(deps) {
     if (cycleTimer.unref) cycleTimer.unref();
     if (tickTimer.unref) tickTimer.unref();
     if (calibTimer.unref) calibTimer.unref();
+    /**
+     * تسخين أول معايرة عند غياب أي معايرة محفوظة: الدورية كل 6 ساعات تعني أن كل تشغيل
+     * جديد يقضي 6 ساعات ببوابة شرائح فارغة، فتُنشر الفرص «تحت التجربة» بلا أساس معايَر.
+     * التأخير مقصود (10 دقائق) ليتجنّب التسخين مزاحمة انطلاقة الخادم (مزامنة الرموز،
+     * والبحث الشرعي، ودورة السيولة). لا يغيّر أي شرط أو عتبة — يملأ الجدول فقط.
+     */
+    const warmupTimer = setTimeout(() => {
+      oneShotTimers.delete(warmupTimer);
+      if (calibration.at || calibration.busy) return;
+      log.log?.('[strategy2] تسخين أول معايرة (لا معايرة محفوظة)');
+      void runCalibration();
+    }, Number(process.env.STRATEGY2_WARMUP_MS || 10 * 60 * 1000));
+    if (warmupTimer.unref) warmupTimer.unref();
+    oneShotTimers.add(warmupTimer);
     void runCycle();
   }
 
@@ -1158,6 +1174,9 @@ export function createStrategyEngine(deps) {
     if (calibTimer) clearInterval(calibTimer);
     if (dirPriceTimer) clearInterval(dirPriceTimer);
     if (unsubClose) { unsubClose(); unsubClose = null; }
+    // مؤقّتات التسخين تُلغى أيضاً: تركها يعني معايرة تُطلق بعد الإيقاف
+    for (const t of oneShotTimers) clearTimeout(t);
+    oneShotTimers.clear();
     cycleTimer = tickTimer = calibTimer = dirPriceTimer = null;
   }
 
