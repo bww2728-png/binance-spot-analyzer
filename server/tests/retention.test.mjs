@@ -34,6 +34,9 @@ test('الأنواع المحمية غير قابلة للحذف ولا تدخل
   for (const mustKeep of ['strategy2_resolved', 'live_opportunity', 'live_opportunity_closed', 'live_calibration', 'barcode_scan']) {
     assert.equal(candidates.includes(mustKeep), false, `${mustKeep} لا يجوز ترشيحه للحذف`);
   }
+  // حالة المحركات الدائمة: حذفها يعني فقدان تعلّم المراجعات وقياس ★ عند كل إعادة تشغيل
+  assert.equal(PROTECTED_TYPES.has('engine_state'), true, 'حالة المحركات يجب أن تكون محمية');
+  assert.equal(candidates.includes('engine_state'), false, 'engine_state ليس تشخيصاً قابلاً للتقليم');
 });
 
 test('الحذف الزمني يستهدف الأنواع التشخيصية فقط وبحد 30 يوماً', async () => {

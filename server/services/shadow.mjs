@@ -106,21 +106,46 @@ export function createShadow({ dir = null, log = console } = {}) {
     if (!file || !existsSync(file)) return null;
     try {
       const data = JSON.parse(readFileSync(file, 'utf8'));
-      for (const r of data.records ?? []) {
-        const b = bucket(r.key);
-        // نستعيد التراكم السابق ونضيف عليه
-        b.samples += r.samples ?? 0;
-        b.agree += r.agree ?? 0;
-        b.diff += r.diff ?? 0;
-        if (!b.firstAt) b.firstAt = r.firstAt ?? Date.now();
-        b.lastAt = r.lastAt ?? b.lastAt;
-        b.examples.push(...(r.examples ?? []).slice(-8));
-      }
+      absorb(data);
       return data;
     } catch { return null; }
   }
 
-  return { enabled, compare, summary, persist, load, clear: () => records.clear() };
+  /** دمج تقرير سابق في التراكم الحالي (يُستخدم لملف القرص ولسجل القاعدة معاً) */
+  function absorb(data) {
+    for (const r of data?.records ?? []) {
+      const b = bucket(r.key);
+      // غير المحسوب: مفتاح قديم للمحرك بشروط قديمة
+      b.samples += r.samples ?? 0;
+      b.agree += r.agree ?? 0;
+      b.diff += r.diff ?? 0;
+      if (!b.firstAt) b.firstAt = r.firstAt ?? Date.now();
+      b.lastAt = r.lastAt ?? b.lastAt;
+      b.examples.push(...(r.examples ?? []).slice(-8));
+    }
+    return data;
+  }
+
+  /**
+   * حفظ في القاعدة (مخزن حالة المحركات) — لأن ملف الحاوية يضيع مع كل نشر جديد،
+   * فقياس ★ كان يبدأ من صفر في كل مرة ويصعب بلوغ عيّنات كافية للحكم.
+   */
+  async function persistDb(db) {
+    if (!db?.engineState?.put) return false;
+    try { await db.engineState.put('shadow_report', summary()); return true; } catch (e) { log.warn?.('[shadow] تعذّر الحفظ في القاعدة:', e.message); return false; }
+  }
+
+  async function loadDb(db) {
+    if (!db?.engineState?.get) return null;
+    try {
+      const data = await db.engineState.get('shadow_report');
+      if (!data?.records?.length) return null;
+      absorb(data);
+      return data;
+    } catch { return null; }
+  }
+
+  return { enabled, compare, summary, persist, load, absorb, persistDb, loadDb, clear: () => records.clear() };
 }
 
 export default createShadow;

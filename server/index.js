@@ -90,6 +90,12 @@ const scanHistoryAsync = async (args, timeoutMs = Number(process.env.WORKER_TASK
   }
 };
 
+/**
+ * دليل استعادة الحالة بعد إعادة التشغيل (يُملأ بعد الإقلاع ويُقرأ من الفحص العميق).
+ * معرّف قبل `runtime` تفادياً لأي وصول قبل التهيئة.
+ */
+let stateRestoreInfo = null;
+
 /** حالة تشغيل مشتركة تُبلّغ عنها المحركات (تُقرأ في /api/health/deep) */
 const runtime = {
   marketStats: () => null,
@@ -99,8 +105,9 @@ const runtime = {
   dataFresh: () => ({ ok: null, reason: 'غير مُهيّأ' }),
   /** مخزون المناطق (أكبر مخزن في الذاكرة) — يُقاس لحظياً في الفحص العميق */
   zones: () => null,
+  /** دليل الاستعادة بعد إعادة التشغيل: عدد المراجعات المستعادة ومفاتيح الظل */
+  stateRestore: () => null,
 };
-
 // نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
 app.get('/healthz', (req, res) => res.json({ ok: true, up: Date.now() }));
 // نقطة جاهزية غير حاجبة: لا تنتظر Supabase/Binance أبداً (تشخيص سريع دون تعليق healthcheck)
@@ -142,6 +149,8 @@ app.get('/api/health/deep', (req, res) => {
      * وهو أكبر مخزن في الذاكرة، فلا يُقبل أن يُقاس كل 5 دقائق فقط.
      */
     zones: (() => { try { return runtime.zones?.() ?? null; } catch { return null; } })(),
+    /** دليل بقاء الحالة عبر إعادات التشغيل (تعلّم المراجعات + قياس ★) */
+    stateRestore: (() => { try { return runtime.stateRestore?.() ?? null; } catch { return null; } })(),
     dataFresh: fresh
   });
 });
@@ -924,6 +933,38 @@ const liquidityState = {
   error: null
 };
 
+/** الحد الذي يبقى محفوظاً من تغذية المراجعة الراجعة (لا نحتاج أكثر للحساب) */
+const FEEDBACK_KEEP = 500;
+/**
+ * حفظ تعلّمك من مراجعات المناطق (B11): كان `feedback` و`visualBias` في الذاكرة فقط،
+ * فيبدأ النظام بعد كل إعادة تشغيل بتعلّم صفري وكأن مراجعاتك لم تحدث.
+ */
+async function persistLearning() {
+  try {
+    liquidityState.feedback = liquidityState.feedback.slice(-FEEDBACK_KEEP);
+    await db.engineState.put('liquidity_learning', {
+      feedback: liquidityState.feedback,
+      adjustment: liquidityState.adjustment
+    });
+  } catch (e) { console.warn('[learning] تعذّر الحفظ:', e.message); }
+}
+
+async function restoreLearning() {
+  try {
+    const state = await db.engineState.get('liquidity_learning');
+    if (!state?.feedback?.length) return { restored: 0, bias: {} };
+    liquidityState.feedback = state.feedback.slice(-FEEDBACK_KEEP);
+    liquidityState.adjustment = { ...liquidityState.adjustment, ...(state.adjustment || {}) };
+    // إعادة الحساب من التغذية نفسها بدل الثقة بالملخص المحفوظ
+    liquidityState.adjustment = feedbackToAdjustment(liquidityState.feedback, liquidityState.adjustment);
+    console.log(`[learning] استُعيد ${liquidityState.feedback.length} مراجعة، وانحياز ${Object.keys(liquidityState.adjustment.visualBias || {}).length} نوع`);
+    return { restored: liquidityState.feedback.length, bias: liquidityState.adjustment.visualBias || {} };
+  } catch (e) {
+    console.warn('[learning] تعذّر الاسترجاع:', e.message);
+    return { restored: 0, bias: {} };
+  }
+}
+
 // الشموع حول لحظة معينة: نافذة قبل/بعد المؤشر
 const zoneCandlesWindow = async (zone, phase) => {
   const tfMs = tfToMs(zone.timeframe);
@@ -1205,6 +1246,8 @@ app.post('/api/liquidity-zones/:id/review', handle(async (req, res) => {
   liquidityState.historyResults = liquidityState.historyResults.map(x => x.id === id ? updated : x);
   await saveLiquidityEvent('liquidity_zone_reviewed', updated, `مراجعة ${verdict}`, feedback);
   await saveLiquidityEvent('liquidity_rules_updated', updated, 'تحديث قواعد محرك السيولة', { adjustment: liquidityState.adjustment });
+  // حفظ التعلّم فور كل مراجعة: إعادة التشغيل التالية لن تبدأ من صفر (B11)
+  void persistLearning();
   broadcast({ type: 'liquidity_zone_reviewed', zone: updated });
   res.json({ ok: true, zone: updated, adjustment: liquidityState.adjustment });
 }));
@@ -1545,6 +1588,8 @@ runtime.marketStats = () => marketStreams.stats();
 // ربط المحدد ووضع الظل بالتشخيص (بعد تهيئة runtime — منع TDZ)
 runtime.rateLimiter = () => rateLimiter.stats();
 runtime.shadow = () => shadow.summary();
+/** دليل الاستعادة من المخزن الدائم (يُملأ بعد الإقلاع، فالقراءة عبر دالة) */
+runtime.stateRestore = () => stateRestoreInfo;
 /** مخزون المناطق لحظياً — يُقرأ في الفحص العميق ويُسجَّل في العيّنات */
 runtime.zones = () => {
   const live = capState(liquidityState.liveResults.length, LIVE_MAX_ZONES);
@@ -2831,6 +2876,32 @@ setInterval(periodicSync, SYNC_MS);
 setInterval(periodicBarcodeScan, (Number(process.env.BARCODE_SCAN_HOURS) || 6) * 60 * 60 * 1000);
 setInterval(periodicResearch, (Number(process.env.RESEARCH_HOURS) || 4) * 60 * 60 * 1000);
 setTimeout(() => void periodicResearch(), 90_000);
+
+/**
+ * الاستعادة من المخزن الدائم بعد إعادة التشغيل (B11) + حفظ دوري.
+ * تقرير وضع الظل مع حفظه دورياً: بلا هذا يبدأ قياس ★ من صفر مع كل نشر، فيستحيل
+ * بلوغ عيّنات كافية للحكم، ويضيع تعلّم السيولة من مراجعاتك.
+ */
+const runStateRestore = async () => {
+  const learning = await restoreLearning();
+  const shadowReport = await shadow.loadDb(db);
+  /**
+   * يُحفظ في متغير ثم يُعرض بدالة: واجهة `runtime` كلها دوال، وتخصيص قيمة مكانها
+   * يجعل القراءة تفشل بصمت (كانت تُرجع null دائماً بلا أي أثر للاستعادة).
+   */
+  stateRestoreInfo = {
+    at: Date.now(),
+    learningRestored: learning.restored,
+    shadowRecords: shadowReport?.records?.length ?? 0
+  };
+  console.log(`[state] استعادة: مراجعات ${learning.restored}، مفاتيح ظل ${stateRestoreInfo.shadowRecords}`);
+};
+void runStateRestore();
+setInterval(() => {
+  shadow.persist();
+  void shadow.persistDb(db);
+  void persistLearning();
+}, 5 * 60 * 1000);
 
 // مزامنة تلقائية عند البدء إذا كانت فارغة أو متقادمة + بث فوري لأي جديد
 void (async () => {

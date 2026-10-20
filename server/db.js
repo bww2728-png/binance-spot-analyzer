@@ -477,6 +477,31 @@ const db = {
       return rows.map(toImageRow);
     }
   },
+  /**
+   * مخزن حالة دائم (مفتاح/قيمة) بلا أي تغيير في المخطط: صف واحد لكل مفتاح على
+   * `events_log` نوعه `engine_state` ورمزه هو المفتاح. الغرض: ما كان يضيع عند كل
+   * إعادة تشغيل — تقرير وضع الظل، وانحياز تعلّم السيولة، وملخصات الباك تيست.
+   * صف واحد لكل مفتاح (تحديث لا إدراج) حتى لا ينمو الجدول بلا حد.
+   */
+  engineState: {
+    get: async (key) => {
+      const rows = await rest(`/events_log?type=eq.engine_state&symbol=eq.${encodeURIComponent(key)}&select=meta,ts&limit=1`);
+      if (!rows?.length) return null;
+      try { return rows[0].meta ? JSON.parse(rows[0].meta) : null; } catch { return null; }
+    },
+    put: async (key, value) => {
+      const body = { type: 'engine_state', symbol: String(key), message: String(key), meta: JSON.stringify(value ?? null), ts: Date.now() };
+      const existing = await rest(`/events_log?type=eq.engine_state&symbol=eq.${encodeURIComponent(key)}&select=id&limit=1`);
+      if (existing?.length) {
+        return rest(`/events_log?id=eq.${existing[0].id}`, { method: 'PATCH', body: { meta: body.meta, ts: body.ts }, prefer: 'return=minimal' });
+      }
+      return rest('/events_log?select=id', { method: 'POST', body, prefer: 'return=minimal' });
+    },
+    keys: async () => {
+      const rows = await rest('/events_log?type=eq.engine_state&select=symbol&limit=200');
+      return (rows ?? []).map(r => r.symbol);
+    }
+  },
   events: {
     list: ({ symbol, from, limit, offset, type }) => {
       const q = new URLSearchParams({ select: '*' });

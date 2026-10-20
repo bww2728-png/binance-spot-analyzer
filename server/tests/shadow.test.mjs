@@ -29,6 +29,40 @@ test('الإصلاحات ★ غير مُفعَّلة افتراضياً (قيا�
   assert.equal(shadow.decide, undefined, 'لا واجهة «قرار» — الظل للقياس فقط');
 });
 
+test('تقرير الظل يبقى عبر إعادة التشغيل (مخزن الحالة الدائم)', async () => {
+  const store = new Map();
+  const fakeDb = {
+    engineState: {
+      put: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); },
+      get: async (k) => store.get(k) ?? null
+    }
+  };
+  const first = createShadow();
+  // المقارنة: (المفتاح، القرار المنشور، قرار الظل) — تطابق JSON = اتفاق
+  first.compare('s2-closed-bars-only', { d: 'a' }, { d: 'a' });
+  first.compare('s2-closed-bars-only', { d: 'b' }, { d: 'b' });
+  first.compare('s2-closed-bars-only', { d: 'c' }, { d: 'd' });
+  assert.equal(await first.persistDb(fakeDb), true, 'حُفظ في القاعدة');
+  assert.ok(store.has('shadow_report'), 'مفتاح التقرير موجود');
+
+  // عملية جديدة (كما بعد إعادة النشر): تبدأ من صفر ثم تستعيد
+  const second = createShadow();
+  assert.equal(second.summary().records.length, 0, 'قبل الاستعادة: لا سجلات (صفر تراكم)');
+  const loaded = await second.loadDb(fakeDb);
+  assert.ok(loaded, 'قُرئ التقرير المحفوظ');
+  const rec = second.summary().records.find(r => r.key === 's2-closed-bars-only');
+  assert.equal(rec.samples, 3, 'العيّنات الثلاث عادت بعد إعادة التشغيل');
+  assert.equal(rec.agree, 2);
+  assert.equal(rec.diff, 1);
+});
+
+test('لا يُحفظ شيء إن كان المخزن الدائم غير متاح (لا فشل صامت أو انهيار)', async () => {
+  const shadow = createShadow();
+  assert.equal(await shadow.persistDb(null), false);
+  assert.equal(await shadow.persistDb({}), false);
+  assert.equal(await shadow.loadDb({ engineState: { get: async () => { throw new Error('شبكة'); } } }), null, 'خطأ الشبكة لا يُسقط شيئاً');
+});
+
 test('المقارنة ترصد الاتفاق والاختلاف بدقة', () => {
   const shadow = createShadow();
   shadow.compare('s2-closed-bars-only', { decision: 'up' }, { decision: 'up' }, (a, b) => a.decision === b.decision);

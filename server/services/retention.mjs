@@ -29,7 +29,13 @@ export const PROTECTED_TYPES = new Set([
   'strategy2_feedback', 'strategy2_direction',
   'live_opportunity', 'live_opportunity_closed', 'live_calibration',
   'liquidity_zone_decision', 'shariah_auto_change', 'shariah_researched',
-  'barcode_scan', 'symbols_updated', 'zones_changed', 'health_samples'
+  'barcode_scan', 'symbols_updated', 'zones_changed', 'health_samples',
+  /**
+   * حالة المحركات الدائمة (تقرير الظل، وانحياز التعلّم، وملخصات الباك تيست) —
+   * صف واحد لكل مفتاح ويُحدَّث في مكانه، فلا ينمو ولا يجوز حذفه: حذفه يعني
+   * فقدان ذاكرة التعلّم ودليل قياس ★ عند كل إعادة تشغيل.
+   */
+  'engine_state'
 ]);
 
 const DAY = 86_400_000;

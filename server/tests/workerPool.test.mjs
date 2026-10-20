@@ -63,14 +63,26 @@ test('الحساب لا يحجب حلقة الأحداث الرئيسية', asyn
   try {
     const candles = makeCandles(420, 5); // حمولة ثقيلة نسبياً
     let ticks = 0;
-    const timer = setInterval(() => { ticks += 1; }, 5);
+    let lastAt = Date.now();
+    let maxGapMs = 0;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      maxGapMs = Math.max(maxGapMs, now - lastAt);
+      lastAt = now;
+      ticks += 1;
+    }, 5);
     const t0 = Date.now();
     await pool.run('scanHistory', { symbol: 'SOLUSDT', timeframe: '15m', candles, step: 3, maxZones: 60 });
     const elapsed = Date.now() - t0;
     clearInterval(timer);
-    // أثناء الحساب يجب أن تستمر مؤقّتات الحلقة الرئيسية بالعمل
-    const expected = Math.floor(elapsed / 5) * 0.5; // سماح 50%
-    assert.ok(ticks >= expected, `الحلقة ظلّت حيّة: ${ticks} نبضة خلال ${elapsed}ms (المتوقع ≥ ${Math.floor(expected)})`);
+    /**
+     * الخاصية المقصودة «الحلقة ظلّت حيّة»، لا معدل نبض دقيق: المؤقّت نفسه يتأخر على
+     * نواة واحدة منشغلة، فلا يصحّ اشتراط نسبة من المثالي. المقياس الصحيح هو أطول
+     * انقطاع: الحجب الحقيقي يعني توقفاً بثوانٍ، أما التأخر العادي فبعشرات الميلي ثانية.
+     */
+    const expected = Math.floor(elapsed / 50); // نبضة واحدة كل 50ms على الأقل
+    assert.ok(ticks >= expected, `الحلقة ظلّت حيّة: ${ticks} نبضة خلال ${elapsed}ms (المتوقع ≥ ${expected})`);
+    assert.ok(maxGapMs < 500, `أطول انقطاع ${maxGapMs}ms يجب أن يبقى تحت 500ms (لا حجب فعلي)`);
   } finally {
     await pool.close();
   }
