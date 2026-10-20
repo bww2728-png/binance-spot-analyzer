@@ -2706,12 +2706,23 @@ const shutdown = async (signal) => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[server] إغلاق سليم (${signal})…`);
+  /**
+   * الخروج المضمون أولاً: المهلة كانت `unref` فلا تمنع بقاء العملية حيّة إن بقي أي مقبض
+   * مفتوحاً (بث، مقبس، مؤقّت محرك) — فتُغلق المنصة الحاوية قسراً بعد مهلة قصيرة، وتضيع
+   * الحالة. الآن الخروج مضمون بعد 3 ثوانٍ مهما بقي مفتوحاً. هذا مسار الإغلاق الوحيد
+   * الذي تمر به المنصة عند كل نشر أو إعادة تشغيل.
+   */
+  setTimeout(() => process.exit(0), Number(process.env.SHUTDOWN_GRACE_MS) || 3000);
   try { await healthSampler.write(); } catch { /* نبضة أخيرة اختيارية */ }
+  /**
+   * حفظ الحالة قبل الخروج (C2 + B11): بلا هذا يُفقد قياس ★ وتعلّم مراجعاتك عند كل
+   * إعادة تشغيل، وهو ما كان يحدث فعلاً. الحفظ هنا مقصود ومتزامن بترتيبه قبل إنهاء البث.
+   */
+  try { await shadow.persistDb(db); } catch { /* لا يمنع الخروج */ }
+  try { await persistLearning(); } catch { /* لا يمنع الخروج */ }
   try { await workerPool.close(); } catch { /* ignore */ }
   try { marketStreams.stop(); } catch { /* ignore */ }
   try { server.close(); } catch { /* ignore */ }
-  // مهلة قصوى للإغلاق ثم خروج إجباري
-  setTimeout(() => process.exit(0), 3000).unref?.();
 };
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
@@ -2907,12 +2918,16 @@ setInterval(() => void runShariahJob('دوري'), 30 * 60 * 1000);
  * سياسة الاحتفاظ بالبيانات — تمنع امتلاء القاعدة بتشخيصات متكررة.
  * القواعد المحمية (النتائج، القرارات، المعايرات، التحليلات، الأحكام) لا تُمس.
  */
+const retentionJob = health.register('retention', { stallMs: 26 * 3600_000 });
 const retention = startRetention({
   db,
   intervalMs: Number(process.env.RETENTION_HOURS || 12) * 3600_000,
-  log: console
+  log: console,
+  /** الإبلاغ بعد كل دورة: بدونه بقيت دورات الاحتفاظ صفراً في الصحة أبداً */
+  onRun: ({ ms = null, extra = null, error = null } = {}) => {
+    if (error) retentionJob.fail(error); else retentionJob.beat({ ms, extra });
+  }
 });
-const retentionJob = health.register('retention', { stallMs: 26 * 3600_000 });
 
 // ---- مزامنة دورية بالفرق + بث التغييرات لحظياً ----
 const SYNC_MS = (Number(process.env.SYMBOLS_SYNC_MIN) || 30) * 60 * 1000;

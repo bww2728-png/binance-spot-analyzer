@@ -110,15 +110,33 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
   return report;
 }
 
-/** جدولة دورية: مرة كل 12 ساعة (الحذف ليس عملاً حساساً للوقت) */
-export function startRetention({ db, intervalMs = 12 * 3600_000, log = console, now = () => Date.now() }) {
-  const tick = () => { void runRetention({ db, log, now }).catch(e => log.error?.('[retention] فشل:', e.message)); };
+/**
+ * جدولة دورية: مرة كل 12 ساعة (الحذف ليس عملاً حساساً للوقت).
+ *
+ * `onRun` مُمرَّر من الخادم ليُبلّغ قياس الصحة بعد كل دورة. بدونه بقيت دورات الاحتفاظ
+ * صفراً في الصحة أبداً (كان العيب مُقاساً: 0 دورات بعد 30 دقيقة تشغيل)، فيبدو أن سياسة
+ * الاحتفاظ لا تعمل بينما هي تعمل — وهذا يُفقد دليل سعة التخزين في حكم التشغيل المستمر.
+ */
+export function startRetention({ db, intervalMs = 12 * 3600_000, log = console, now = () => Date.now(), onRun = null }) {
+  let lastReport = null;
+  const tick = () => {
+    const startedAt = now();
+    void runRetention({ db, log, now })
+      .then((report) => {
+        lastReport = report;
+        try { onRun?.({ ms: now() - startedAt, extra: { deleted: report?.totalDeleted ?? 0, errors: report?.errors?.length ?? 0 } }); } catch { /* القياس لا يعطّل الاحتفاظ */ }
+      })
+      .catch((e) => {
+        try { onRun?.({ ms: now() - startedAt, error: e }); } catch { /* ignore */ }
+        log.error?.('[retention] فشل:', e.message);
+      });
+  };
   const timer = setInterval(tick, intervalMs);
   if (timer.unref) timer.unref();
   // أول تنفيذ بعد 5 دقائق من الإقلاع (لا نزاحم بدء التشغيل)
   const first = setTimeout(tick, 5 * 60_000);
   if (first.unref) first.unref();
-  return { stop: () => { clearInterval(timer); clearTimeout(first); }, run: tick };
+  return { stop: () => { clearInterval(timer); clearTimeout(first); }, run: tick, lastReport: () => lastReport };
 }
 
 export default runRetention;

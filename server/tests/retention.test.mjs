@@ -5,7 +5,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runRetention, agedDiagnosticTypes, PROTECTED_TYPES } from '../services/retention.mjs';
+import { runRetention, agedDiagnosticTypes, PROTECTED_TYPES, startRetention } from '../services/retention.mjs';
 
 const DAY = 86_400_000;
 
@@ -135,4 +135,52 @@ test('قيم المدد غير الصالحة تعود للافتراضي (لا 
   const DAY = 24 * 3600_000;
   await runRetention({ db, now: () => nowMs, diagnosticDays: 0, imageDays: '', log: { log: () => {}, warn: () => {} } });
   assert.equal(deleted[0], nowMs - 30 * DAY, 'صفر يعني الافتراضي لا «حذف كل شيء»');
+});
+
+/**
+ * عيب مُقاس: `startRetention` لم يكن يتلقّى أي وسيلة إبلاغ، فبقيت دورات الاحتفاظ صفراً
+ * في الصحة أبداً (رُصد: 0 دورات بعد 30 دقيقة تشغيل على النشر) — فيبدو أن سياسة الاحتفاظ
+ * لا تعمل بينما هي تعمل، ويضيع دليل سعة التخزين من حكم التشغيل المستمر.
+ */
+test('الإبلاغ بعد كل دورة احتفاظ: نبضة بأسماء صحيحة بدل صفر دورات', async () => {
+  const db = { events: { deleteBefore: async () => 0, listByType: async () => [], clearImagesBefore: async () => 0 } };
+  const beats = [];
+  const failures = [];
+  const scheduler = startRetention({
+    db,
+    intervalMs: 60 * 60_000,
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+    onRun: ({ ms = null, extra = null, error = null } = {}) => {
+      if (error) failures.push(error); else beats.push({ ms, extra });
+    }
+  });
+  try {
+    scheduler.run();
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(beats.length, 1, 'نبضة واحدة بعد دورة واحدة');
+    assert.equal(failures.length, 0, 'لا إخفاق في الدورة الناجحة');
+    assert.ok(beats[0].extra && typeof beats[0].extra.deleted === 'number', 'النبضة تحمل عدد المحذوف');
+  } finally { scheduler.stop(); }
+});
+
+test('إخفاق جدول واحد يُبلَّغ في عدد أخطاء النبضة ولا يمرّ صامتاً', async () => {
+  const db = { events: { deleteBefore: async () => { throw new Error('قاعدة غير متاحة'); }, listByType: async () => [], clearImagesBefore: async () => 0 } };
+  const beats = [];
+  const scheduler = startRetention({
+    db,
+    intervalMs: 60 * 60_000,
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+    onRun: ({ ms = null, extra = null, error = null } = {}) => { if (!error) beats.push({ ms, extra }); }
+  });
+  try {
+    scheduler.run();
+    await new Promise(r => setTimeout(r, 60));
+    /**
+     * السلوك المقصود: فشل جدول واحد لا يُسقط الدورة كلها (باقي الجداول تُقلَّم)، لكنه
+     * يظهر في عدّاد الأخطاء — فلا يمرّ العطل صامتاً كما كان يمرّ قبل الإصلاح.
+     */
+    assert.equal(beats.length, 1, 'الدورة تُبلَّغ رغم فشل جدول واحد');
+    assert.ok(beats[0].extra.errors >= 1, `الفشل ظاهر في عدّاد الأخطاء، والعدد ${beats[0].extra.errors}`);
+    assert.ok(scheduler.lastReport(), 'التقرير متاح ولو جزئياً');
+  } finally { scheduler.stop(); }
 });

@@ -12,6 +12,17 @@ import v8 from 'node:v8';
 
 const SAMPLER_MS = 5 * 60 * 1000;
 
+/**
+ * سقف مقصّ للفترة. السبب مُقاس: فترة أكبر من 2^31-1 مللي ثانية تُفيض في `setTimeout`
+ * فيحوّلها Node إلى 1ms (`TimeoutOverflowWarning`)، فينقلب المُعيّن إلى مطرقة على
+ * القاعدة بدل عيّنة كل دقائق. ولا معنى لفترة أقل من 30 ثانية أصلاً.
+ */
+const clampIntervalMs = (ms) => {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return SAMPLER_MS;
+  return Math.min(Math.max(value, 30_000), 24 * 60 * 60 * 1000);
+};
+
 /** حد الذاكرة الفعلي للحاوية (cgroup v2 ثم v1) — null إن لم يُتاح */
 function containerLimits() {
   const read = (p) => {
@@ -190,6 +201,7 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
 
   function startSampler({ db, intervalMs = SAMPLER_MS, log = console, sections = {} } = {}) {
     let timer = null;
+    const period = clampIntervalMs(intervalMs);
     const write = async () => {
       try {
         const snap = snapshot();
@@ -210,10 +222,10 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
         log.error?.('[health] فشل حفظ العيّنة:', e.message);
       }
     };
-    timer = setInterval(() => { void write(); }, intervalMs);
+    timer = setInterval(() => { void write(); }, period);
     if (timer.unref) timer.unref();
     void write();
-    return { stop: () => clearInterval(timer), write };
+    return { stop: () => clearInterval(timer), write, periodMs: period };
   }
 
   /** ربط قسم إضافي بالعيّنات المحفوظة (market/targets/shariah/dataFresh/workers) */
