@@ -49,13 +49,19 @@ export function agedDiagnosticTypes(days = 30) {
  * تنفيذ دورة الاحتفاظ.
  * @param {{db: object, now?: () => number, log?: object, dryRun?: boolean}} deps
  */
-export async function runRetention({ db, now = () => Date.now(), log = console, dryRun = false } = {}) {
+export async function runRetention({ db, now = () => Date.now(), log = console, dryRun = false, diagnosticDays = null, imageDays = null } = {}) {
   const t = now();
   const report = { at: t, dryRun, deleted: {}, errors: [], skipped: [] };
+  /**
+   * المُدد تُقرأ من البيئة (مع الافتراضيين 30 و90 يوماً) لأنها سياسة تشغيل لا ثابت
+   * برمجي: قد يحتاج المشرف تقصيرها عند ضيق السعة أو إطالتها عند التحقيق في حادث.
+   */
+  const diagDays = Number(diagnosticDays ?? process.env.RETENTION_DIAGNOSTIC_DAYS ?? 30) || 30;
+  const imgDays = Number(imageDays ?? process.env.RETENTION_IMAGE_DAYS ?? 90) || 90;
 
-  // 1) الأنواع التشخيصية بعد 30 يوماً
-  for (const type of agedDiagnosticTypes(30)) {
-    const before = t - 30 * DAY;
+  // 1) الأنواع التشخيصية بعد المدة المحددة
+  for (const type of agedDiagnosticTypes(diagDays)) {
+    const before = t - diagDays * DAY;
     if (dryRun) { report.skipped.push({ type, action: 'delete-before', before }); continue; }
     try {
       const n = await db.events.deleteBefore(type, before);
@@ -85,10 +91,10 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
     report.errors.push({ type: SNAPSHOT_TYPE, error: String(e?.message ?? e).slice(0, 200) });
   }
 
-  // 3) صور المناطق الآلية بعد 90 يوماً (الصور أثقل بكثير من النصوص)
+  // 3) صور المناطق الآلية بعد المدة المحددة (الصور أثقل بكثير من النصوص)
   for (const type of IMAGE_TYPES_90D) {
     if (PROTECTED_TYPES.has(type)) continue;
-    const before = t - 90 * DAY;
+    const before = t - imgDays * DAY;
     try {
       if (dryRun) { report.skipped.push({ type, action: 'clear-images-before', before }); continue; }
       const n = await db.events.clearImagesBefore(type, before);

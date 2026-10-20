@@ -2201,7 +2201,22 @@ setInterval(() => {
       const live = zones.filter(z => z.active && z.feedback !== 'reject' && (!z.expires_at || z.expires_at > now));
       if (!live.length) return;
       const symbols = [...new Set(live.map(z => z.symbol))];
-      const prices = await db.binance.tickerPrices(symbols);
+      /**
+       * الأسعار من البث الحي أولاً (بلا شبكة ولا كلفة)، وREST فقط للرموز التي لا سعر
+       * حي لها. السبب المقيس: كان الطلب عبر REST لكل الرموز كل 30 ثانية، وفيه كلفة
+       * وحجب على محدّد المعدل، مع أن السعر نفسه موجود في الذاكرة لحظياً.
+       */
+      const prices = {};
+      const missing = [];
+      for (const sym of symbols) {
+        const p = marketStreams.getFreshPrice(sym);
+        if (Number.isFinite(p) && p > 0) prices[sym] = p;
+        else missing.push(sym);
+      }
+      if (missing.length) {
+        const fetched = await db.binance.tickerPrices(missing);
+        Object.assign(prices, fetched);
+      }
       for (const z of live) {
         const p = prices[z.symbol];
         if (!p) continue;

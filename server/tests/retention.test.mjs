@@ -105,3 +105,34 @@ test('فشل قاعدة البيانات لا يُسقط الدورة بل يُ�
   assert.equal(report.errors.length > 0, true, 'الأخطاء مرصودة');
   assert.equal(typeof report.totalDeleted, 'number', 'الدورة أُكملت بلا رمي');
 });
+
+test('المدد قابلة للضبط: تغييرها يغيّر حدّ الحذف فعلاً', async () => {
+  const deleted = [];
+  const db = {
+    events: {
+      deleteBefore: async (type, before) => { deleted.push({ type, before }); return 1; },
+      listByType: async () => [],
+      clearImagesBefore: async () => 0
+    }
+  };
+  const nowMs = 1_800_000_000_000;
+  const DAY = 24 * 3600_000;
+
+  const long = await runRetention({ db, now: () => nowMs, diagnosticDays: 60, imageDays: 180, log: { log: () => {}, warn: () => {} } });
+  const cut = deleted[0]?.before;
+  assert.equal(cut, nowMs - 60 * DAY, 'حدّ الحذف اتبع 60 يوماً لا 30');
+  assert.equal(long.errors.length, 0);
+
+  deleted.length = 0;
+  await runRetention({ db, now: () => nowMs, diagnosticDays: 7, imageDays: 30, log: { log: () => {}, warn: () => {} } });
+  assert.equal(deleted[0]?.before, nowMs - 7 * DAY, 'حدّ الحذف اتبع 7 أيام');
+});
+
+test('قيم المدد غير الصالحة تعود للافتراضي (لا حذف بلا حد)', async () => {
+  const deleted = [];
+  const db = { events: { deleteBefore: async (t, b) => { deleted.push(b); return 0; }, listByType: async () => [], clearImagesBefore: async () => 0 } };
+  const nowMs = 1_800_000_000_000;
+  const DAY = 24 * 3600_000;
+  await runRetention({ db, now: () => nowMs, diagnosticDays: 0, imageDays: '', log: { log: () => {}, warn: () => {} } });
+  assert.equal(deleted[0], nowMs - 30 * DAY, 'صفر يعني الافتراضي لا «حذف كل شيء»');
+});
