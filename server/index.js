@@ -37,6 +37,7 @@ import {
   mergeZones, replaceSymbolScan, boundByNewest, shouldStartRotation, capState,
   DEFAULT_HISTORY_MAX_ZONES, DEFAULT_LIVE_MAX_ZONES
 } from './services/zoneStore.mjs';
+import { reviveDecision, REVIVE_COOLDOWN_MS, REVIVE_MAX } from './services/revive.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2674,6 +2675,12 @@ health.addSection('rateLimiter', () => { try { return runtime.rateLimiter?.() ??
  * يُعرض كمّ المناطق وسقف كل مخزون ونسبة الاستهلاك.
  */
 health.addSection('zones', () => { try { return runtime.zones(); } catch { return null; } });
+/**
+ * دليل بقاء الحالة عبر إعادات التشغيل (تعلّم المراجعات + قياس ★) — يُسجَّل في العيّنات
+ * حتى يُرى بعد كل نشر أن الحالة عادت فعلاً، لا أن تُفترض.
+ */
+health.addSection('stateRestore', () => { try { return runtime.stateRestore?.() ?? null; } catch { return null; } });
+health.addSection('shadow', () => { try { return runtime.shadow?.() ?? null; } catch { return null; } });
 
 // عيّنات الصحة الدورية — دليل التشغيل المستمر يُكتب في القاعدة كل 5 دقائق
 const healthSampler = health.startSampler({
@@ -2755,6 +2762,37 @@ setInterval(() => {
     }
   } catch (e) { strategy2Job.fail(e); }
 }, 30_000);
+/**
+ * مراقب الإحياء: الكشف وحده لا يكفي لتشغيل 24 ساعة والجهاز مغلق. إذا ثبت تعليق
+ * محرك (لا دورة منذ مهلة التعليق) تُستأنف الحلقة — إعادة تشغيل الحلقة لا تُفقد حالة:
+ * الفرص والمناطق محفوظة، والدورة التالية تتكامل مع الموجود.
+ * الحد: محاولة واحدة كل 10 دقائق لكل محرك، وبسقف 5 محاولات، ثم تحذير صريح بلا إصرار
+ * عنيد (إعادة التشغيل المتكررة بلا فائدة مؤشر عطل عميق يستحق ظهوراً لا إخفاءً).
+ */
+const revivals = new Map(); // name → { at, count }
+const reviveCandidates = [
+  { name: 'live-opportunities', revive: () => { liveOppEngine.stop?.(); liveOppEngine.start?.(); }, enabled: () => Number(process.env.AUTO_REVIVE ?? 1) === 1 },
+  { name: 'strategy2', revive: () => { strategy2Engine.stop?.(); strategy2Engine.start?.(); }, enabled: () => Number(process.env.AUTO_REVIVE ?? 1) === 1 }
+];
+setInterval(() => {
+  for (const cand of reviveCandidates) {
+    try {
+      const snap = health.snapshot().engines.find(e => e.name === cand.name);
+      const live = Number(process.env.AUTO_REVIVE ?? 1) === 1;
+      const { action, record, warn } = reviveDecision(snap, revivals.get(cand.name), Date.now(), { enabled: live });
+      if (action === 'idle') { revivals.delete(cand.name); liveJob.set({ revivals: Object.fromEntries([...revivals].map(([k, v]) => [k, v.count])) }); continue; }
+      if (action === 'exhausted') {
+        if (warn) console.error(`[revive] ${cand.name} متوقف ${Math.round((snap.sinceCycleMs ?? 0) / 1000)}ث، وتجاوز ${REVIVE_MAX} محاولات — يحتاج تدخلاً`);
+        continue;
+      }
+      if (action !== 'revive') continue;
+      revivals.set(cand.name, record);
+      console.error(`[revive] إحياء ${cand.name} (متوقف ${Math.round((snap.sinceCycleMs ?? 0) / 1000)}ث، محاولة ${record.count})`);
+      cand.revive();
+      liveJob.set({ revivals: Object.fromEntries([...revivals].map(([k, v]) => [k, v.count])) });
+    } catch (e) { console.error(`[revive] فشل إحياء ${cand.name}: ${e.message}`); }
+  }
+}, 60_000);
 /** الإبلاغ عن التعليق من قراءة الحالة لا من الدورة نفسها */
 setInterval(() => {
   for (const [job, name] of [[liveJob, 'live-opportunities'], [strategy2Job, 'strategy2']]) {
