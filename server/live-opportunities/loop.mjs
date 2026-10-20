@@ -122,6 +122,11 @@ export function createLiveOpportunityEngine(deps) {
    */
   const shadowDecided = new Map();     // مفتاح شريحة → {trades, wins} بقاعدة «عند الحسم فقط»
   const shadowCountedOps = new Set();  // مفاتيح الفرص المحسوبة في النسخة الظلّية
+  /**
+   * ★5 قياس فقط: حالة الحكم المعلَّق لكل فرصة منشورة (مفتاح → {bars, hi, lo}).
+   * منفصلة عن `opportunities` عمداً: لا تُحفظ ولا تُصدَّر ولا يقرأها أي قرار.
+   */
+  const outcomeShadowState = new Map();
   const history = [];                  // فرص محسومة/قديمة (محدودة)
   const segments = new Map();          // مفتاح شريحة → إحصاء
   const rejected = [];                 // مرشحون لم يجتازوا البوابات/الشريحة (شفافية)
@@ -451,6 +456,27 @@ export function createLiveOpportunityEngine(deps) {
 
     trackers.set(key, markPublished(st, key, now()));
     opportunities.set(key, opportunity);
+    /**
+     * ★5 قياس فقط: الحكم المعلَّق يُحدَّد من **أعلى وأدنى سعر في الشموع المكتملة منذ
+     * النشر**، لا من سعر لحظي يُقرأ كل عدة ثوانٍ. المتابعة الحالية تفوّت الظلال السريعة
+     * التي تلمس الهدف أو الوقف بين قراءتين. تُحفظ الحالة خارج كائن الفرصة كي لا تدخل
+     * التخزين ولا تُغيّر أي صف محفوظ.
+     */
+    if (shadow) {
+      outcomeShadowState.set(key, {
+        symbol: opportunity.symbol, timeframe: opportunity.timeframe,
+        stop: Number(opportunity.stop), tp: Number(opportunity.tp),
+        bars: 0, hi: -Infinity, lo: Infinity, published: null, compared: false
+      });
+      /**
+       * سقف صلب: الحالة لا تخرج عن الفرص المنشورة أخيراً، فلا تنمو بلا حد لو لم تُقارن.
+       * الأقدم يُسقَط أولاً لأنه الأقل احتمالاً لبلوغ حكم نهائي.
+       */
+      while (outcomeShadowState.size > Math.max(cfg.publishLimit * 3, 60)) {
+        const firstKey = outcomeShadowState.keys().next().value;
+        outcomeShadowState.delete(firstKey);
+      }
+    }
     if (opportunities.size > cfg.publishLimit) {
       /**
        * إصلاح B5 (جزء الأشباح): كان الأقدم يُحذف من الذاكرة فقط بلا حفظ، فيُستعاد
@@ -503,6 +529,14 @@ export function createLiveOpportunityEngine(deps) {
        */
       if (op.outcome && op.segmentKey) {
         countDecidedOnce(shadowCountedOps, shadowDecided, op.id, op.outcome, op.segmentKey);
+      }
+      /**
+       * ★5 قياس: نُسجّل الحكم المنشور (من السعر اللحظي) لنقارنه لاحقاً بالحكم المعلَّق
+       * من أعلى/أدنى الشموع. لا يُقرأ هذا في أي قرار.
+       */
+      if (op.outcome && shadow) {
+        const st = outcomeShadowState.get(op.id);
+        if (st && !st.published) st.published = op.outcome;
       }
       // تغذية راجعة حية لشريحة الفرصة (champion-challenger) — تُستخدم في الترقية التلقائية
       if (op.segmentKey) {
@@ -596,11 +630,63 @@ export function createLiveOpportunityEngine(deps) {
         op.earlyExit = true; // تظهر في tick الثانية التالية (اللقطات كاملة دوماً)
       }
     }
+    advanceOutcomeShadow(symbol, tf);
     // دورة سريعة مُخفَّفة — المحرك كله في الذاكرة الآن فلا تكلفة تقريباً
     const t = now();
     if (t - lastFastCycleAt < cfg.fastCycleThrottleMs) return;
     lastFastCycleAt = t;
     if (!status.busy) void runCycle();
+  }
+
+  /**
+   * ★5 قياس فقط — الحكم المعلَّق من الشموع المكتملة.
+   *
+   * الفرضية المُقاسة: المتابعة المنشورة تقرأ سعراً لحظياً كل عدة ثوانٍ، فقد يلمس السعر
+   * الوقف أو الهدف بين قراءتين ويضيع الحسم؛ ولا تنتهي صلاحية الفرصة أبداً بينما تنتهي
+   * في المعايرة بعد `maxBars` شمعة (96). الدليل هو عدد الفرص التي يختلف حكمها.
+   *
+   * الطريقة: مع كل شمعة مكتملة لرمز الفرصة وفريمها نُراكم أعلى وأدنى سعر، ثم:
+   *  - الوقف يُلمس إن نزل الأدنى إلى الوقف، والهدف إن صعد الأعلى إلى الهدف (الوقف أولاً
+   *    هو الأسوأ حال اللمس المزدوج — لا نفترض الأفضل).
+   *  - عند بلوغ `maxBars` شمعة يصبح الحكم «منتهية» كما في المعايرة.
+   *  - تُقارن مرة واحدة فقط لكل فرصة، وحينها يكون الطرفان نهائيين.
+   * لا يُكتب أي شيء من هذا في الفرصة ولا في أي صف محفوظ.
+   */
+  function advanceOutcomeShadow(symbol, tf) {
+    if (!shadow || outcomeShadowState.size === 0) return;
+    const bars = market?.getKlines?.(symbol, tf) ?? [];
+    const last = bars[bars.length - 1];
+    const high = Number(last?.high);
+    const low = Number(last?.low);
+    if (!Number.isFinite(high) || !Number.isFinite(low)) return;
+    for (const [id, st] of outcomeShadowState) {
+      if (st.compared || st.symbol !== symbol || st.timeframe !== tf) continue;
+      st.bars += 1;
+      st.hi = Math.max(st.hi, high);
+      st.lo = Math.min(st.lo, low);
+      const hitStop = Number.isFinite(st.stop) && st.lo <= st.stop;
+      const hitTarget = Number.isFinite(st.tp) && st.hi >= st.tp;
+      const pending = hitStop ? 'stop' : hitTarget ? 'target' : st.bars >= cfg.maxBars ? 'expired' : null;
+      /**
+       * المقارنة تحتاج طرفين نهائيين: الحكم المعلَّق إما حُسم بالسعر اللحظي، وإما انقضت
+       * مدة التعليق فصار نهائياً. قبل ذلك لا معنى للمقارنة.
+       */
+      const publishedFinal = st.published ?? (st.bars >= cfg.maxBars ? 'open' : null);
+      if (!pending || !publishedFinal) continue;
+      st.compared = true;
+      shadow.compare(
+        'fabio-expiry-and-hilo',
+        { outcome: publishedFinal, source: st.published ? 'tick' : 'no-resolution' },
+        { outcome: pending, source: 'candle-hilo' },
+        (a, b) => a?.outcome === b?.outcome,
+        {
+          symbol, timeframe: tf, bars: st.bars, id,
+          lo: Number(st.lo.toPrecision(10)), hi: Number(st.hi.toPrecision(10)),
+          stop: st.stop, tp: st.tp
+        }
+      );
+      outcomeShadowState.delete(id);
+    }
   }
 
   /** دورة واحدة كاملة */
@@ -971,7 +1057,9 @@ export function createLiveOpportunityEngine(deps) {
         progress: calibration.progress, segments: calibration.segments.length, error: calibration.error
       },
       /** ★3: مقارنة العدّ المنشور بالعدّ الصحيح (عند الحسم فقط) — قياس بلا أثر */
-      segmentsShadow: segmentShadowReport()
+      segmentsShadow: segmentShadowReport(),
+      /** ★5: عدد الفرص التي ما زال حكمها المعلَّق (من الشموع) بانتظار طرف نهائي للمقارنة */
+      outcomeShadowPending: outcomeShadowState.size
     };
   }
 

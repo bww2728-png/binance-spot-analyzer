@@ -38,6 +38,7 @@ import {
   DEFAULT_HISTORY_MAX_ZONES, DEFAULT_LIVE_MAX_ZONES
 } from './services/zoneStore.mjs';
 import { reviveDecision, REVIVE_COOLDOWN_MS, REVIVE_MAX } from './services/revive.mjs';
+import { measureIdentityStability, createIdentityCollector } from './services/zoneIdentityShadow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -152,6 +153,8 @@ app.get('/api/health/deep', (req, res) => {
     zones: (() => { try { return runtime.zones?.() ?? null; } catch { return null; } })(),
     /** دليل بقاء الحالة عبر إعادات التشغيل (تعلّم المراجعات + قياس ★) */
     stateRestore: (() => { try { return runtime.stateRestore?.() ?? null; } catch { return null; } })(),
+    /** ★2 قياس: نسبة دوران هوية المنطقة (مرجّحة بعدد المناطق) — قياس فقط بلا أثر */
+    zoneIdentity: (() => { try { return zoneIdentityCollector.summary(); } catch { return null; } })(),
     dataFresh: fresh
   });
 });
@@ -1024,6 +1027,31 @@ const saveLiquidityEvent = async (type, zone, message, meta = {}) => {
 const HISTORY_MAX_ZONES = Number(process.env.LIQUIDITY_HISTORY_MAX_ZONES || DEFAULT_HISTORY_MAX_ZONES);
 const LIVE_MAX_ZONES = Number(process.env.LIQUIDITY_LIVE_MAX_ZONES || DEFAULT_LIVE_MAX_ZONES);
 
+/**
+ * ★2: كل كم عمل نفحص ثبات هوية المنطقة. 6006 عملية لكل دورة، وعيّنة كل 120 تعني ~50
+ * عيّنة في الدورة (‎+0.8% كلفة CPU) وهو ما يكفي لتجمّع دليل حقيقي في ساعات.
+ */
+const ZONE_ID_SHADOW_STRIDE = Math.max(10, Number(process.env.ZONE_ID_SHADOW_STRIDE || 120));
+const zoneIdentityCollector = createIdentityCollector();
+
+/**
+ * ★2: تغذية مجمّع الظل بمقارنة **لكل منطقة** لا لكل عيّنة. الحبيبة الصحيحة هي المنطقة:
+ * نسبة دوران مرجّحة بعدد المناطق هي الجواب، ومتوسط نسب العيّنات يُخفي الفرق.
+ * لكل منطقة مُطابَقة مقارنة واحدة: اتفاق إن ثبت المعرّف، وفرق إن تغيّر.
+ */
+const shadowCompareIdentitySamples = (sample) => {
+  if (!shadow || !sample) return;
+  for (const pair of sample.pairs ?? []) {
+    shadow.compare(
+      'liquidity-stable-zone-id',
+      { id: pair.before },
+      { id: pair.after },
+      (a, b) => a?.id != null && a.id === b?.id,
+      { symbol: sample.symbol, timeframe: sample.timeframe }
+    );
+  }
+};
+
 const mergeLiquidityResults = (rows, incoming) => mergeZones(rows, incoming);
 
 const runLiquidityLiveRotation = async () => {
@@ -1067,6 +1095,31 @@ const runLiquidityLiveRotation = async () => {
             biasPerKind: liquidityState.adjustment.visualBias || {}
           }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex }));
           liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
+          /**
+           * ★2 قياس فقط: يُشغَّل الكشف مرة ثانية بنفس الشموع وبفارق شمعة واحدة، وكل منطقة
+           * مُطابَقة هي نفس المنطقة — فإن اختلف معرّفها فذلك عدم ثبات خالص يُفسّر ضياع
+           * حالة السويب في محرك Fabio والتراكم في المخزون. العيّنة مقيّدة بـ`stride` كي
+           * تبقى الكلفة أقل من 1% من الفحص، ولا يقرأ الناتج أي قرار منشور.
+           */
+          const workOrder = symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex;
+          if (shadow && workOrder % ZONE_ID_SHADOW_STRIDE === 0) {
+            const sample = measureIdentityStability({
+              detect: ({ endIndex }) => detectLiquidityZones({
+                symbol,
+                timeframe,
+                candles,
+                endIndex,
+                tolerancePct: liquidityState.adjustment.tolerancePct,
+                biasPerKind: liquidityState.adjustment.visualBias || {}
+              }),
+              symbol,
+              timeframe,
+              endIndex: candles.length - 1,
+              tolerancePct: liquidityState.adjustment.tolerancePct
+            });
+            zoneIdentityCollector.add(sample);
+            shadowCompareIdentitySamples(sample);
+          }
         } catch { /* زوج/فريم فاشل لا يوقف المحرك المستقل */ }
       }
       liquidityState.livePairsDone += 1;
@@ -2682,6 +2735,8 @@ health.addSection('zones', () => { try { return runtime.zones(); } catch { retur
  */
 health.addSection('stateRestore', () => { try { return runtime.stateRestore?.() ?? null; } catch { return null; } });
 health.addSection('shadow', () => { try { return runtime.shadow?.() ?? null; } catch { return null; } });
+/** ★2 قياس: نسبة دوران هوية المنطقة تتراكم في العيّنات فيصير للقرار دليل رقمي */
+health.addSection('zoneIdentity', () => { try { return zoneIdentityCollector.summary(); } catch { return null; } });
 
 // عيّنات الصحة الدورية — دليل التشغيل المستمر يُكتب في القاعدة كل 5 دقائق
 const healthSampler = health.startSampler({
