@@ -114,13 +114,29 @@ export function classifyExternalPivots(pivots, candles, endIndex, opts = {}) {
   return list.map((p) => {
     const prom = Number.isFinite(p.prominenceAtr) ? p.prominenceAtr : 0;
     const strongEnough = prom >= externalMinAtr;
-    // هل يحوطه pivot أحدث بنفس النوع؟ (بالنسبة لنوعه: قمة أحدث أعلى، قاع أحدث أدنى)
+    /**
+     * تصنيف خارجي/داخلي **بلا نظر مستقبلي** — بعد إصلاح عطل منطقي مُثبت.
+     *
+     * كان التصنيف يشترط ألا يتجاوز الطرفَ أيُّ طرف أحدث منه بنفس النوع. وهذا الشرط خاطئ
+     * لسببين مقيسين:
+     *  1. **يناقض البوس منطقياً**: البوس يتطلب إغلاقاً يتجاوز المستوى، ولو تحقق ذلك لتجاوز
+     *     الطرفَ طرفٌ أحدث فصار «داخلياً» — فيصبح البوس مستحيلاً بحكم التعريف لا بحكم السوق.
+     *     القياس أثبت الأثر: 4 أحداث بوس فقط في 32 عيّنة (كل عيّنة 700 شمعة)، بينما IDM
+     *     وحده 2,481 حدثاً.
+     *  2. **يستخدم معلومة مستقبلية**: كان يحكم على الطرف بشموع تأتي بعده، وهو ما يخالف
+     *     شرط «لا معلومة مستقبلية» الحاكم في هذا النظام.
+     *
+     * الصواب: الطرف الخارجي هو **الحركة الكبرى**، ويُقاس ذلك ببروزها (بوحدات ATR) — وهو
+     * مقياس متاح لحظة تكوّنها. والبروز الأكبر = حركة أكبر = كسرها تغيير سلوك فعلي.
+     * ويبقى التشابه البنيوي (احتواء طرف أحدث له) معلومة مسجَّلة في `containedByLater`
+     * للعرض والتشخيص، لكنه **لا يُسقط** الخارجية.
+     */
     const newer = list.filter(q => q.kind === p.kind && q.index > p.index && q.index <= end);
-    const engulfed = p.kind === 'high'
-      ? newer.some(q => q.price >= p.price)
-      : newer.some(q => q.price <= p.price);
-    const level = strongEnough && !engulfed ? 'external' : 'internal';
-    return { ...p, level };
+    const containedByLater = p.kind === 'high'
+      ? newer.some(q => Number(q.price) >= Number(p.price))
+      : newer.some(q => Number(q.price) <= Number(p.price));
+    const level = strongEnough ? 'external' : 'internal';
+    return { ...p, level, containedByLater };
   });
 }
 
