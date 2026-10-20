@@ -6,6 +6,7 @@ import type { BuyFeed, BuyHistoryEvent, BuyOpportunity, BuyWatchRow, BuyCalibrat
 import type { LiveOppTickRow, LiveWatchTickRow } from '../lib/binance';
 import LiveDashboard from './LiveDashboard';
 import { TIMEFRAMES } from '../lib/types';
+import { useServerHealth } from '../lib/serverHealth';
 
 /**
  * واجهة «الفرص الحية» — دخول شراء فقط عبر سويب مناطق SSL + أدوات الأوردر فلو.
@@ -60,6 +61,9 @@ const ago = (ts: number | null | undefined, now: number) => {
 export default function LiveOpportunitiesScreen() {
   const [feed, setFeed] = useState<BuyFeed | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { health: serverHealth, status: serverStatus } = useServerHealth(15_000);
+  /** «بيانات قديمة» تُشتق من حالة الخادم، وهي حالتان: تعطّل محرك، أو تقادم بيانات */
+  const serverStale = serverStatus === 'stale' || serverStatus === 'stalled' || (serverHealth?.dataFresh?.ok === false);
   const [tfFilter, setTfFilter] = useState('');
   const [scopeFilter, setScopeFilter] = useState<'all' | 'halal'>('halal');
   const [section, setSection] = useState<'opps' | 'dashboard' | 'watch' | 'results' | 'rejected' | 'closed'>('opps');
@@ -210,6 +214,17 @@ export default function LiveOpportunitiesScreen() {
           <button onClick={() => void runCalibration()} className="px-4 py-2 rounded-lg text-[12px] font-bold" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>تشغيل المعايرة</button>
         </div>
       </div>
+
+      {/**
+        * وسم البيانات القديمة: الفرص تُبنى على أسعار، وسعر متقادم يعني قراراً على صورة
+        * قديمة للسوق. الشرط من الخادم نفسه (عمر آخر سعر) لا من انطباع الواجهة.
+        */}
+      {serverStale && (
+        <div className="rounded-xl px-4 py-3 text-[12px] flex items-start gap-2" style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.35)', color: '#b45309' }}>
+          <span className="font-bold">بيانات قديمة</span>
+          <span style={{ color: 'var(--text-2)' }}>{serverHealth?.dataFresh?.reason || 'بيانات السوق متقادمة — النتائج أدناه قد لا تعكس السوق الآن.'}</span>
+        </div>
+      )}
 
       {/* شريط التقدم الحي */}
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-2">
@@ -516,6 +531,11 @@ function WatchRow({ row, tick, onChart }: { row: BuyWatchRow; tick: LiveWatchTic
 
 function OpportunityCard({ op, now, targetRate, onChart, tick, seg }: { op: BuyOpportunity; now: number; targetRate: number; onChart: () => void; tick: LiveOppTickRow | null; seg: BuyCalibrationSegment | null }) {
   const rateOk = op.calibratedWinRate >= targetRate;
+  /**
+   * فحص الباركود من سجل الفحوص (مفتاحه الرمز). الرمز المُعلَّم باركوداً يُعرض مع تحذير
+   * ولا يُستبعَد — قرار المستخدم الصريح. غياب الفحص يعني لا تحذير (لا نمط معروف).
+   */
+  const barcodeIsSet = useStore(s => s.barcodeScans[op.symbol]?.is_barcode === true);
   const outcomeColor = op.outcome === 'target' ? 'var(--up)' : op.outcome === 'stop' ? 'var(--down)' : 'var(--accent)';
   // نسبة الربح المتوقعة للهدف من الدخول (قبل الرسوم — تُخصم في البحث)
   const profitPct = op.entry > 0 ? ((op.tp - op.entry) / op.entry) * 100 : null;
@@ -542,6 +562,19 @@ function OpportunityCard({ op, now, targetRate, onChart, tick, seg }: { op: BuyO
             </span>
           )}
           {tick && <span className="text-[10px]" style={{ color: 'var(--up)' }} title="بث لحظي كل ثانية">●</span>}
+          {/**
+            * تحذير الباركود: الرمز لم يعد مُستبعَداً (قرار المستخدم: تحذير دون استبعاد)،
+            * لكن الفرصة على نمط باركود معروف — فيجب أن يظهر ذلك صراحةً على الفرصة.
+            */}
+          {barcodeIsSet && (
+            <span
+              className="px-2 py-0.5 rounded-md text-[10px] font-bold"
+              style={{ background: 'var(--warn-soft)', color: '#b45309' }}
+              title="رمز بنمط باركود — يُعرض تحذيراً لا استبعاداً"
+            >
+              باركود
+            </span>
+          )}
         </div>
         <span className="num font-bold text-[13px]" style={{ color: outcomeColor }}>
           {op.outcome === 'target' ? 'وصل الهدف' : op.outcome === 'stop' ? 'ضرب الوقف' : `درجة ${op.composite}`}
