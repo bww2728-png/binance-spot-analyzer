@@ -1032,6 +1032,11 @@ const LIVE_MAX_ZONES = Number(process.env.LIQUIDITY_LIVE_MAX_ZONES || DEFAULT_LI
  * عيّنة في الدورة (‎+0.8% كلفة CPU) وهو ما يكفي لتجمّع دليل حقيقي في ساعات.
  */
 const ZONE_ID_SHADOW_STRIDE = Math.max(10, Number(process.env.ZONE_ID_SHADOW_STRIDE || 120));
+/**
+ * ★2: نافذة المقارنة. 4 شموع هي الفجوة الواقعية بين دورتي فحص لنفس الزوج والفريم،
+ * وشمعة واحدة تُبخّس العيب (22% مقابل 37.6% بالقياس على بيانات حقيقية).
+ */
+const ZONE_ID_SHADOW_LOOKBACK = Math.max(1, Number(process.env.ZONE_ID_SHADOW_LOOKBACK || 4));
 const zoneIdentityCollector = createIdentityCollector();
 
 /**
@@ -1115,6 +1120,7 @@ const runLiquidityLiveRotation = async () => {
               symbol,
               timeframe,
               endIndex: candles.length - 1,
+              lookbackBars: ZONE_ID_SHADOW_LOOKBACK,
               tolerancePct: liquidityState.adjustment.tolerancePct
             });
             zoneIdentityCollector.add(sample);

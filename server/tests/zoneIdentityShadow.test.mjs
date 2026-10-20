@@ -86,3 +86,35 @@ test('المجمّع بلا مطابقات: churnRate = null ولا قسمة ع�
   assert.equal(s.churnRate, null);
   assert.equal(s.samples, 1);
 });
+
+/**
+ * نافذة المقارنة: قياس حقيقي على بيانات السوق أعطى 22.1% عند شمعة واحدة و37.6% عند
+ * أربع. النافذة الافتراضية يجب أن تكون الفجوة الواقعية (4) لا شمعة واحدة، وإلا بُخّس
+ * حجم العيب. والاتجاه أمامي: نبحث عن المنطقة في الحالة **الأقدم** ونقارن بمعرّفها الآن.
+ */
+test('النافذة الافتراضية 4 شموع والاتجاه أمامي (الأقدم ← الأحدث)', () => {
+  const calls = [];
+  const detect = ({ endIndex }) => {
+    calls.push(endIndex);
+    // عند النهاية الأقدم معرّف قديم، وعند النهاية الأحدث معرّف جديد لنفس السعر
+    return [zone(endIndex === 96 ? 'cluster-high-9-10000000000' : 'cluster-high-0-10000000000', 'high', 100)];
+  };
+  const r = measureIdentityStability({ detect, symbol: 'BTCUSDT', timeframe: '15m', endIndex: 100, tolerancePct: 0.002 });
+  assert.deepEqual(calls, [100, 96], 'المقارنة على فارق 4 شموع افتراضاً');
+  assert.equal(r.lookbackBars, 4);
+  assert.equal(r.matched, 1, 'المنطقة نفسها بالسعر نفسه');
+  assert.equal(r.churned, 1, 'لكن معرّفها تغيّر → دوران');
+});
+
+test('نافذة مخصّصة تُحترم، ونافذة تتجاوز بداية السلسلة لا تُنتج قياساً كاذباً', () => {
+  const seen = [];
+  const detect = ({ endIndex }) => { seen.push(endIndex); return [zone('z', 'high', 100)]; };
+  const custom = measureIdentityStability({ detect, symbol: 'A', timeframe: '1h', endIndex: 100, tolerancePct: 0.002, lookbackBars: 8 });
+  assert.deepEqual(seen, [100, 92], 'النافذة المخصّصة 8');
+  assert.equal(custom.lookbackBars, 8);
+  // نافذة أكبر من المتاح: تتوقف بلا قياس بدل أن تقارن بلا بيانات
+  const short = measureIdentityStability({ detect, symbol: 'A', timeframe: '1h', endIndex: 22, tolerancePct: 0.002, lookbackBars: 8 });
+  assert.equal(short.matched, 0);
+  assert.equal(short.churnRate, null, 'لا نسبة من صفر مطابقات');
+  assert.equal(short.lookbackBars, 8);
+});

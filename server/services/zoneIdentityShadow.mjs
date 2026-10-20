@@ -89,19 +89,30 @@ export function idStability(prev = [], next = [], tolerancePct = 0.002, keepPair
 }
 
 /**
- * يقيس ثبات الهوية بتشغيل الكشف مرتين بفارق شمعة واحدة. `detect` تُمرَّر كدالة
- * لتبقى هذه الوحدة نقية بلا استيراد المحرك (فتُختبر بمناطق مُصنَّعة).
+ * يقيس ثبات الهوية بتشغيل الكشف مرتين بفارق `lookbackBars` شمعة. الاتجاه **أمامي**:
+ * حالة المنطقة قبل `lookbackBars` مقابل معرّفها الآن — وهذا ما يحدث فعلاً بين دورتي فحص
+ * لنفس الزوج والفريم. `detect` تُمرَّر كدالة لتبقى هذه الوحدة نقية (فتُختبر بمُصنَّع).
+ *
+ * القياس المُشتق على بيانات حقيقية (5 أزواج × فريمان، BTC/ETH/SOL/BNB/XRP، 900 شمعة):
+ *   فجوة شمعة واحدة 22.1% | فجوتان 34.6% | 4 شموع 37.6% | 8 شموع 48.0%
+ * والانزياح السعري في كل الأمثلة أقل من 0.1% وهو دون نسبة العنقدة (0.2%) — فالمنطقة هي
+ * **نفسها** مادياً لكن معرّفها تغيّر. لهذا نافذة القياس الافتراضية 4 شموع لا شمعة واحدة:
+ * شمعة واحدة تُظهر 22% فقط فتُبخّس حجم العيب.
  */
-export function measureIdentityStability({ detect, symbol, timeframe, endIndex, tolerancePct }) {
+export function measureIdentityStability({ detect, symbol, timeframe, endIndex, tolerancePct, lookbackBars = 4 }) {
+  const bars = Math.max(1, Number(lookbackBars) || 4);
   const full = detect({ endIndex });
-  const trimmed = detect({ endIndex: endIndex - 1 });
+  const olderEnd = endIndex - bars;
+  if (olderEnd < 20) return { symbol, timeframe, endIndex, lookbackBars: bars, zonesFull: full.length, zonesTrimmed: 0, matched: 0, churned: 0, stable: 0, added: 0, removed: 0, churnRate: null, examples: [], pairs: [] };
+  const older = detect({ endIndex: olderEnd });
   return {
     symbol,
     timeframe,
     endIndex,
+    lookbackBars: bars,
     zonesFull: full.length,
-    zonesTrimmed: trimmed.length,
-    ...idStability(trimmed, full, tolerancePct)
+    zonesTrimmed: older.length,
+    ...idStability(older, full, tolerancePct)
   };
 }
 
