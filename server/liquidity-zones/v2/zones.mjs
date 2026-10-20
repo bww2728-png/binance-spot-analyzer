@@ -122,41 +122,88 @@ export function fitTrendline(points, candles, endIndex, opts = {}) {
   const cfg = { ...ZONE_DEFAULTS, ...opts };
   const list = (points ?? []).filter(p => p && fin(p.price) && fin(p.index));
   if (list.length < cfg.trendMinPoints) return null;
-  // ترتيب زمني ثم أخذ أقصى نافذة (بلا نظرة مستقبلية)
-  const sorted = list.slice().sort((a, b) => a.index - b.index);
-  const n = sorted.length;
-  const meanX = sorted.reduce((a, p) => a + p.index, 0) / n;
-  const meanY = sorted.reduce((a, p) => a + Number(p.price), 0) / n;
+  const endIdx = endIndex ?? Math.max(...list.map(p => p.index));
+
+  /**
+   * البحث عن أفضل خط بمرشّحات من كل **زوج نقاط**، ثم عدّ النقاط المتراصفة عليه.
+   *
+   * عطلان مُثبتان بالقياس قادا إلى هذا الأسلوب:
+   *  1. الرفض عند أول نقطة شاذة → **صفر خط اتجاه** على 4,000+ عيّنة حقيقية بينما المحرك
+   *     الأول أنتج 176؛ أي أن تعريف «ثلاث نقاط أو أكثر» لم يكن يعمل أصلاً.
+   *  2. أقل المربعات وحدها **تنجرف بالشاذة**: في اختبار الحرس (ثلاث نقاط متراصفة + شاذة
+   *     واحدة عند 260) اختار الاتجاه الصاعد وأسقط نقطة **سليمة**، فلا خط. السبب أن الشاذة
+   *     تسحب الميل فتصبح النقاط السليمة هي الأبعد عن الخط المُقدَّر.
+   *
+   * الحل المُطبَّق: كل زوج نقاط يُنتج خطاً مرشحاً، ويُقاس عليه عدد النقاط الداخلة في
+   * السماحية؛ ويُختار الخط الذي يضم **أكبر كتلة**، وعند التعادل الأقل خطأً. وهذا هو المعنى
+   * العملي لخط الاتجاه عند المحلّل: «الكتلة الغالبة من القمم تصطفّ»، لا أن تمرّ بكل قمة.
+   * والخوارزمية **حتمية تماماً** (لا عشوائية ولا زمن) — ترتيب ثابت عند التعادل.
+   */
+  const sorted = list.slice().sort((a, b) => a.index - b.index || a.price - b.price);
+  const atrOf = (p) => (fin(p.atr) ? Math.abs(Number(p.atr)) : atrAt(candles ?? [], p.index));
+  let best = null;
+  for (let i = 0; i < sorted.length; i += 1) {
+    for (let j = i + 1; j < sorted.length; j += 1) {
+      const p1 = sorted[i];
+      const p2 = sorted[j];
+      const dx = p2.index - p1.index;
+      if (!dx) continue; // لا ميل رأسي
+      const slope = (Number(p2.price) - Number(p1.price)) / dx;
+      const intercept = Number(p1.price) - slope * p1.index;
+      const inliers = [];
+      let totalErr = 0;
+      let maxDevAtr = 0;
+      for (const p of sorted) {
+        const atr = atrOf(p);
+        const devAtr = Math.abs(Number(p.price) - (slope * p.index + intercept)) / Math.max(atr, 1e-12);
+        if (devAtr <= cfg.maxDeviationAtr) {
+          inliers.push(p);
+          totalErr += devAtr;
+          maxDevAtr = Math.max(maxDevAtr, devAtr);
+        }
+      }
+      if (inliers.length < cfg.trendMinPoints) continue;
+      const candidate = { slope, intercept, inliers, totalErr, maxDevAtr };
+      if (!best
+        || candidate.inliers.length > best.inliers.length
+        || (candidate.inliers.length === best.inliers.length && candidate.totalErr < best.totalErr - 1e-12)) {
+        best = candidate;
+      }
+    }
+  }
+  if (!best) return null;
+
+  // تحسين أخير: أقل المربعات على **المتراصفين وحدهم** يجعل الخط أنعم وأدق
+  const inl = best.inliers;
+  const n = inl.length;
+  const meanX = inl.reduce((a, p) => a + p.index, 0) / n;
+  const meanY = inl.reduce((a, p) => a + Number(p.price), 0) / n;
   let num = 0;
   let den = 0;
-  for (const p of sorted) {
+  for (const p of inl) {
     num += (p.index - meanX) * (Number(p.price) - meanY);
     den += (p.index - meanX) ** 2;
   }
-  if (!den) return null; // كل النقاط في الشمعة نفسها — لا خط
-  const slope = num / den;
-  const intercept = meanY - slope * meanX;
-  const end = Math.max(endIndex ?? n - 1, sorted[n - 1].index);
-  const projected = slope * end + intercept;
-  if (!Number.isFinite(projected) || projected <= 0) return null;
+  const slope = den ? num / den : best.slope;
+  const intercept = den ? meanY - slope * meanX : best.intercept;
+  const projected = slope * endIdx + intercept;
+  if (!Number.isFinite(projected) || projected <= 0) return null; // لا يُنشر إسقاط سالب
 
-  const endIdx = endIndex ?? Math.max(...sorted.map(p => p.index));
-  const deviations = sorted.map((p) => {
-    const atr = fin(p.atr) ? Math.abs(Number(p.atr)) : atrAt(candles ?? [], p.index);
-    const dev = Math.abs(Number(p.price) - (slope * p.index + intercept));
-    return dev / Math.max(atr, 1e-12);
+  const refined = inl.map((p) => {
+    const atr = atrOf(p);
+    const devAtr = Math.abs(Number(p.price) - (slope * p.index + intercept)) / Math.max(atr, 1e-12);
+    return { p, devAtr };
   });
-  const maxDeviationAtr = Math.max(...deviations);
-  const errorAtr = median(deviations);
-  if (maxDeviationAtr > cfg.maxDeviationAtr) return null;
-
+  const maxDevAtr = Math.max(...refined.map(d => d.devAtr));
+  if (maxDevAtr > cfg.maxDeviationAtr) return null; // التحسين أخرج نقطة عن السماحية
   return {
     slope,
     intercept,
     projected: Number(projected),
-    points: sorted.map(p => ({ index: p.index, time: p.time, price: Number(p.price) })),
-    errorAtr: Number(errorAtr.toFixed(3)),
-    maxDeviationAtr: Number(maxDeviationAtr.toFixed(3)),
+    points: inl.map(p => ({ index: p.index, time: p.time, price: Number(p.price) })),
+    errorAtr: Number(median(refined.map(d => d.devAtr)).toFixed(3)),
+    maxDeviationAtr: Number(maxDevAtr.toFixed(3)),
+    droppedPoints: list.length - inl.length,
     endIndex: endIdx
   };
 }

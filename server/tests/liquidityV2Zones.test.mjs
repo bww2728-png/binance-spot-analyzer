@@ -172,3 +172,29 @@ test('حتمية ومعالجة مدخلات فاسدة في المحرك الم
   assert.deepEqual(clusterByAtr(null, 0.25, {}), []);
   assert.deepEqual(clusterByAtr([{ price: NaN }], 0.25, {}), []);
 });
+
+/**
+ * عطل مُثبت بالقياس: كان الخط يُرفض كاملاً إن شذّت **أي** نقطة بأكثر من السماحية، فأنتج
+ * المحرك v2 **صفر خط اتجاه** على 4,000+ عيّنة حقيقية بينما المحرك الأول أنتج 176 —
+ * أي أن تعريف «ثلاث نقاط أو أكثر» لم يكن يعمل. الاختبار يحرس الإصلاح: النقطة الأسوأ
+ * تُستبعد وحدها، ويُقبل الخط إن بقيت النقاط المتراصفة كافية.
+ */
+test('خط الاتجاه: استبعاد النقطة الأسوأ وحدها بدل رفض الخط كله', () => {
+  const flat = candlesFrom(Array.from({ length: 60 }, (_, i) => [100, 101, 99, 100]));
+  // ثلاث نقاط متراصفة تماماً على خط هابط + نقطة شاذة واحدة
+  const withOutlier = [
+    pt(10, 200, 'high'), pt(20, 190, 'high'), pt(30, 180, 'high'),
+    pt(40, 260, 'high') // شاذة تماماً
+  ];
+  const fitted = fitTrendline(withOutlier, flat, 59, { maxDeviationAtr: 0.5, minPointProminenceAtr: 0 });
+  assert.ok(fitted, 'الخط يُقبل بعد استبعاد النقطة الشاذة (كان يُرفض قبل الإصلاح)');
+  assert.equal(fitted.points.length, 3, 'النقاط المتراصفة الثلاث بقيت');
+  assert.equal(fitted.droppedPoints, 1, 'عدد النقاط المستبعدة معلن');
+  assert.equal(Number(fitted.slope.toFixed(4)), -1, 'الميل الحقيقي للنقاط المتراصفة = −1');
+  assert.ok(fitted.maxDeviationAtr <= 0.5, 'السماحية محترمة على النقاط الباقية');
+
+  // وبلا نقطة كافية بعد الاستبعاد: يبقى الرفض صحيحاً
+  const onlyThree = [pt(10, 200, 'high'), pt(20, 190, 'high'), pt(40, 260, 'high')];
+  assert.equal(fitTrendline(onlyThree, flat, 59, { maxDeviationAtr: 0.5 }), null,
+    'ثلاث نقاط بإحداها شاذة ⇒ لا خط (لا يكفي بعد الاستبعاد)');
+});
