@@ -18,12 +18,43 @@
 
 import WebSocket from 'ws';
 import { detectBubbles, detectIceberg } from '../liquidity/orderbook.mjs';
+import { createCandleStore, TF_MS } from './candleStore.mjs';
 
 const WS_HOSTS = [
   'wss://data-stream.binance.vision',
   'wss://stream.binance.com:9443',
   'wss://stream.binance.com:443'
 ];
+
+/**
+ * طابور مفاتيح منزوع التكرار يُجدول معالجة واحدة في نهاية دورة الأحداث الحالية
+ * (ميكروتاسك واحد لكل نبضة). العلة التي يُصلحها: إغلاق عدة شموع لنفس المفتاح في نفس
+ * النبضة كان يُشغّل الكشف مرات متعددة لنفس (رمز، فريم) بلا فائدة.
+ * @param {(keys: string[]) => void} onFlush يُنادى مرة واحدة بكل المفاتيح المتغيّرة
+ * @returns {{ add: (key:string)=>void, size: ()=>number, flushNow: ()=>void }}
+ */
+export function createKeyQueue(onFlush) {
+  const pending = new Set();
+  let scheduled = false;
+  const flush = () => {
+    scheduled = false;
+    if (!pending.size) return;
+    const keys = [...pending];
+    pending.clear();
+    try { onFlush(keys); } catch { /* معالجة فاشلة لا تُسقط الطابور */ }
+  };
+  return {
+    add(key) {
+      if (typeof key !== 'string' || !key) return;
+      pending.add(key);
+      if (scheduled) return;
+      scheduled = true;
+      queueMicrotask(flush);
+    },
+    size: () => pending.size,
+    flushNow: flush
+  };
+}
 
 export function createMarketStreams({
   log = console,
@@ -61,7 +92,17 @@ export function createMarketStreams({
      * الكلفة: طلب واحد ~26KB مضغوطاً لكل دورة، عبر مسار مستقل عن ستريمات البث.
      */
     pricePollMs: Number(process.env.PRICE_POLL_MS) || 5000,
-    seedLimit: 250,               // خفّض من 500: يكفي warmup (220) + هامش، ويخفض ذاكرة البذر ~50%
+    /**
+     * عمق البذر = 500 شمعة لكل (رمز، فريم)، وهو **عمق المسار القديم نفسه**.
+     *
+     * عيب مُثبت بالقياس: كان 250 «توفيراً»، لكن تجربة على بيانات حقيقية (8 أزواج × 6
+     * فريمات، 48 عيّنة، 330 منطقة مرجعية) أثبتت أن عمق النافذة يغيّر النتائج جوهرياً:
+     *   عمق 500 = المرجع (100%) | عمق 400 → مطابقة 72.4% | عمق 250 → مطابقة 50.3%
+     * السبب البنيوي: أقدم شموع النافذة تُحدّد المستوى المرجعي في كشف المناطق البصرية،
+     * فنافذة أضيق = مرجع مختلف = حالة منطقة مختلفة (candidate/confirmed/swept).
+     * فتقليل العمق **تغيير صامت في النتائج** لا يُقبل بلا دليل ظل.
+     */
+    seedLimit: Number(process.env.LIQUIDITY_SEED_LIMIT) || 500,
     // حجر المفاتيح الميتة (علة OOM مثبتة بالسجلات): رموز محجوبة جغرافياً (451) كانت
     // تُعاد محاولتها بلا نهاية (REST ×3 مضيفين + سجلات) فتخنق الذاكرة والشبكة والسجلات
     maxSeedFails451: 2,            // إخفاقان 451 متتاليان = حظر دائم → حجر فوري
@@ -81,6 +122,23 @@ export function createMarketStreams({
     aggTradeSubLimit: 0,          // 0 = بلا قص (التوزيع على الاتصالات يتكفل بالحدود)
     klineSubLimit: 0,             // 0 = بلا قص — كل المطلوب يُشترك فعلاً عبر اتصالات إضافية
     maxConns: 6,                  // خفّض من 8: يحد من استهلاك السوكتات والذاكرة
+    /**
+     * مخزن الشموع المجمّع (candleStore): يُغذّى من بث 1m وحده ويشتق كل الفريمات
+     * محلياً على حدث إغلاق الشمعة — فلا REST لكل رمز وفريم في كل دورة فحص.
+     * aggregateMode=0 يعطّل التغذية (يبقى المخزن موجوداً لكنه لا يُحدَّث من البث).
+     */
+    aggregateMode: process.env.LIQUIDITY_AGGREGATE !== '0',
+    /**
+     * عمق المخزن = 500 شمعة لكل (رمز، فريم) = **عمق المسار القديم نفسه** (500 كان يقرأه
+     * الفحص الحي من REST). كان 400، وقيس أثره على بيانات حقيقية (8 أزواج × 6 فريمات،
+     * 48 عيّنة، 330 منطقة مرجعية):
+     *   عمق 500 = المرجع (100%) | عمق 400 → مطابقة 72.4% | عمق 250 → مطابقة 50.3%
+     * عدا على ذلك، أقدم شموع النافذة تُحدّد المرجع في الكشف البصري، فالنافذة الأضيق
+     * تعني حالة منطقة مختلفة (candidate/confirmed/swept) — أي تغيير صامت في النتائج.
+     */
+    aggregateCapacity: Number(process.env.LIQUIDITY_AGGREGATE_CAPACITY) || 500,
+    /** حجم دفعة البذر التسلسلي في warmUniverse (لا نفتح آلاف الطلبات في لحظة) */
+    warmBatch: Number(process.env.LIQUIDITY_WARM_BATCH) || 8,
     hosts: WS_HOSTS,              // قابلة للاستبدال (اختبار اتصال حقيقي/تثبيت مضيف)
     ...config
   };
@@ -92,6 +150,15 @@ export function createMarketStreams({
   const seedFails = new Map();       // "SYM|tf" → { fails, quarantinedUntil } (حجر المفاتيح الميتة)
   const trades = new Map();          // symbol → [{price, qty, isBuyerMaker, at}]
   let candleCloseHandlers = new Set();
+  /**
+   * مخزن الشموع المجمّع: مصدر واحد للشموع لكل الفريمات، يُغذّى من بث 1m وحده.
+   * العلة التي يُصلحها: فحص مناطق السيولة الحي كان يطلب REST لكل (رمز × فريم) في كل
+   * دورة (6,006 طلباً مقيساً). هنا تُبنى الفريمات الأعلى محلياً من الدقائق، فيصير
+   * الكشف حدثياً على إغلاق الشمعة بلا شبكة في المسار الحادث.
+   */
+  const candles = createCandleStore({ capacity: cfg.aggregateCapacity, log });
+  /** مستمعو إغلاق الشموع المجمّعة: cb({ symbol, tf, bar }) — عدة مستمعين، معزولون */
+  const aggregatedCloseHandlers = new Set();
   /** "SYM|tf" → زمن فتح آخر شمعة أُعلن إغلاقها (منع تكرار الإعلان لنفس الشمعة بدقة) */
   const lastClosedBar = new Map();
   /** "SYM|tf" → زمن فتح أحدث شمعة محفوظة (لكشف الفجوات والتحقق من الحداثة) */
@@ -253,6 +320,12 @@ export function createMarketStreams({
       if (!k || !data?.s) return;
       const tf = String(k.i ?? tfFromStream(stream));
       upsertKline(data.s, tf, k);
+      /**
+       * تغذية المخزن المجمّع من شمعة 1m وحدها: القيم تُؤخذ من رسالة بينانس كما هي
+       * بلا أي حساب (open/high/low/close/volume، وtakerBuyBase من الميدان V).
+       * المخزن يشتق منها كل الفريمات الأعلى ويُعيد ما أُغلق منها.
+       */
+      if (tf === '1m' && cfg.aggregateMode) applyAggregated1m(data.s, k);
       if (k.x === true) notifyCandleClose(data.s, tf, Number(k.c), k.t);
       return;
     }
@@ -310,13 +383,21 @@ export function createMarketStreams({
   /** تحديث مخزن الشموع بصيغة صفوف بنفس ترتيب حقول بينانس (تُقرأ بـnormalizeCandles/computeCvd) */
   function upsertKline(symbol, tf, k) {
     const key = `${symbol}|${tf}`;
-    let buf = klines.get(key);
-    if (!buf) { buf = new Map(); klines.set(key, buf); }
+    /**
+     * المفتاح الذي يملكه المخزن الرقمي لا يُخزَّن ثانيةً في الخريطة القديمة.
+     * المخزن يتلقّى الشمعة نفسها عبر apply1m من نفس الرسالة (في `onKlineMessage`)،
+     * فالخريطة القديمة نسخة مكرَّرة بلا قارئ — وهي ما رفع rss إلى 946MB قبل الإصلاح.
+     */
+    const inStore = cfg.aggregateMode && candles.has(symbol, tf);
     const openTime = Number(k.t);
     const prevLast = klineLastBar.get(key) ?? 0;
-    buf.set(openTime, toNumericRow(k));
+    if (!inStore) {
+      let buf = klines.get(key);
+      if (!buf) { buf = new Map(); klines.set(key, buf); }
+      buf.set(openTime, toNumericRow(k));
+      if (buf.size > cfg.maxBarsKept) trimKlines(key);
+    }
     if (openTime > prevLast) klineLastBar.set(key, openTime);
-    if (buf.size > cfg.maxBarsKept) trimKlines(key);
     /**
      * سعر حي من الشمعة — العلة التي يُصلحها هذا:
      * `!miniTicker@arr` لم يعد يرسل كل السوق، بل ~50-130 رمزاً «تغيّر سعرها» في الثانية.
@@ -385,6 +466,31 @@ export function createMarketStreams({
     }
   }
 
+  /**
+   * تغذية المخزن المجمّع بشمعة 1m من رسالة بينانس، ثم إعلان كل شمعة أُغلقت.
+   * القيم تُؤخذ من الحمولة كما هي بلا أي حساب: open/high/low/close/volume،
+   * وtakerBuyBase من الميدان V (taker buy base volume)، وإن غاب فصفر.
+   * كل مستمع يُنادى داخل try/catch مستقل فلا يُسقط مستمعٌ فاشلٌ البقية.
+   */
+  function applyAggregated1m(symbol, k) {
+    try {
+      const closed = candles.apply1m(symbol, {
+        openTime: Number(k.t),
+        open: Number(k.o),
+        high: Number(k.h),
+        low: Number(k.l),
+        close: Number(k.c),
+        volume: Number(k.v),
+        takerBuyBase: k.V === undefined || k.V === null ? 0 : Number(k.V)
+      });
+      for (const item of closed) {
+        for (const cb of aggregatedCloseHandlers) {
+          try { cb({ symbol, tf: item.tf, bar: item.bar }); } catch { /* مستمع فاشل لا يوقف البقية */ }
+        }
+      }
+    } catch { /* مدخل فاسد لا يوقف معالجة الرسائل */ }
+  }
+
   /** مدة الفريم بالمللي */
   function tfMsOf(tf) {
     const m = /^(\d+)([mhdw])$/.exec(String(tf));
@@ -433,25 +539,55 @@ export function createMarketStreams({
    * force=true يُعيد الجلب حتى لو كان المفتاح مزروعاً — لإصلاح الفجوات بعد انقطاع.
    */
   function ensureKlineSeed(key, { force = false } = {}) {
-    if ((!force && klines.has(key)) || klineSeeding.has(key) || !seedKlines) {
+    const [symbol, tf] = String(key).split('|');
+    /**
+     * «مبذور؟» يشمل المخزن الرقمي، لا الخريطة القديمة وحدها.
+     * العلة: بعد منع التخزين المزدوج لم تعد مفاتيح المخزن في الخريطة القديمة، فكان هذا
+     * الشرط يرى المفتاح «غير مبذور» فيعيد جلبه من REST — **شبكة مهدورة في المسار الذي
+     * يُطلب فيه إصلاح الفجوات** (وهو أكثر ما يُستدعى عند الانقطاع).
+     */
+    const served = klines.has(key) || (cfg.aggregateMode && symbol && tf && candles.has(symbol, tf));
+    if ((!force && served) || klineSeeding.has(key) || !seedKlines) {
       return klineSeeding.get(key) ?? Promise.resolve();
     }
     if (quarantinedUntil(key)) return Promise.resolve(); // مفتاح ميت — بلا شبكة بلا سجلات
-    const [symbol, tf] = key.split('|');
     const p = (async () => {
       try {
         const raw = await seedKlines(symbol, tf, cfg.seedLimit);
-        const buf = klines.get(key) ?? new Map();
-        for (const row of raw ?? []) {
-          const openTime = Number(row[0]);
-          // الصف من REST مصفوفة حقول بينانس بترتيبها نفسه — يُخزَّن رقماً لتوفير الذاكرة
-          buf.set(openTime, Array.isArray(row)
-            ? row.map((v, i) => (i === 11 ? 0 : Number(v)))
-            : row);
-          if (openTime > (klineLastBar.get(key) ?? 0)) klineLastBar.set(key, openTime);
+        /**
+         * بذر المخزن المجمّع أولاً من نفس صفوف REST (بلا طلب إضافي): مفتاح 1m يبذر
+         * الدقائق التي تُشتق منها كل الفريمات، والفريمات الأعلى تُبذر مباشرة لتسريع
+         * الجاهزية. البذر لا يرمي: صفوف فاسدة تُتجاهل داخل المخزن.
+         *
+         * الترتيب مقصود: بعد بذر المخزن يصبح `candles.has` صادقاً، فنعرف فوراً أن
+         * المفتاح لا يحتاج نسخة ثانية في الخريطة القديمة.
+         */
+        if (cfg.aggregateMode) {
+          try { candles.seed(symbol, tf, raw ?? []); } catch { /* بذر فاسد لا يُسقط المفتاح */ }
         }
-        klines.set(key, buf);
-        trimKlines(key);
+        /**
+         * لا نكتب في الخريطة القديمة إلا للمفاتيح التي لا يملكها المخزن الرقمي.
+         * السبب: منع تخزين الشموع مرتين — وهو ما رفع rss إلى 946MB قبل هذا الإصلاح
+         * (6,006 مفاتيح × 400 صفاً في الخريطة القديمة فوق 500 شمعة في المخزن الجديد).
+         */
+        if (cfg.aggregateMode && candles.has(symbol, tf)) {
+          // المفتاح في المخزن: يكفي تتبّع آخر شمعة، بلا صفوف مكرَّرة
+          const last = Number(raw?.[raw.length - 1]?.[0]);
+          if (Number.isFinite(last) && last > (klineLastBar.get(key) ?? 0)) klineLastBar.set(key, last);
+          klines.delete(key); // تُحرَّر أي نسخة سابقة
+        } else {
+          const buf = klines.get(key) ?? new Map();
+          for (const row of raw ?? []) {
+            const openTime = Number(row[0]);
+            // الصف من REST مصفوفة حقول بينانس بترتيبها نفسه — يُخزَّن رقماً لتوفير الذاكرة
+            buf.set(openTime, Array.isArray(row)
+              ? row.map((v, i) => (i === 11 ? 0 : Number(v)))
+              : row);
+            if (openTime > (klineLastBar.get(key) ?? 0)) klineLastBar.set(key, openTime);
+          }
+          klines.set(key, buf);
+          trimKlines(key);
+        }
         seedFails.delete(key); // نجاح يصفّر العداد
       } catch (e) {
         const msg = String(e?.message ?? e);
@@ -474,11 +610,60 @@ export function createMarketStreams({
     return p;
   }
 
-  /** صفوف الشموع الخام مرتبة زمنياً (null إن لم تُبَذ) */
+  /**
+   * صفوف الشموع الخام مرتبة زمنياً (null إن لم تُبَذ).
+   *
+   * الأولوية للمخزن الرقمي: مفتاح موجود في المخزن يُقرأ منه، فلا تُخزَّن الشموع مرتين.
+   * عيب مُثبت بالقياس: كان المخزن الجديد يُبَذ لكل الـ6,006 مفاتيح، **والخريطة القديمة
+   * تُبَذ منها أيضاً** — أي شموع مكرَّرة مرتين. القياس المحلي: rss 946MB على حدّ حاوية
+   * 1024MB، والفرق الحقيقي كان ~480MB من الخريطة القديمة وحدها (6,006 × 400 صفاً).
+   * الخريطة القديمة تبقى للمفاتيح التي لا يملكها المخزن فقط (اشتراكات لحظية خارج
+   * قائمة التحليل، مثل رمز يعرضه المستخدم في الشاشة).
+   */
   function getKlines(symbol, tf) {
+    if (cfg.aggregateMode && candles.has(symbol, tf)) return candles.getRows(symbol, tf);
     const buf = klines.get(`${symbol}|${tf}`);
     if (!buf) return null;
     return Array.from(buf.entries()).sort((a, b) => a[0] - b[0]).map(([, row]) => row);
+  }
+
+  /**
+   * تسخين المخزن المجمّع لكل (رمز × فريم) من REST مرة واحدة عند الإقلاع.
+   * يعمل على دفعات متسلسلة (لا يفتح آلاف الطلبات في لحظة) عبر مسار البذر الموجود
+   * (ensureKlineSeed) فيحترم الlimiter والحجر وإصلاح الفجوات كما هي.
+   * لا يُكرّر بذر مفتاح مبذور بالفعل (ensureKlineSeed يتخطاه بلا force).
+   * @param {string[]} symbols
+   * @param {{ tfs?: string[], capacity?: number }} [opts]
+   * @returns {Promise<{ queued:number, seeded:number, failed:number }>}
+   */
+  async function warmUniverse(symbols, { tfs = Object.keys(TF_MS) } = {}) {
+    const list = Array.isArray(symbols) ? symbols : [];
+    const frames = Array.isArray(tfs) && tfs.length ? tfs : Object.keys(TF_MS);
+    const keys = [];
+    for (const sym of list) {
+      const s = String(sym ?? '').trim().toUpperCase();
+      if (!s) continue;
+      for (const tf of frames) {
+        if (!Object.prototype.hasOwnProperty.call(TF_MS, tf)) continue;
+        keys.push(`${s}|${tf}`);
+      }
+    }
+    const queued = keys.length;
+    let seeded = 0;
+    let failed = 0;
+    const batch = Math.max(1, Number(cfg.warmBatch) || 8);
+    for (let i = 0; i < keys.length; i += batch) {
+      const slice = keys.slice(i, i + batch);
+      // دفعة متسلسلة: ننتظر كل دفعة قبل التالية فلا تتراكم الطلبات
+      await Promise.all(slice.map(async (key) => {
+        try {
+          await ensureKlineSeed(key);
+          if (candles.has(key.split('|')[0], key.split('|')[1])) seeded += 1;
+          else failed += 1;
+        } catch { failed += 1; }
+      }));
+    }
+    return { queued, seeded, failed };
   }
 
   /* ================= تدفق الصفقات (CVD/فقاعات/آيسبرغ حي) ================= */
@@ -622,7 +807,17 @@ export function createMarketStreams({
         if (s.includes('@kline_')) {
           const tf = tfFromStream(s);
           const sym = symbolFromStream(s);
-          if (sym && tf) klines.delete(`${sym}|${tf}`);
+          /**
+           * الإخلاء يشمل المخزن الرقمي أيضاً: بعد منع التخزين المزدوج صارت شموع المشترك
+           * المحرَّر في المخزن وحده، فحذف الخريطة القديمة وحدها كان يُبقي 500 شمعة
+           * لرمز لم يعد مطلوباً — أي **الإخلاء الذي يمنع نمو الذاكرة صار بلا أثر**.
+           */
+          if (sym && tf) {
+            klines.delete(`${sym}|${tf}`);
+            if (cfg.aggregateMode && !wantedKlines.has(`${sym}|${tf}`)) {
+              try { candles.deleteSymbol(sym); } catch { /* لا يُعطّل المزامنة */ }
+            }
+          }
         } else if (s.includes('@aggTrade')) {
           const sym = symbolFromStream(s);
           if (sym && !wantedFlow.has(sym)) trades.delete(sym);
@@ -658,8 +853,18 @@ export function createMarketStreams({
   /* ================= التسوية الدورية ضد الانجراف ================= */
 
   function reconcileTick() {
-    if (!seedKlines || !klines.size) return;
-    const keys = [...klines.keys()];
+    if (!seedKlines) return;
+    /**
+     * مجموعة المفاتيح المُسوّاة = المخزن ∪ الخريطة القديمة ∪ الاشتراكات المطلوبة.
+     *
+     * عيب مُثبت: كانت التسوية تعتمد `klines.size` وحده، وبعد منع التخزين المزدوج أصبحت
+     * الخريطة القديمة فارغة لمفاتيح المخزن — فكان `!klines.size` يُلغي التسوية كلها
+     * بصمت، وهو **تعطيل صامت لإصلاح الفجوات** (المسار الوحيد الذي يلتقط شمعة ضائعة).
+     */
+    const keySet = new Set(wantedKlines);
+    for (const k of klines.keys()) keySet.add(k);
+    const keys = [...keySet];
+    if (!keys.length) return;
     const base = Math.floor(Math.random() * keys.length);
     for (let i = 0; i < Math.min(cfg.reconcileBatch, keys.length); i += 1) {
       const key = keys[(base + i) % keys.length];
@@ -669,13 +874,25 @@ export function createMarketStreams({
         try {
           const fresh = await seedKlines(symbol, tf, 2);
           const lastFresh = fresh?.[fresh.length - 1];
-          const buf = klines.get(key);
-          const lastLocal = buf ? Array.from(buf.keys()).sort((a, b) => a - b).pop() : null;
-          if (!lastFresh || !buf) return;
+          if (!lastFresh) return;
           const freshOpen = Number(lastFresh[0]);
+          /**
+           * آخر شمعة محلية من المخزن الرقمي إن ملك المفتاح، وإلا من الخريطة القديمة.
+           * كان الفحص يتوقف إن غابت الخريطة القديمة (`!buf`)، فتصبح التسوية بلا أثر.
+           */
+          if (cfg.aggregateMode && candles.has(symbol, tf)) {
+            const lastLocal = candles.lastOpen(symbol, tf);
+            if (lastLocal == null) return;
+            if (freshOpen !== lastLocal) {
+              await ensureKlineSeed(key, { force: true }); // شمعة ضائعة → إعادة بذر كاملة
+            }
+            return;
+          }
+          const buf = klines.get(key);
+          if (!buf) return;
+          const lastLocal = Array.from(buf.keys()).sort((a, b) => a - b).pop() ?? null;
           if (freshOpen !== lastLocal) {
-            // شمعة جديدة لم تصل بالبث (انقطاع قصير) → إعادة بذر كاملة
-            await ensureKlineSeed(key);
+            await ensureKlineSeed(key, { force: true });
           } else {
             const local = buf.get(freshOpen);
             // تصحيح قيم الشمعة الجارية إن انحرفت عن REST
@@ -775,7 +992,34 @@ export function createMarketStreams({
       candleCloseHandlers.add(cb);
       return () => candleCloseHandlers.delete(cb);
     },
-    hasKline: (key) => klines.has(String(key)),
+    /**
+     * مستمع إغلاق الشموع المجمّعة: cb({ symbol, tf, bar }) لكل شمعة أُغلقت في المخزن.
+     * يقبل عدة مستمعين، وكل نداء معزول بـtry/catch فلا يُسقط مستمعٌ فاشلٌ البقية.
+     * @returns {() => void} دالة إلغاء الاشتراك
+     */
+    onAggregatedClose(cb) {
+      if (typeof cb !== 'function') return () => {};
+      aggregatedCloseHandlers.add(cb);
+      return () => aggregatedCloseHandlers.delete(cb);
+    },
+    /** المخزن المجمّع كاملاً (getRows/seed/apply1m/stats/…) — مصدر الشموع بلا REST */
+    candles,
+    /** تسخين المخزن المجمّع لكل (رمز × فريم) من REST مرة واحدة عند الإقلاع */
+    warmUniverse,
+    /**
+     * «هل هذا المفتاح مخدوم؟» يرجع المصدرين معاً.
+     * العلة: بعد منع التخزين المزدوج لم تعد مفاتيح المخزن موجودة في الخريطة القديمة،
+     * فكان هذا الفحص يُجيب «لا» عن مفاتيح مخدومة فعلاً — وهو ما يجعل مستهلكيه يعيدون
+     * البذر بلا داعٍ (شبكة مهدورة) أو يظنّون الفريم غائباً.
+     */
+    hasKline: (key) => {
+      const k = String(key);
+      if (klines.has(k)) return true;
+      if (!cfg.aggregateMode) return false;
+      const cut = k.indexOf('|');
+      if (cut <= 0) return false;
+      return candles.has(k.slice(0, cut), k.slice(cut + 1));
+    },
     /** زمن فتح أحدث شمعة محفوظة للمفتاح (0 إن لم تُبَذ) */
     lastBarAt: (symbol, tf) => klineLastBar.get(`${symbol}|${tf}`) ?? 0,
     ensureKlineSeed,
@@ -835,6 +1079,18 @@ export function createMarketStreams({
       const silent = conns
         .filter(c => c.ws.readyState === WebSocket.OPEN && t - (c.lastMsgAt || 0) > cfg.livenessTimeoutMs)
         .length;
+      /**
+       * إحصاء المخزن المجمّع: دليل أثر التحويل الحادث (مفاتيح/شموع/ذاكرة/فجوات).
+       * bytes تُحوَّل إلى ميغابايت بمنزلتين، وaggregateMode يصرّح بحالة التغذية.
+       */
+      const agg = candles.stats();
+      const aggregate = {
+        keys: agg.keys,
+        bars: agg.bars,
+        bytesMb: Number((agg.bytes / 1048576).toFixed(2)),
+        gaps: agg.gaps,
+        lastUpdateAt: agg.lastUpdateAt
+      };
       return {
         connected: conns.some(c => c.ws.readyState === WebSocket.OPEN),
         connections: conns.length,
@@ -860,9 +1116,18 @@ export function createMarketStreams({
         staleCandles,
         tradingStaleCandles,
         recentTraders: recentTraders.size,
-        klineKeys: klines.size,
+        /**
+         * عدد المفاتيح المخدومة فعلاً = المخزن ∪ الخريطة القديمة.
+         * كان `klines.size` وحده، وبعد منع التخزين المزدوج صار يُبلّغ رقماً أقل من
+         * الحقيقة (وقد يبلغ صفراً) بينما النظام يخدم 6,006 مفتاحاً — رقم كاذب في الصحة.
+         * `legacyKlineKeys` يبقى ظاهراً للشفافية عن حجم الخريطة القديمة.
+         */
+        klineKeys: new Set([...klines.keys(), ...wantedKlines]).size,
+        legacyKlineKeys: klines.size,
         silentConns: silent,
-        silentRecycles: conns.reduce((a, c) => a + (c.silentRecycles || 0), 0)
+        silentRecycles: conns.reduce((a, c) => a + (c.silentRecycles || 0), 0),
+        aggregate,
+        aggregateMode: cfg.aggregateMode
       };
     }
   };

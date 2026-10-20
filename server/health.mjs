@@ -73,6 +73,12 @@ function emptyEngine(name) {
 export function createHealth({ startedAt = Date.now(), stalls = {}, log = console } = {}) {
   /** أقسام إضافية تُدرَج في العيّنات المحفوظة (تُربط من الخادم بعد تهيئة المحركات) */
   const extraSections = {};
+  /**
+   * مزوّد قسم الشموع المجمّعة. يُربط من الخادم بعد تهيئة مخزن البث، ويُعرض داخل لقطة
+   * الصحة مباشرة (لا في العيّنات فقط) لأن أثر التحويل الحادث يجب أن يُقاس لحظياً:
+   * { keys, bars, bytesMb, capacity, gaps, lastUpdateAt, universe, seededKeys, seededPct, aggregateMode }.
+   */
+  let candlesProvider = null;
   const engines = new Map();
   const counters = { persistFailures: 0, persistWrites: 0, lastPersistAt: 0, lastPersistError: null };
   const marks = {};
@@ -192,6 +198,14 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
         max: Number((lag.max / 1e6).toFixed(1))
       },
       persist: { ...counters, sincePersistMs: counters.lastPersistAt ? now - counters.lastPersistAt : null },
+      /**
+       * قسم الشموع المجمّعة: يُقاس لحظياً في كل لقطة صحة. أي فشل في المزوّد لا يُسقط
+       * اللقطة (يُعرض كخطأ نصي) لأن الصحة نفسها يجب أن تبقى متاحة.
+       */
+      candles: (() => {
+        if (typeof candlesProvider !== 'function') return null;
+        try { return candlesProvider(); } catch (e) { return { error: String(e?.message ?? e).slice(0, 160) }; }
+      })(),
       engines: enginesSnapshot(now),
       marks
     };
@@ -231,7 +245,10 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
   /** ربط قسم إضافي بالعيّنات المحفوظة (market/targets/shariah/dataFresh/workers) */
   function addSection(key, fn) { if (typeof fn === 'function') extraSections[key] = fn; }
 
-  return { register, snapshot, startSampler, notePersist, mark, resetLag, addSection };
+  /** ربط مزوّد قسم الشموع المجمّعة (يُعرض في كل لقطة صحة) */
+  function setCandlesProvider(fn) { candlesProvider = typeof fn === 'function' ? fn : null; }
+
+  return { register, snapshot, startSampler, notePersist, mark, resetLag, addSection, setCandlesProvider };
 }
 
 export default createHealth;

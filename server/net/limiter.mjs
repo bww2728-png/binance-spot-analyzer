@@ -31,6 +31,7 @@ const PRIORITIES = ['live', 'calibration', 'history'];
 export function createRateLimiter({
   minuteBudget = 4200,          // ~70% من حد بينانس 6000 وزن/دقيقة
   now = () => Date.now(),
+  pumpMs = 250,                 // دورية تحرير المنتظرين
   log = console
 } = {}) {
   const queues = new Map(PRIORITIES.map(p => [p, []])); // p → [{resolve, weight}]
@@ -53,6 +54,15 @@ export function createRateLimiter({
     return now() >= blockedUntil && usedInWindow < minuteBudget;
   }
 
+  /**
+   * تحرير المنتظرين.
+   *
+   * عطل مُثبت ومُقاس: `pump` كانت مُعرَّفة ولا يُستدعى لها أحد، فلا يُحرَّر أي طلب يدخل
+   * الصف أبداً. ظهر أثره عملياً عند بذر مخزن الشموع: توقّف البذر عند 3,102 مفتاح من
+   * 6,006، و`waiting: 104` ثابتة أربع دقائق مع `usedInWindow: 26` من 4,200 — أي أن
+   * السعة كانت متاحة والمنتظرون موقوفون. كان العطل كامناً لأن النظام سابقاً لم يبلغ
+   * ضغطاً كافياً يدخل به مسار الانتظار.
+   */
   function pump() {
     if (!available()) return;
     // أعلى أولوية أولاً
@@ -68,6 +78,25 @@ export function createRateLimiter({
       }
       if (q.length) return; // الأولوية الأعلى ليست فارغة — الأدنى ينتظر
     }
+  }
+
+  /**
+   * نبضة دورية + نبضة عند دخول أول منتظر.
+   * الدورية وحدها لا تكفي: قد يمتلئ الوزن داخل النافذة ثم يتحرّر بعد أقل من ثانية،
+   * فالدورية تلحق ذلك. ودخول منتظر يستدعي pump فوراً لتفادي انتظار دورة كاملة.
+   * المؤقّت `unref` كي لا يمنع خروج العملية.
+   */
+  let pumpTimer = null;
+  function ensurePumpTimer() {
+    if (pumpTimer) return;
+    pumpTimer = setInterval(() => {
+      try { pump(); } catch (e) { log.warn?.(`[rate-limiter] pump failed: ${e?.message ?? e}`); }
+      if (PRIORITIES.every(p => (queues.get(p)?.length ?? 0) === 0)) {
+        clearInterval(pumpTimer);
+        pumpTimer = null;
+      }
+    }, pumpMs);
+    if (pumpTimer.unref) pumpTimer.unref();
   }
 
   /** الحصول على دور لنداء بوزن معين وبأولوية معينة */
@@ -89,8 +118,17 @@ export function createRateLimiter({
     const p = String(priority);
     statsWaited += 1;
     waiters.set(p, (waiters.get(p) ?? 0) + 1);
-    await new Promise(resolve => queues.get(p).push({ resolve, weight: w }));
+    /**
+     * الأولوية المجهولة تُسقَط إلى 'live' بدل الوصول إلى `undefined.push`.
+     * بلا هذا كان أي اسم أولوية غير معروف يُنتج خطأً يُبتلع في `guard`، فلا يُنفَّذ
+     * النداء ولا يظهر سببه في أي سجل ولا في الصحة.
+     */
+    const queue = queues.get(p) ?? queues.get('live');
+    ensurePumpTimer();
+    await new Promise(resolve => queue.push({ resolve, weight: w }));
     waiters.set(p, Math.max(0, (waiters.get(p) ?? 1) - 1));
+    // نبضة بعد الخروج: تُفسح للصفوف الأدنى بالاستفادة من السعة المتبقية
+    try { pump(); } catch { /* لا يعطّل النداء */ }
   }
 
   /** تغذية راجعة عند رفض الشبكة */
@@ -102,6 +140,8 @@ export function createRateLimiter({
       usedInWindow = Math.max(usedInWindow, minuteBudget * 0.5); // تهدئة إجبارية
       statsBlocked += 1;
       log.warn?.(`[rate-limiter] ${s} — block ${Math.round(wait / 1000)}s`);
+      // المنتظرون يجب أن يستيقظوا بعد انتهاء الحظر، لا أن يبقوا معلّقين للأبد
+      ensurePumpTimer();
     }
   }
 

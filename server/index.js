@@ -24,7 +24,7 @@ import {
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
 import { createStrategyEngine } from './strategy2/loop.mjs';
-import { createMarketStreams } from './market/streams.mjs';
+import { createMarketStreams, createKeyQueue } from './market/streams.mjs';
 import { createHealth } from './health.mjs';
 import { cpus } from 'node:os';
 import { createRateLimiter } from './net/limiter.mjs';
@@ -141,6 +141,8 @@ app.get('/api/health/deep', (req, res) => {
   res.json({
     ...snap,
     market: (() => { try { return runtime.marketStats(); } catch { return null; } })(),
+    /** الشموع المجمّعة: دليل أثر التحويل الحادث (بلا REST لكل رمز وفريم) */
+    candles: (() => { try { return runtime.candles?.() ?? null; } catch { return null; } })(),
     workers: (() => { try { return runtime.workers?.() ?? null; } catch { return null; } })(),
     rateLimiter: (() => { try { return runtime.rateLimiter?.() ?? null; } catch { return null; } })(),
     shadow: (() => { try { const s = runtime.shadow?.(); return s ? { enabled: s.enabled, fixes: Object.keys(s.fixes ?? {}).length, records: s.records.map(r => ({ key: r.key, samples: r.samples, diff: r.diff, diffRate: r.diffRate })) } : null; } catch { return null; } })(),
@@ -934,7 +936,10 @@ const liquidityState = {
   feedback: [],
   adjustment: { tolerancePct: 0.002, examples: 0, visualBias: {} },
   updatedAt: null,
-  error: null
+  error: null,
+  /** حالة الماسح الاحتياطي: عدد المفاتيح الناقصة من إجمالي (رمز × فريم) */
+  liveFallbackMissing: null,
+  liveFallbackTotal: null
 };
 
 /** الحد الذي يبقى محفوظاً من تغذية المراجعة الراجعة (لا نحتاج أكثر للحساب) */
@@ -1059,6 +1064,103 @@ const shadowCompareIdentitySamples = (sample) => {
 
 const mergeLiquidityResults = (rows, incoming) => mergeZones(rows, incoming);
 
+/**
+ * ★التحويل الحادث: فحص مناطق السيولة الحي كان يطلب REST لكل (رمز × فريم) في كل دورة
+ * (6,006 طلباً مقيساً). الآن الشموع تُقرأ من مخزن البث المجمّع (marketStreams.candles)
+ * والكشف يُشغَّل على حدث إغلاق الشمعة. المفتاحان يسمحان بالعودة للمسار القديم عند الطوارئ.
+ */
+const LIQUIDITY_LEGACY_REST = process.env.LIQUIDITY_LEGACY_REST === '1';
+const LIQUIDITY_AGGREGATE = process.env.LIQUIDITY_AGGREGATE !== '0';
+/** أقل عدد شموع يُقبل للكشف الحي من المخزن (40 شمعة كفاية كما في المواصفة) */
+const LIQUIDITY_MIN_BARS = Math.max(1, Number(process.env.LIQUIDITY_MIN_BARS) || 40);
+/** فاصل الماسح الاحتياطي منخفض التردد (10 دقائق) — يتحقق من المفاتيح الناقصة/الفجوات فقط */
+const LIQUIDITY_FALLBACK_MS = Math.max(60_000, Number(process.env.LIQUIDITY_FALLBACK_MS) || 10 * 60_000);
+
+/**
+ * كشف مناطق السيولة لمفتاح واحد (رمز، فريم) بنفس دالة الكشف ونفس المعاملات الحالية
+ * تماماً (limits/timeframes/tolerance/bias). المصدر: المخزن المجمّع بلا REST.
+ * تُعيد عدد المناطق المدمجة، أو null إن تعذّر الكشف (مفتاح ناقص/شموع غير كافية).
+ */
+const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
+  const rows = marketStreams.candles.getRows(symbol, timeframe);
+  if (!rows || rows.length < LIQUIDITY_MIN_BARS) return null;
+  const candles = normalizeCandles(rows);
+  const zones = detectLiquidityZones({
+    symbol,
+    timeframe,
+    candles,
+    tolerancePct: liquidityState.adjustment.tolerancePct,
+    biasPerKind: liquidityState.adjustment.visualBias || {}
+  }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder }));
+  liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
+  /**
+   * ★2 قياس فقط: يُشغَّل الكشف مرة ثانية بنفس الشموع وبفارق شمعة واحدة، وكل منطقة
+   * مُطابَقة هي نفس المنطقة — فإن اختلف معرّفها فذلك عدم ثبات خالص. العيّنة مقيّدة
+   * بـ`stride` كي تبقى الكلفة أقل من 1% من الفحص، ولا يقرأ الناتج أي قرار منشور.
+   */
+  if (shadow && workOrder % ZONE_ID_SHADOW_STRIDE === 0) {
+    const sample = measureIdentityStability({
+      detect: ({ endIndex }) => detectLiquidityZones({
+        symbol,
+        timeframe,
+        candles,
+        endIndex,
+        tolerancePct: liquidityState.adjustment.tolerancePct,
+        biasPerKind: liquidityState.adjustment.visualBias || {}
+      }),
+      symbol,
+      timeframe,
+      endIndex: candles.length - 1,
+      lookbackBars: ZONE_ID_SHADOW_LOOKBACK,
+      tolerancePct: liquidityState.adjustment.tolerancePct
+    });
+    zoneIdentityCollector.add(sample);
+    shadowCompareIdentitySamples(sample);
+  }
+  return zones.length;
+};
+
+/**
+ * طابور المفاتيح المتغيّرة (حدثياً): يُنزع تكراره ويُجدول في نهاية دورة الأحداث الحالية
+ * (ميكروتاسك واحد لكل نبضة) لتفادي إعادة الحساب مرات متعددة لنفس المفتاح في نفس النبضة.
+ * المنطق في createKeyQueue (قابل للاختبار) ويُستدعى هنا بمعالج الكشف.
+ */
+const liveEventState = { flushes: 0, keysProcessed: 0, lastFlushAt: null, lastKeyAt: null, skipped: 0 };
+
+const liveKeyQueue = createKeyQueue((keys) => {
+  const targets = new Set(targetsCache.list);
+  const rotation = liquidityState.liveRotation;
+  for (const key of keys) {
+    const [symbol, timeframe] = key.split('|');
+    if (!targets.has(symbol)) continue; // رمز خارج قائمة التحليل الحالية
+    try {
+      const workOrder = ALL_TIMEFRAMES.indexOf(timeframe);
+      const n = detectLiveZonesForKey(symbol, timeframe, { rotation, workOrder: workOrder < 0 ? 0 : workOrder });
+      if (n !== null) {
+        liveEventState.keysProcessed += 1;
+        liveEventState.lastKeyAt = Date.now();
+        liquidityState.updatedAt = Date.now();
+      }
+    } catch { /* مفتاح فاشل لا يوقف البقية */ }
+  }
+  liveEventState.flushes += 1;
+  liveEventState.lastFlushAt = Date.now();
+  liquidityJob.beat({
+    extra: {
+      mode: 'event',
+      flushes: liveEventState.flushes,
+      keysProcessed: liveEventState.keysProcessed,
+      results: liquidityState.liveResults.length
+    }
+  });
+});
+
+/** إضافة مفتاح (رمز، فريم) إلى الطابور وجدولته في نهاية دورة الأحداث الحالية */
+const enqueueLiveKey = (symbol, timeframe) => {
+  if (!symbol || !timeframe) return;
+  liveKeyQueue.add(`${symbol}|${timeframe}`);
+};
+
 const runLiquidityLiveRotation = async () => {
   if (liquidityState.liveBusy) return;
   /**
@@ -1090,41 +1192,41 @@ const runLiquidityLiveRotation = async () => {
       for (let timeframeIndex = 0; timeframeIndex < ALL_TIMEFRAMES.length; timeframeIndex += 1) {
         const timeframe = ALL_TIMEFRAMES[timeframeIndex];
         try {
-          const raw = await db.binance.klines(symbol, timeframe, 500);
-          const candles = normalizeCandles(raw);
-          const zones = detectLiquidityZones({
-            symbol,
-            timeframe,
-            candles,
-            tolerancePct: liquidityState.adjustment.tolerancePct,
-            biasPerKind: liquidityState.adjustment.visualBias || {}
-          }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex }));
-          liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
-          /**
-           * ★2 قياس فقط: يُشغَّل الكشف مرة ثانية بنفس الشموع وبفارق شمعة واحدة، وكل منطقة
-           * مُطابَقة هي نفس المنطقة — فإن اختلف معرّفها فذلك عدم ثبات خالص يُفسّر ضياع
-           * حالة السويب في محرك Fabio والتراكم في المخزون. العيّنة مقيّدة بـ`stride` كي
-           * تبقى الكلفة أقل من 1% من الفحص، ولا يقرأ الناتج أي قرار منشور.
-           */
           const workOrder = symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex;
-          if (shadow && workOrder % ZONE_ID_SHADOW_STRIDE === 0) {
-            const sample = measureIdentityStability({
-              detect: ({ endIndex }) => detectLiquidityZones({
-                symbol,
-                timeframe,
-                candles,
-                endIndex,
-                tolerancePct: liquidityState.adjustment.tolerancePct,
-                biasPerKind: liquidityState.adjustment.visualBias || {}
-              }),
+          if (LIQUIDITY_LEGACY_REST) {
+            // المسار القديم (طوارئ فقط): REST لكل رمز وفريم
+            const raw = await db.binance.klines(symbol, timeframe, 500);
+            const candles = normalizeCandles(raw);
+            const zones = detectLiquidityZones({
               symbol,
               timeframe,
-              endIndex: candles.length - 1,
-              lookbackBars: ZONE_ID_SHADOW_LOOKBACK,
-              tolerancePct: liquidityState.adjustment.tolerancePct
-            });
-            zoneIdentityCollector.add(sample);
-            shadowCompareIdentitySamples(sample);
+              candles,
+              tolerancePct: liquidityState.adjustment.tolerancePct,
+              biasPerKind: liquidityState.adjustment.visualBias || {}
+            }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder }));
+            liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
+            if (shadow && workOrder % ZONE_ID_SHADOW_STRIDE === 0) {
+              const sample = measureIdentityStability({
+                detect: ({ endIndex }) => detectLiquidityZones({
+                  symbol,
+                  timeframe,
+                  candles,
+                  endIndex,
+                  tolerancePct: liquidityState.adjustment.tolerancePct,
+                  biasPerKind: liquidityState.adjustment.visualBias || {}
+                }),
+                symbol,
+                timeframe,
+                endIndex: candles.length - 1,
+                lookbackBars: ZONE_ID_SHADOW_LOOKBACK,
+                tolerancePct: liquidityState.adjustment.tolerancePct
+              });
+              zoneIdentityCollector.add(sample);
+              shadowCompareIdentitySamples(sample);
+            }
+          } else {
+            // المسار الحادث: قراءة من المخزن المجمّع بلا REST
+            detectLiveZonesForKey(symbol, timeframe, { rotation, workOrder });
           }
         } catch { /* زوج/فريم فاشل لا يوقف المحرك المستقل */ }
       }
@@ -1216,16 +1318,70 @@ const runLiquidityHistoryRotation = async () => {
   }
 };
 
+/**
+ * الماسح الاحتياطي منخفض التردد (كل 10 دقائق): لا يعيد الكشف الكامل لكل الأزواج إن كان
+ * المخزن كاملاً، بل يتحقق من المفاتيح الناقصة/الفجوات فقط ويُصرّح بـ`skipReason` عند التخطي.
+ * يبقى مساراً احتياطياً/إصلاحياً — المسار الحادث هو المستمع على إغلاق الشمعة.
+ */
+const runLiquidityFallbackScan = async () => {
+  if (liquidityState.liveBusy) {
+    liquidityState.liveSkipReason = 'دورة حيّة جارية — الماسح الاحتياطي مؤجل';
+    return;
+  }
+  if (LIQUIDITY_LEGACY_REST) {
+    // المسار القديم مفعّل: الدورة الكاملة هي المسار الأساسي، فلا حاجة للماسح
+    liquidityState.liveSkipReason = 'LIQUIDITY_LEGACY_REST=1 — المسار القديم هو الأساسي';
+    return;
+  }
+  let targets;
+  try { targets = await resolveTargets(); } catch { return; }
+  const missing = [];
+  for (const symbol of targets) {
+    for (const timeframe of ALL_TIMEFRAMES) {
+      const rows = marketStreams.candles.getRows(symbol, timeframe);
+      if (!rows || rows.length < LIQUIDITY_MIN_BARS) missing.push(`${symbol}|${timeframe}`);
+    }
+  }
+  liquidityState.liveFallbackMissing = missing.length;
+  liquidityState.liveFallbackTotal = targets.length * ALL_TIMEFRAMES.length;
+  if (!missing.length) {
+    liquidityState.liveSkipReason = 'المخزن كامل — لا مفاتيح ناقصة، تخطّي الكشف الكامل';
+    liquidityJob.beat({ extra: { mode: 'fallback', missing: 0, total: liquidityState.liveFallbackTotal, skipReason: liquidityState.liveSkipReason } });
+    return;
+  }
+  liquidityState.liveSkipReason = null;
+  liquidityState.liveBusy = true;
+  try {
+    const rotation = liquidityState.liveRotation;
+    for (const key of missing) {
+      const [symbol, timeframe] = key.split('|');
+      try {
+        const workOrder = ALL_TIMEFRAMES.indexOf(timeframe);
+        detectLiveZonesForKey(symbol, timeframe, { rotation, workOrder: workOrder < 0 ? 0 : workOrder });
+      } catch { /* مفتاح فاشل لا يوقف البقية */ }
+    }
+    liquidityState.updatedAt = Date.now();
+    liquidityJob.beat({ extra: { mode: 'fallback', missing: missing.length, total: liquidityState.liveFallbackTotal, results: liquidityState.liveResults.length } });
+  } finally {
+    liquidityState.liveBusy = false;
+  }
+};
+
 const runLiquidityLoops = async () => {
   for (;;) {
-    void runLiquidityLiveRotation();
     void runLiquidityHistoryRotation();
     await new Promise(r => setTimeout(r, 5000));
-    if (!liquidityState.liveBusy && !liquidityState.historyBusy) continue;
+    if (!liquidityState.historyBusy) continue;
     await new Promise(r => setTimeout(r, 1000));
   }
 };
 setTimeout(() => void runLiquidityLoops(), 60_000);
+// الماسح الاحتياطي: كل 10 دقائق، يتحقق من المفاتيح الناقصة/الفجوات فقط
+setTimeout(() => {
+  void runLiquidityFallbackScan();
+  const t = setInterval(() => { void runLiquidityFallbackScan(); }, LIQUIDITY_FALLBACK_MS);
+  if (t.unref) t.unref();
+}, 90_000);
 
 app.get('/api/liquidity-zones/status', handle(async (_req, res) => {
   res.json({
@@ -1236,7 +1392,11 @@ app.get('/api/liquidity-zones/status', handle(async (_req, res) => {
       pairsTotal: liquidityState.livePairsTotal,
       total: liquidityState.liveResults.length,
       cap: liquidityState.liveCap,
-      skipReason: liquidityState.liveSkipReason ?? null
+      skipReason: liquidityState.liveSkipReason ?? null,
+      /** حالة المسار الحادث: طابور المفاتيح المتغيّرة + الماسح الاحتياطي */
+      event: { ...liveEventState, queued: liveKeyQueue.size() },
+      fallback: { missing: liquidityState.liveFallbackMissing, total: liquidityState.liveFallbackTotal, intervalMs: LIQUIDITY_FALLBACK_MS },
+      legacyRest: LIQUIDITY_LEGACY_REST
     },
     history: {
       busy: liquidityState.historyBusy,
@@ -1643,8 +1803,78 @@ const marketStreams = createMarketStreams({
   fetchAllPrices: () => db.binance.allTickerPrices()
 });
 setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
+/**
+ * ★التحويل الحادث: مستمع واحد على إغلاق الشموع المجمّعة. كل شمعة أُغلقت في المخزن
+ * (أي فريم) تُضاف إلى طابور منزوع التكرار وتُجدول في نهاية دورة الأحداث الحالية، ثم
+ * يُشغَّل الكشف بنفس دالة الكشف ونفس المعاملات الحالية تماماً — بلا REST في المسار الحادث.
+ */
+if (LIQUIDITY_AGGREGATE && !LIQUIDITY_LEGACY_REST) {
+  marketStreams.onAggregatedClose(({ symbol, tf }) => {
+    try { enqueueLiveKey(symbol, tf); } catch { /* مستمع فاشل لا يوقف البث */ }
+  });
+}
+/**
+ * تسخين المخزن المجمّع عند الإقلاع: بذر كل (رمز × فريم) من قائمة التحليل الحالية مرة
+ * واحدة على دفعات متسلسلة. لا يبدأ الكشف الحي قبل أن يُبذر فريم كفاية (40 شمعة)؛
+ * وإلا يعمل الماسح الاحتياطي. فشل البذر لا يوقف الخادم.
+ */
+const warmState = { queued: 0, seeded: 0, failed: 0, done: false, startedAt: null, error: null };
+/**
+ * إجمالي المفاتيح المستهدفة، يُحسب **قبل** البذر لا بعده.
+ *
+ * عيب مُثبت: كان `universe` يُقرأ من `warmState.queued` الذي لا يُملأ إلا بعد انتهاء
+ * `warmUniverse` كاملاً — فطوال البذر (دقائق) كانت الصحة تعرض `universe: 0,
+ * seededPct: 0` بينما المخزن ينمو فعلاً إلى 5,302 مفتاح. رقم كاذب في لوحة المراقبة
+ * أسوأ من غياب الرقم، لأن الحكم يُبنى عليه.
+ */
+let warmUniverseTotal = 0;
+const warmUniverseAtBoot = async () => {
+  if (LIQUIDITY_LEGACY_REST || !LIQUIDITY_AGGREGATE) { warmState.done = true; return; }
+  warmState.startedAt = Date.now();
+  try {
+    const targets = await resolveTargets();
+    warmUniverseTotal = targets.length * ALL_TIMEFRAMES.length;
+    warmState.queued = warmUniverseTotal;
+    const res = await marketStreams.warmUniverse(targets, { tfs: ALL_TIMEFRAMES });
+    warmState.seeded = res.seeded;
+    warmState.failed = res.failed;
+    warmState.done = true;
+    console.log(`[liquidity-zones] warmUniverse: ${res.seeded}/${res.queued} مفتاحاً مبذوراً (${res.failed} فشل)`);
+  } catch (e) {
+    warmState.error = String(e?.message ?? e).slice(0, 200);
+    warmState.done = true;
+    console.warn('[liquidity-zones] فشل تسخين المخزن:', warmState.error);
+  }
+};
+setTimeout(() => { void warmUniverseAtBoot(); }, 25_000);
 // ربط حالة السوق بصفحة الصحة العميقة
 runtime.marketStats = () => marketStreams.stats();
+/** قسم الشموع المجمّعة في الصحة: مفاتيح/شموع/ذاكرة/فجوات + حالة التسخين */
+runtime.candles = () => {
+  const s = marketStreams.stats();
+  const agg = s.aggregate ?? {};
+  /**
+   * التقدّم يُقاس من **عدد مفاتيح المخزن فعلاً** لا من عدّاد البذر: العدّاد لا يتحرّك
+   * إلا بعد انتهاء البذر كاملاً، بينما المخزن ينمو لحظياً. هذا يجعل `seededPct` رقماً
+   * صادقاً في كل لحظة من الإقلاع حتى اكتمال البذر.
+   */
+  const total = warmUniverseTotal || warmState.queued || 0;
+  const liveKeys = agg.keys ?? 0;
+  return {
+    keys: agg.keys ?? 0,
+    bars: agg.bars ?? 0,
+    bytesMb: agg.bytesMb ?? 0,
+    capacity: marketStreams.candles.stats().capacity,
+    gaps: agg.gaps ?? 0,
+    lastUpdateAt: agg.lastUpdateAt ?? null,
+    universe: total,
+    seededKeys: liveKeys,
+    seededPct: total ? Number(((liveKeys / total) * 100).toFixed(1)) : 0,
+    sealedKeys: warmState.seeded,
+    aggregateMode: s.aggregateMode ?? false,
+    warm: { ...warmState }
+  };
+};
 // ربط المحدد ووضع الظل بالتشخيص (بعد تهيئة runtime — منع TDZ)
 runtime.rateLimiter = () => rateLimiter.stats();
 runtime.shadow = () => shadow.summary();
@@ -2736,6 +2966,13 @@ onFatalShutdown = shutdown; // الخطأ القاتل يستخدم نفس ال�
 
 // ربط أقسام الجاهزية بالعيّنات المحفوظة (دليل الحكم على 72 ساعة)
 health.addSection('market', () => { try { return runtime.marketStats(); } catch { return null; } });
+/**
+ * قسم الشموع المجمّعة: بلا هذا لا يُقاس أثر التحويل الحادث (مفاتيح/شموع/ذاكرة/فجوات
+ * + نسبة التسخين). يُعرض داخل لقطة الصحة وفي العيّنات المحفوظة.
+ */
+health.addSection('candles', () => { try { return runtime.candles?.() ?? null; } catch { return null; } });
+/** ربط مزوّد الشموع بلقطة الصحة اللحظية (لا في العيّنات فقط) */
+health.setCandlesProvider(() => { try { return runtime.candles?.() ?? null; } catch { return null; } });
 health.addSection('targets', () => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } });
 health.addSection('shariah', () => { try { return runtime.shariahVerdicts(); } catch { return null; } });
 health.addSection('dataFresh', () => { try { return runtime.dataFresh(); } catch { return null; } });
