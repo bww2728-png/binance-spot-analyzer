@@ -12,6 +12,7 @@ import CustomLiquidityScreen from './components/CustomLiquidityScreen';
 import LiveOpportunitiesScreen from './components/LiveOpportunitiesScreen';
 import StrategyScreen from './components/StrategyScreen';
 import NotificationCenter from './components/NotificationCenter';
+import ServerBadge from './components/ServerStatusBadge';
 
 export default function App() {
   const screen = useStore(s => s.screen);
@@ -117,21 +118,24 @@ export default function App() {
           })}
         </nav>
 
-        {/* حالة الاتصال الحية */}
-        <div
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-medium"
-          style={{
-            background: live ? 'var(--up-soft)' : 'var(--warn-soft)',
-            color: live ? '#0a7f6a' : '#b45309',
-            border: `1px solid ${live ? 'rgba(8,153,129,0.35)' : 'rgba(245,158,11,0.35)'}`
-          }}
-          title={live ? 'اتصال السوق الحي يعمل' : 'بانتظار بيانات السوق…'}
-        >
-          <span
-            className={`w-2 h-2 rounded-full ${live ? 'live-dot' : ''}`}
-            style={{ background: live ? 'var(--up)' : 'var(--warn)' }}
-          />
-          {live ? 'مباشر' : 'انتظار'}
+        {/* حالة النظام: تُقرأ من الخادم نفسه لا من بث المتصفح وحده (B10) */}
+        <div className="flex items-center gap-1.5">
+          <ServerBadge />
+          <div
+            className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-medium"
+            style={{
+              background: live ? 'var(--up-soft)' : 'var(--warn-soft)',
+              color: live ? '#0a7f6a' : '#b45309',
+              border: `1px solid ${live ? 'rgba(8,153,129,0.35)' : 'rgba(245,158,11,0.35)'}`
+            }}
+            title={live ? 'شارت المتصفح يتلقى أسعاراً مباشرة' : 'شارت المتصفح بانتظار أسعار…'}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${live ? 'live-dot' : ''}`}
+              style={{ background: live ? 'var(--up)' : 'var(--warn)' }}
+            />
+            {live ? 'شارت' : 'انتظار'}
+          </div>
         </div>
       </header>
 

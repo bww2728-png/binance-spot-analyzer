@@ -33,6 +33,10 @@ import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
 import { startRetention } from './services/retention.mjs';
 import { createShadow } from './services/shadow.mjs';
+import {
+  mergeZones, replaceSymbolScan, boundByNewest, shouldStartRotation, capState,
+  DEFAULT_HISTORY_MAX_ZONES, DEFAULT_LIVE_MAX_ZONES
+} from './services/zoneStore.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -93,6 +97,8 @@ const runtime = {
   targetsSource: () => null,
   shariahVerdicts: () => ({ count: null, at: 0 }),
   dataFresh: () => ({ ok: null, reason: 'غير مُهيّأ' }),
+  /** مخزون المناطق (أكبر مخزن في الذاكرة) — يُقاس لحظياً في الفحص العميق */
+  zones: () => null,
 };
 
 // نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
@@ -131,6 +137,11 @@ app.get('/api/health/deep', (req, res) => {
     shadow: (() => { try { const s = runtime.shadow?.(); return s ? { enabled: s.enabled, fixes: Object.keys(s.fixes ?? {}).length, records: s.records.map(r => ({ key: r.key, samples: r.samples, diff: r.diff, diffRate: r.diffRate })) } : null; } catch { return null; } })(),
     targets: (() => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } })(),
     shariah: (() => { try { return runtime.shariahVerdicts(); } catch { return null; } })(),
+    /**
+     * مخزون المناطق: كان يُسجَّل في العيّنات المحفوظة فقط، فلا يظهر في الفحص اللحظي —
+     * وهو أكبر مخزن في الذاكرة، فلا يُقبل أن يُقاس كل 5 دقائق فقط.
+     */
+    zones: (() => { try { return runtime.zones?.() ?? null; } catch { return null; } })(),
     dataFresh: fresh
   });
 });
@@ -167,12 +178,25 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
 }
 
 // رفضوع وعود مرفوضة في الحلقات الخلفية يجب ألا تُسقط healthz بصمت
+/**
+ * مسار الإغلاق السليم يُسجَّل هنا لاحقاً (بعد تعريفه) حتى يستخدمه الخطأ القاتل أيضاً:
+ * الخروج بلا حفظ يُفقد آخر نبضة وحالة العمال، وحفظها هو ما يميّز «إعادة تشغيل نظيفة»
+ * من «مجهول السبب».
+ */
+let onFatalShutdown = null;
 process.on('unhandledRejection', (reason) => {
   console.error('[fatal] unhandledRejection:', reason instanceof Error ? reason.message : reason);
 });
 process.on('uncaughtException', (err) => {
   console.error('[fatal] uncaughtException:', err instanceof Error ? err.message : err);
-  process.exit(1); // خروج نظيف لتُعيد منصة الاستضافة التشغيل بدل حالة عالقة
+  // خروج نظيف لتُعيد منصة الاستضافة التشغيل بدل حالة عالقة — مع حفظ الحالة أولاً
+  const done = () => process.exit(1);
+  if (onFatalShutdown) {
+    Promise.resolve(onFatalShutdown('uncaughtException')).finally(done);
+    setTimeout(done, 3000).unref?.();
+    return;
+  }
+  done();
 });
 
 const PORT = process.env.PORT || 8787;
@@ -950,14 +974,32 @@ const saveLiquidityEvent = async (type, zone, message, meta = {}) => {
   }
 };
 
-const mergeLiquidityResults = (rows, incoming) => {
-  const map = new Map(rows.map(r => [`${r.symbol}|${r.timeframe}|${r.id}`, r]));
-  for (const zone of incoming) map.set(`${zone.symbol}|${zone.timeframe}|${zone.id}`, zone);
-  return [...map.values()].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
-};
+/**
+ * مخزون المناطق: للأمانة، `mergeLiquidityResults` تُبقي كل معرّف رأته في أي دورة،
+ * والمعرّفات تتغيّر كل مسح، فيتراكم المخزون بلا حد حتى يقتل الحاوية (~700MB/دورة
+ * تاريخية كاملة بالقياس). السياسة مطبّقة في `services/zoneStore.mjs`.
+ */
+const HISTORY_MAX_ZONES = Number(process.env.LIQUIDITY_HISTORY_MAX_ZONES || DEFAULT_HISTORY_MAX_ZONES);
+const LIVE_MAX_ZONES = Number(process.env.LIQUIDITY_LIVE_MAX_ZONES || DEFAULT_LIVE_MAX_ZONES);
+
+const mergeLiquidityResults = (rows, incoming) => mergeZones(rows, incoming);
 
 const runLiquidityLiveRotation = async () => {
   if (liquidityState.liveBusy) return;
+  /**
+   * المخزون الحي يقرأه محرك الفرص، فلا يُحذف منه شيء. الحماية: عند بلوغ السقف لا نبدأ
+   * دورة جديدة (المخزون يبقى كما هو ويعمل المحرك عليه) بدل النمو حتى قتل الحاوية.
+   * الحالة تُصرَّح في الصحة وفي عيّنات `health_samples` وليست صامتة.
+   */
+  const liveCap = capState(liquidityState.liveResults.length, LIVE_MAX_ZONES);
+  liquidityState.liveCap = liveCap;
+  if (!shouldStartRotation(liquidityState.liveResults.length, LIVE_MAX_ZONES)) {
+    liquidityState.liveSkipReason = `مخزون المناطق الحيّة بلغ السقف (${liveCap.count}/${liveCap.cap}) — الدورة الجديدة مؤجلة`;
+    liquidityJob.set({ capped: true, cap: liveCap.cap, zones: liveCap.count, skipReason: liquidityState.liveSkipReason });
+    return;
+  }
+  liquidityState.liveCap = null;
+  liquidityState.liveSkipReason = null;
   liquidityState.liveBusy = true;
   try {
     const targets = await resolveTargets();
@@ -987,6 +1029,20 @@ const runLiquidityLiveRotation = async () => {
       }
       liquidityState.livePairsDone += 1;
       liquidityState.updatedAt = Date.now();
+      /**
+       * الدورة الكاملة تمتد أكثر من ساعة (429 زوجاً × 14 فريماً على نواة واحدة)، فنبضة
+       * واحدة في نهاية الدورة تجعل كاشف التعليق يعلن «متعطل» بعد 30 دقيقة وهي تعمل.
+       * لذلك النبض لكل زوج: يمنع الإنذار الكاذب، ويعرض التقدم الحقيقي (المستهلك/الإجمالي).
+       */
+      liquidityJob.beat({
+        extra: {
+          mode: 'live',
+          rotation,
+          pairsDone: liquidityState.livePairsDone,
+          pairsTotal: liquidityState.livePairsTotal,
+          results: liquidityState.liveResults.length
+        }
+      });
       broadcast({ type: 'liquidity_zones_live_progress', symbol, rotation });
     }
     broadcast({ type: 'liquidity_zones_live_done', rotation });
@@ -1010,16 +1066,45 @@ const runLiquidityHistoryRotation = async () => {
     liquidityState.historyPairsTotal = targets.length;
     for (let symbolIndex = 0; symbolIndex < targets.length; symbolIndex += 1) {
       const symbol = targets[symbolIndex];
+      /**
+       * تُجمع مناطق كل فريمات الرمز ثم تُكتب دفعة واحدة: الاستبدال لكل فريم كان يعني
+       * فرز/تصفية 40 ألف صف 6006 مرة في الدورة. الناتج نفسه بكلفة أقل بمرتبة.
+       */
+      const pairZones = [];
       for (let timeframeIndex = 0; timeframeIndex < ALL_TIMEFRAMES.length; timeframeIndex += 1) {
         const timeframe = ALL_TIMEFRAMES[timeframeIndex];
         try {
           const raw = await db.binance.klines(symbol, timeframe, 1000);
           const candles = normalizeCandles(raw);
           const zones = await scanHistoryAsync({ symbol, timeframe, candles, step: Math.max(1, Math.floor(candles.length / 120)), maxZones: 200, biasPerKind: liquidityState.adjustment.visualBias || {} });
-          liquidityState.historyResults = mergeLiquidityResults(liquidityState.historyResults, zones.map(zone => ({ ...zone, mode: 'history', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex })));
+          for (const zone of zones) {
+            pairZones.push({ ...zone, mode: 'history', workOrder: symbolIndex * ALL_TIMEFRAMES.length + timeframeIndex });
+          }
         } catch { /* مستقل */ }
       }
+      /**
+       * استبدال مسح هذا الرمز بدل تراكمه: هذا المخزون للعرض والمراجعة فقط (لا محرك قرار
+       * يقرأه)، وتراكم المسح القديم بجانب الجديد كان يُنتج ~833 منطقة لكل زوج أي
+       * ~700MB للدورة الواحدة على حاوية حدّها 1GB — وهو سبب موت الحاوية.
+       */
+      liquidityState.historyResults = boundByNewest(
+        replaceSymbolScan(liquidityState.historyResults, symbol, ALL_TIMEFRAMES, pairZones),
+        HISTORY_MAX_ZONES
+      );
       liquidityState.historyPairsDone += 1;
+      /**
+       * مخزون المناطق التاريخية هو أكبر مخزن في الذاكرة: `mergeLiquidityResults` يراكم
+       * ولا يحذف، فالنمو بلا سقف. القياس هنا هو الدليل اللازم لقرار معالجة التراكم.
+       */
+      liquidityJob.beat({
+        extra: {
+          historyMode: true,
+          historyRotation: liquidityState.historyRotation,
+          historyDone: liquidityState.historyPairsDone,
+          historyTotal: liquidityState.historyPairsTotal,
+          historyResults: liquidityState.historyResults.length
+        }
+      });
       broadcast({ type: 'liquidity_zones_history_progress', symbol, rotation: liquidityState.historyRotation });
     }
     broadcast({ type: 'liquidity_zones_history_done', rotation: liquidityState.historyRotation });
@@ -1048,14 +1133,17 @@ app.get('/api/liquidity-zones/status', handle(async (_req, res) => {
       rotation: liquidityState.liveRotation,
       pairsDone: liquidityState.livePairsDone,
       pairsTotal: liquidityState.livePairsTotal,
-      total: liquidityState.liveResults.length
+      total: liquidityState.liveResults.length,
+      cap: liquidityState.liveCap,
+      skipReason: liquidityState.liveSkipReason ?? null
     },
     history: {
       busy: liquidityState.historyBusy,
       rotation: liquidityState.historyRotation,
       pairsDone: liquidityState.historyPairsDone,
       pairsTotal: liquidityState.historyPairsTotal,
-      total: liquidityState.historyResults.length
+      total: liquidityState.historyResults.length,
+      maxZones: HISTORY_MAX_ZONES
     },
     adjustment: liquidityState.adjustment,
     updatedAt: liquidityState.updatedAt,
@@ -1457,6 +1545,15 @@ runtime.marketStats = () => marketStreams.stats();
 // ربط المحدد ووضع الظل بالتشخيص (بعد تهيئة runtime — منع TDZ)
 runtime.rateLimiter = () => rateLimiter.stats();
 runtime.shadow = () => shadow.summary();
+/** مخزون المناطق لحظياً — يُقرأ في الفحص العميق ويُسجَّل في العيّنات */
+runtime.zones = () => {
+  const live = capState(liquidityState.liveResults.length, LIVE_MAX_ZONES);
+  const history = capState(liquidityState.historyResults.length, HISTORY_MAX_ZONES);
+  return {
+    live: { ...live, rotation: liquidityState.liveRotation, pairsDone: liquidityState.livePairsDone, pairsTotal: liquidityState.livePairsTotal, skipReason: liquidityState.liveSkipReason ?? null },
+    history: { ...history, rotation: liquidityState.historyRotation, pairsDone: liquidityState.historyPairsDone, pairsTotal: liquidityState.historyPairsTotal }
+  };
+};
 runtime.dataFresh = () => {
   const s = marketStreams.stats();
   const problems = [];
@@ -2503,6 +2600,7 @@ const shutdown = async (signal) => {
 };
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
+onFatalShutdown = shutdown; // الخطأ القاتل يستخدم نفس المسار فيحفظ الحالة قبل الخروج
 
 // ربط أقسام الجاهزية بالعيّنات المحفوظة (دليل الحكم على 72 ساعة)
 health.addSection('market', () => { try { return runtime.marketStats(); } catch { return null; } });
@@ -2511,6 +2609,11 @@ health.addSection('shariah', () => { try { return runtime.shariahVerdicts(); } c
 health.addSection('dataFresh', () => { try { return runtime.dataFresh(); } catch { return null; } });
 health.addSection('workers', () => { try { return runtime.workers?.() ?? null; } catch { return null; } });
 health.addSection('rateLimiter', () => { try { return runtime.rateLimiter?.() ?? null; } catch { return null; } });
+/**
+ * مخزون المناطق في العيّنات: بلا هذا لا يُرى نمو الذاكرة إلا بعد موت الحاوية.
+ * يُعرض كمّ المناطق وسقف كل مخزون ونسبة الاستهلاك.
+ */
+health.addSection('zones', () => { try { return runtime.zones(); } catch { return null; } });
 
 // عيّنات الصحة الدورية — دليل التشغيل المستمر يُكتب في القاعدة كل 5 دقائق
 const healthSampler = health.startSampler({
@@ -2556,7 +2659,21 @@ setInterval(() => {
     if (st) {
       const advanced = st.cycle !== lastLiveCycle;
       lastLiveCycle = st.cycle;
-      liveJob.beat({ extra: { cycle: st.cycle, tracked: st.tracked ?? null, lastRunMs: st.lastRunMs ?? null } });
+      /**
+       * الحقول هنا هي أسماء `getStatus()` الفعلية. سابقاً كانت تُقرأ أسماء غير موجودة
+       * (`tracked`, `lastRunMs`) فتظهر في عيّنات الصحة `null` دائماً — أي أن المحرك كان
+       * يعمل ولا يُقاس شيء منه، وهذا أسوأ من غياب القياس.
+       */
+      liveJob.beat({
+        extra: {
+          cycle: st.cycle,
+          zonesTracked: st.zonesTracked ?? null,
+          pairsTotal: st.pairsTotal ?? null,
+          deepScans: st.deepScans ?? null,
+          bookCalls: st.bookCalls ?? null,
+          updatedAt: st.updatedAt ?? null
+        }
+      });
       if (!advanced && st.busy) liveJob.set({ busy: true });
     }
   } catch (e) { liveJob.fail(e); }
@@ -2564,7 +2681,17 @@ setInterval(() => {
     const st2 = strategy2Engine.getStatus?.();
     if (st2) {
       lastS2Cycle = st2.cycle;
-      strategy2Job.beat({ extra: { cycle: st2.cycle, scope: st2.scope, busy: st2.busy } });
+      strategy2Job.beat({
+        extra: {
+          cycle: st2.cycle,
+          scope: st2.scope,
+          busy: st2.busy,
+          pairsTotal: st2.pairsTotal ?? null,
+          waitingPhases: st2.waitingPhases ?? null,
+          calibration: st2.calibration ? { trades: st2.calibration.trades, busy: st2.calibration.busy, segments: st2.calibration.segments, error: st2.calibration.error } : null,
+          failures: (st2.failures ?? []).length
+        }
+      });
     }
   } catch (e) { strategy2Job.fail(e); }
 }, 30_000);
