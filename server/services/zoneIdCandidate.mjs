@@ -21,9 +21,16 @@ function kindOf(zone) {
   return String(zone?.kind ?? 'unknown');
 }
 
-/** مستوى المرجع المستخدم في الشبكة: مستوى السيولة إن وُجد، وإلا المرجع */
+/**
+ * مستوى المرجع المستخدم في الشبكة: **مستوى المنطقة البنيوي** (`referenceLevel`) أولاً.
+ *
+ * السبب: `liquidityLevel` هو عتبة المسح، وهي مشتقة من آخر لمسة (‎`max(أقصى لمسة,
+ * آخر لمسة + 2×ATR)`) فتتحرك مع كل لمسة جديدة. ربط هوية المنطقة بعتبة متحركة يجعل
+ * المعرّف يتغيّر بسبب تحديث اللمسة لا بسبب تغيّر المنطقة — وهو عين ما نُصلحه.
+ * ويُقبل `liquidityLevel` بديلاً فقط حين لا يوجد مرجع بنيوي (منطقة من مصدر آخر).
+ */
 function levelOf(zone) {
-  const level = Number(zone?.liquidityLevel ?? zone?.referenceLevel);
+  const level = Number(zone?.referenceLevel ?? zone?.liquidityLevel);
   return Number.isFinite(level) && level !== 0 ? level : null;
 }
 
@@ -35,12 +42,18 @@ function levelOf(zone) {
 export function candidateZoneId(zone, grid = 0.002) {
   const level = levelOf(zone);
   if (level == null) return null;
-  const step = Math.max(1e-6, Number(grid) || 0.002);
+  const step = Math.max(1e-9, Number(grid) || 0.002);
   /**
-   * التقريب بمنطق «أقرب مضاعف» لا «أرضية القسمة»: الأرضية تُنشئ فرقاً كاملاً بين
-   * خليتين متجاورتين لمستويين يفصلهما جزء من ألف، فينفجر الدوران عند الحدود.
+   * الشبكة **لوغاريتمية** لا خطية: عرض الخانة يجب أن يكون **نسبة من السعر** (0.2% مثلاً)
+   * لا مقداراً ثابتاً، وإلا صارت الخانة واسعة جداً على عملة رخيصة وضيقة جداً على غالية،
+   * فاختلف المعيار بين رمز وآخر. وفي الفضاء اللوغاريتمي يساوي عرض الخانة النسبة نفسها.
+   *
+   * والتقريب «لأقرب خانة» لا «لأرضية القسمة»: الأرضية تجعل مستويين يفصلهما جزء من
+   * الألف يقعان في خانتين متجاورتين عند الحدود، فينفجر الدوران بلا سبب حقيقي.
+   * (كان هنا `Math.round(level / (level * step))` وهي قيمة ثابتة لا تعتمد على السعر —
+   * خطأ صريح جعل القياس كله بلا معنى؛ أُصلح مع اختبار يميّز مستويات مختلفة فعلاً.)
    */
-  const bucket = Math.round(level / (level * step)) || 0;
+  const bucket = Math.round(Math.log(level) / step);
   return `z|${kindOf(zone)}|${String(zone?.timeframe ?? '')}|${bucket}`;
 }
 

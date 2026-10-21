@@ -1133,8 +1133,8 @@ const shadowCompareCandidateIds = (sample) => {
   const rows = CANDIDATE_GRIDS.map(grid => {
     let matched = 0, churned = 0;
     for (const pair of sample.pairs) {
-      const beforeId = candidateZoneId({ kind: pair.kind, timeframe: pair.timeframe, liquidityLevel: pair.prevLevel }, grid);
-      const afterId = candidateZoneId({ kind: pair.kind, timeframe: pair.timeframe, liquidityLevel: pair.level }, grid);
+      const beforeId = candidateZoneId({ kind: pair.kind, timeframe: pair.timeframe, referenceLevel: pair.prevLevel }, grid);
+      const afterId = candidateZoneId({ kind: pair.kind, timeframe: pair.timeframe, referenceLevel: pair.level }, grid);
       if (beforeId == null || afterId == null) continue;
       matched += 1;
       const same = beforeId === afterId;

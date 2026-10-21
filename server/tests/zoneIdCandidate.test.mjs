@@ -41,19 +41,57 @@ test('★2: المعرّف المرشَّح يفصل الأنواع والفري
   assert.notEqual(ssl, m15, 'الفريم داخل المعرّف');
 });
 
-test('★2: الشبكة الأنعم تُقلّل الدوران، والأخشن تُدمج المتجاورات (فلا شبكة «مثالية» بلا قياس)', () => {
-  const grids = measureCandidateGrids({
-    prev: [zone({ referenceLevel: 100.0 })],
-    next: [zone({ referenceLevel: 100.1 })], // انزياح 0.1% — أقل من نسبة العنقدة 0.2%
-    tolerancePct: 0.002,
-    grids: [0.001, 0.002, 0.004],
-    idStability
-  });
-  assert.equal(grids.length, 3);
-  for (const g of grids) {
-    assert.ok(g.churnRate === 0 || g.churnRate === 1, 'القياس يعطي 0 أو 1 للمنطقة الواحدة');
-    assert.ok(g.grid > 0);
-  }
+test('★2: الشبكة عرض **نسبي** لا مقدار ثابت — تعمل على عملة بـ100$ وأخرى بـ0.00001$', () => {
+  const big = candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 100 }, 0.002);
+  const small = candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 0.00001 }, 0.002);
+  assert.notEqual(big, null);
+  assert.notEqual(small, null, 'السعر الصغير يُنتج خانة صحيحة لا null/‎NaN');
+  // انزياح 0.1% على العملتين: يبقى داخل الخانة في الاثنتين معاً — المعيار واحد
+  assert.equal(candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 100.1 }, 0.002), big);
+  assert.equal(candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 0.000010001 }, 0.002), small);
+});
+
+test('★2: الانزياح داخل الخانة لا يغيّر المعرّف، وخارجها يغيّره', () => {
+  const base = candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 100 }, 0.002);
+  assert.equal(candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 100.05 }, 0.002), base, '0.05% داخل خانة 0.2%');
+  assert.notEqual(candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 101 }, 0.002), base, '1% خارج الخانة');
+});
+
+test('★2: الشبكة الأوسع تُقلّل الدوران فعلاً (القياس يميّز ولا يعطي رقماً واحداً للجميع)', () => {
+  /**
+   * انزياح 0.15% لكل منطقة بين المسحين.
+   *
+   * **شرط تصميم العيّنة**: المسافة بين المستويات (4%) أكبر بكثير من نسبة التحمل (1%)،
+   * فيُطابَق كل مستوى بنفسه. لو كانت المسافة أصغر من الانزياح لانزلق كل مستوى إلى
+   * جاره وقرأ القياس «ثباتاً» زائفاً — وهذا فخّ وقعتُ فيه في نسخة أولى من هذا الاختبار
+   * (بيانات مُصنَّعة تتحرك بمقدار تباعدها)، فتظهر صفرية دوران بلا أي أساس.
+   */
+  const levels = [100, 104, 108, 112, 116, 120];
+  const drift = levels.map(referenceLevel => zone({ referenceLevel }));
+  const same = levels.map(referenceLevel => zone({ referenceLevel: referenceLevel * 1.0015 }));
+  const grids = measureCandidateGrids({ prev: drift, next: same, tolerancePct: 0.01, grids: [0.0005, 0.005], idStability });
+  const fine = grids.find(g => g.grid === 0.0005);
+  const wide = grids.find(g => g.grid === 0.005);
+  assert.equal(fine.matched, 6, 'كل المناطق طُوبقت بنفسها');
+  assert.equal(fine.churnRate, 1, 'الشبكة الأضيق من الانزياح: كل المعرّفات تتغيّر');
+  /**
+   * **لا شبكة بلا دوران**: المستوى القريب من حدّ الخانة ينقلب إلى جارتها مع أي انزياح،
+   * مهما كانت الخانة أوسع من الانزياح. لذلك المعيار ليس «صفر دوران» بل **أقل دوران**،
+   * ولهذا يُقاس على بيانات حقيقية لا يُدَّعى. هنا: خانتان من ستّ قرب حدودها، (2/6).
+   */
+  assert.ok(wide.churnRate < fine.churnRate, 'الشبكة الأوسع أقل دوراناً — وهذا كل المطلوب');
+  assert.ok(wide.churnRate <= 0.5, `دوران الحدود يبقى محصوراً (${wide.churnRate})`);
+  assert.ok(wide.keepRate > fine.keepRate, 'القياس يرتّب الشبكات — وهو الدليل المطلوب للاختيار');
+});
+
+test('★2: القياس يفشل بصوت عالٍ لو أُعيد الخطأ القديم (خانة لا تعتمد على السعر)', () => {
+  /**
+   * حراسة على الخطأ الذي وقع فعلاً: خانة = `round(level / (level*step))` قيمة ثابتة
+   * لكل المستويات، فيصير كل معرّف واحداً ويتناقض مع مستويات متباعدة تماماً.
+   */
+  const a = candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 10 }, 0.002);
+  const b = candidateZoneId({ kind: 'k', timeframe: '1h', referenceLevel: 10_000 }, 0.002);
+  assert.notEqual(a, b, 'مستويان يفصلهما 1000 ضعف لا يجوز أن يحملا المعرّف نفسه');
 });
 
 test('★2: المجمّع يرجّح الدوران بعدد المناطق المُطابَقة لا بعدد العيّنات', () => {
