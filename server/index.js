@@ -1170,10 +1170,11 @@ const LIQUIDITY_FALLBACK_MS = Math.max(60_000, Number(process.env.LIQUIDITY_FALL
  * تماماً (limits/timeframes/tolerance/bias). المصدر: المخزن المجمّع بلا REST.
  * تُعيد عدد المناطق المدمجة، أو null إن تعذّر الكشف (مفتاح ناقص/شموع غير كافية).
  */
-const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
+const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder, measureShadow = true }) => {
   const rows = marketStreams.candles.getRows(symbol, timeframe);
   if (!rows || rows.length < LIQUIDITY_MIN_BARS) return null;
   const candles = normalizeCandles(rows);
+  const t0 = process.hrtime.bigint();
   const zones = detectLiquidityZones({
     symbol,
     timeframe,
@@ -1182,12 +1183,22 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
     biasPerKind: liquidityState.adjustment.visualBias || {}
   }).map(zone => ({ ...zone, rotation, mode: 'live', workOrder }));
   liquidityState.liveResults = mergeLiquidityResults(liquidityState.liveResults, zones);
+  const detectMs = Number(process.hrtime.bigint() - t0) / 1e6;
+  /**
+   * زمن الكشف الفعلي + زمن قياس الظل يُسجَّلان معاً. قبل ذلك لم يُسجَّل لأثقل حلقة
+   * (`liquidity-zones`) أي زمن دورة (`lastCycleMs: null`)، فكان تأخّر الحلقة p99
+   * (1,229ms مقابل معيار <200ms) بلا مصدر معروف. الرقم هو ما يحوّل الشكوى إلى سبب.
+   */
+  liquidShadowTiming.detectMs += detectMs;
+  if (detectMs > liquidShadowTiming.detectMaxMs) liquidShadowTiming.detectMaxMs = detectMs;
+  if (!measureShadow) liquidShadowTiming.shed += 1;
   /**
    * ★2 قياس فقط: يُشغَّل الكشف مرة ثانية بنفس الشموع وبفارق شمعة واحدة، وكل منطقة
    * مُطابَقة هي نفس المنطقة — فإن اختلف معرّفها فذلك عدم ثبات خالص. العيّنة مقيّدة
    * بـ`stride` كي تبقى الكلفة أقل من 1% من الفحص، ولا يقرأ الناتج أي قرار منشور.
    */
-  if (shadow && workOrder % ZONE_ID_SHADOW_STRIDE === 0) {
+  const shadowStart = process.hrtime.bigint();
+  if (measureShadow && shadow && workOrder % ZONE_ID_SHADOW_STRIDE === 0) {
     const sample = measureIdentityStability({
       detect: ({ endIndex }) => detectLiquidityZones({
         symbol,
@@ -1218,7 +1229,7 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
    *
    * و**لا يُغذّي شيئاً**: لا يُكتب في `liquidityState`، ولا يقرأه أي قرار منشور.
    */
-  if (LIQUIDITY_V2_SHADOW && workOrder % LIQUIDITY_V2_STRIDE === 0) {
+  if (measureShadow && LIQUIDITY_V2_SHADOW && workOrder % LIQUIDITY_V2_STRIDE === 0) {
     try {
       // المناطق المحسوبة في `detectLiveZonesForKey` تُمرَّر كما هي: بلا كشف ثانٍ
       const compared = compareEngines({
@@ -1243,6 +1254,10 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
       if (liquidityV2Errors <= 3) console.warn('[liquidity-v2] فشل قياس الظل:', String(e?.message ?? e).slice(0, 160));
     }
   }
+  const shadowMs = Number(process.hrtime.bigint() - shadowStart) / 1e6;
+  liquidShadowTiming.shadowMs += shadowMs;
+  if (shadowMs > liquidShadowTiming.shadowMaxMs) liquidShadowTiming.shadowMaxMs = shadowMs;
+  liquidShadowTiming.keys += 1;
   return zones.length;
 };
 
@@ -1251,32 +1266,77 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
  * (ميكروتاسك واحد لكل نبضة) لتفادي إعادة الحساب مرات متعددة لنفس المفتاح في نفس النبضة.
  * المنطق في createKeyQueue (قابل للاختبار) ويُستدعى هنا بمعالج الكشف.
  */
-const liveEventState = { flushes: 0, keysProcessed: 0, lastFlushAt: null, lastKeyAt: null, skipped: 0 };
+const liveEventState = {
+  flushes: 0, keysProcessed: 0, lastFlushAt: null, lastKeyAt: null, skipped: 0,
+  deferred: 0, lastFlushMs: 0, maxFlushMs: 0, shadowShed: 0
+};
+
+/**
+ * زمن عمل حلقة السيولة: الكشف الفعلي منفصلاً عن قياس الظل. الفصل ضروري لأن الظل
+ * (★2 وv2) قياسٌ لا قرار، فإذا كان هو مصدر التأخّر فيُخفَّف بلا أي مساس بالنتائج.
+ */
+const liquidShadowTiming = { detectMs: 0, detectMaxMs: 0, shadowMs: 0, shadowMaxMs: 0, keys: 0, shed: 0 };
 
 const liveKeyQueue = createKeyQueue((keys) => {
   const targets = new Set(targetsCache.list);
   const rotation = liquidityState.liveRotation;
-  for (const key of keys) {
+  /**
+   * ميزانية زمنية للدفعة الواحدة: كانت الدفعة تُعالج كاملة في ميكروتاسك واحد، فحجب
+   * الحدث الحلقي (HTTP والبث والصحة) بطول غير محدود — وهذا مصدر تأخّر الحلقة.
+   * المفاتيح المتبقية **لا تُفقد**: تُعاد إلى الطابور وتُعالج في النبضة التالية.
+   */
+  const budgetMs = Number(process.env.LIVE_LIQUIDITY_BUDGET_MS) || 60;
+  const startedAt = Date.now();
+  /**
+   * إسقاط قياس الظل عند ضيق الوقت: إذا تجاوزت الدفعة السابقة الميزانية، تُتخطى أقسام
+   * القياس في هذه الدفعة (بلا أي أثر على القرار المنشور، لأنها قياس خالص)، ويُحتسب
+   * الإسقاط في الصحة فلا يختفي بصمت.
+   */
+  const shedShadow = liveEventState.lastFlushMs > budgetMs * 1.5;
+  let processed = 0;
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i];
     const [symbol, timeframe] = key.split('|');
-    if (!targets.has(symbol)) continue; // رمز خارج قائمة التحليل الحالية
+    if (!targets.has(symbol)) { processed = i + 1; continue; } // رمز خارج قائمة التحليل الحالية
     try {
       const workOrder = ALL_TIMEFRAMES.indexOf(timeframe);
-      const n = detectLiveZonesForKey(symbol, timeframe, { rotation, workOrder: workOrder < 0 ? 0 : workOrder });
+      const n = detectLiveZonesForKey(symbol, timeframe, {
+        rotation, workOrder: workOrder < 0 ? 0 : workOrder, measureShadow: !shedShadow
+      });
       if (n !== null) {
         liveEventState.keysProcessed += 1;
         liveEventState.lastKeyAt = Date.now();
         liquidityState.updatedAt = Date.now();
       }
     } catch { /* مفتاح فاشل لا يوقف البقية */ }
+    processed = i + 1;
+    if (Date.now() - startedAt >= budgetMs) break;
   }
+  const leftover = keys.slice(processed);
+  if (leftover.length) {
+    liveEventState.deferred += leftover.length;
+    setImmediate(() => { for (const k of leftover) enqueueLiveKey(k); });
+  }
+  if (shedShadow) liveEventState.shadowShed += 1;
+  const flushMs = Date.now() - startedAt;
+  liveEventState.lastFlushMs = flushMs;
+  if (flushMs > liveEventState.maxFlushMs) liveEventState.maxFlushMs = flushMs;
   liveEventState.flushes += 1;
   liveEventState.lastFlushAt = Date.now();
   liquidityJob.beat({
+    ms: flushMs,
     extra: {
       mode: 'event',
       flushes: liveEventState.flushes,
       keysProcessed: liveEventState.keysProcessed,
-      results: liquidityState.liveResults.length
+      results: liquidityState.liveResults.length,
+      deferred: liveEventState.deferred,
+      maxFlushMs: liveEventState.maxFlushMs,
+      shadowShed: liveEventState.shadowShed,
+      detectMaxMs: Number(liquidShadowTiming.detectMaxMs.toFixed(1)),
+      shadowMaxMs: Number(liquidShadowTiming.shadowMaxMs.toFixed(1)),
+      detectAvgMs: Number((liquidShadowTiming.detectMs / Math.max(liquidShadowTiming.keys, 1)).toFixed(2)),
+      shadowAvgMs: Number((liquidShadowTiming.shadowMs / Math.max(liquidShadowTiming.keys, 1)).toFixed(2))
     }
   });
 });
@@ -2393,7 +2453,9 @@ const strategy2Engine = createStrategyEngine({
         let meta = {};
         try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
         const o = meta.opportunity ?? {};
-        return { ...o, symbol: o.symbol || r.symbol, at: o.at ?? r.ts };
+        // `label` مُشتق (حُذف من الحمولة المخزَّنة لتقليلها) — يُعاد هنا فيبقى القارئ كما كان
+        const label = o.label ?? (o.stage ? `تغير المرحلة: ${o.stage}` : 'تغير مرحلة');
+        return { ...o, label, symbol: o.symbol || r.symbol, at: o.at ?? r.ts };
       }).filter(e => e.symbol);
     } catch {
       return [];
@@ -2402,11 +2464,29 @@ const strategy2Engine = createStrategyEngine({
   broadcast: (msg) => broadcast(msg),
   persist: (row) => {
     if (row?.directionEvent) {
+      /**
+       * حمولة مضغوطة بلا فقدان معلومة: القياس على صفوف إنتاجية حقيقية أعطى 790 بايت
+       * للصف، ومنها:
+       *  - `message` يعيد المرحلة مرتين (label يحملها أصلاً): «تغير المرحلة: X — المرحلة: X».
+       *  - `meta` يحمل `directionEvent` و`notify` و`label` المشتق من `stage`، و`symbol`
+       *    مكرراً (في الصف وفي meta)، و`zone` زائداً.
+       * بعد الضغط يبقى كل ما يقرأه الاسترجاع والواجهة (symbol, tf, dir, prevDir, dirTF,
+       * dirHTF, htfTf, stage, kind, at) ويُشتق `label` عند القراءة.
+       * السبب: هذا أكبر كاتب بعد التغطية الكاملة (73 ألف صف/يوم ≈ 57MB/يوم).
+       */
+      const label = row.label ?? (row.stage ? `تغير المرحلة: ${row.stage}` : 'تغير مرحلة');
       return saveLiquidityEvent(
         'strategy2_direction',
         { symbol: row.symbol },
-        `${row.symbol}: ${row.label} — المرحلة: ${row.stage}`,
-        { opportunity: row }
+        `${row.symbol} ${row.tf ?? '1m'}: ${row.stage ?? label}`,
+        {
+          opportunity: {
+            symbol: row.symbol, tf: row.tf ?? '1m',
+            dir: row.dir, prevDir: row.prevDir ?? null,
+            dirTF: row.dirTF ?? null, dirHTF: row.dirHTF ?? null, htfTf: row.htfTf ?? null,
+            stage: row.stage, kind: row.kind, at: row.at
+          }
+        }
       );
     }
     return saveLiquidityEvent(

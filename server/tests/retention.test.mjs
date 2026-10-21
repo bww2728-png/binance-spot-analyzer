@@ -19,7 +19,9 @@ function fakeDb({ snapshotRows = [], imageRows = 0 } = {}) {
         deleteBefore: async (type, beforeTs) => { calls.deleteBefore.push({ type, beforeTs }); return 5; },
         listByType: async () => snapshotRows,
         deleteByIds: async (ids) => { calls.deleteByIds.push(ids); return ids.length; },
-        clearImagesBefore: async (type, beforeTs) => { calls.clearImages.push({ type, beforeTs }); return imageRows; }
+      clearImagesBefore: async (type, beforeTs) => { calls.clearImages.push({ type, beforeTs }); return imageRows; },
+      /** لا صفوف لسجل الاتجاهات في هذا البديل ⇒ دورة السقف لا تفعل شيئاً */
+      countByType: async () => 0
       },
       // عيّنات الصحة صارت تحت سياسة صريحة (كانت محمية حماية مطلقة فتنمو أبداً)
       health: {
@@ -102,9 +104,55 @@ test('عيّنات الصحة محمية من فقدان التاريخ القر
       deleteOldest: async () => { throw new Error('يجب ألا يُستدعى: العدد تحت السقف'); }
     }
   };
+  // لا صفوف لسجل الاتجاهات هنا ⇒ دورة السقف لا تحذف شيئاً
+  db.events.countByType = async () => 0;
   const report = await runRetention({ db, now: () => now, log: { log: () => {}, warn: () => {} } });
   assert.equal((now - seen[0]) / DAY, 30, 'حدّ زمني 30 يوماً');
   assert.equal(report.errors.length, 0, 'تحت السقف لا حذف سقفي');
+});
+
+/**
+ * سجل الاتجاهات: ذاكرة النظام لا تُحذف بالزمن، لكنها تُصان بسقف صفوف.
+ * القياس بعد التغطية الكاملة: ~73 ألف صف/يوم (≈57MB/يوم)، وأكبر قارئ في النظام
+ * يطلب 2,000 صف ⇒ سقف 20,000 صف = عشرة أضعاف أكبر قراءة ممكنة.
+ */
+test('سجل الاتجاهات: عند تجاوز السقف يُحذف الأقدم فقط (الذاكرة الحديثة تبقى)', async () => {
+  const rows = [];
+  for (let i = 0; i < 1500; i += 1) rows.push({ id: 5000 - i, ts: 2_000_000_000_000 - i * 1000 });
+  const calls = { deleteBefore: [] };
+  const db = {
+    events: {
+      deleteBefore: async (type, before) => { calls.deleteBefore.push({ type, before }); return 7; },
+      listByType: async () => rows,
+      deleteByIds: async () => 0,
+      clearImagesBefore: async () => 0,
+      countByType: async (type) => (type === 'strategy2_direction' ? 25_000 : 0)
+    },
+    health: { deleteBefore: async () => 0, count: async () => 0, deleteOldest: async () => 0 }
+  };
+  const report = await runRetention({ db, now: () => 2_000_000_100_000, log: { log: () => {}, warn: () => {} } });
+  const capCalls = calls.deleteBefore.filter(c => c.type === 'strategy2_direction');
+  assert.equal(capCalls.length, 1, 'حذف واحد بالسقف لهذا النوع');
+  assert.equal(report.rowCaps.strategy2_direction.total, 25_000);
+  assert.equal(report.rowCaps.strategy2_direction.deleted, 7);
+  assert.equal(report.errors.length, 0);
+});
+
+test('سجل الاتجاهات: تحت السقف لا حذف إطلاقاً', async () => {
+  const byType = [];
+  const db = {
+    events: {
+      deleteBefore: async (type) => { byType.push(type); return 0; },
+      listByType: async () => [],
+      deleteByIds: async () => 0,
+      clearImagesBefore: async () => 0,
+      countByType: async (type) => (type === 'strategy2_direction' ? 12_000 : 0)
+    },
+    health: { deleteBefore: async () => 0, count: async () => 0, deleteOldest: async () => 0 }
+  };
+  const report = await runRetention({ db, now: () => Date.now(), log: { log: () => {}, warn: () => {} } });
+  assert.equal(byType.includes('strategy2_direction'), false, 'لا حذف لسجل الاتجاهات تحت السقف');
+  assert.equal(report.rowCaps.strategy2_direction.deleted, 0);
 });
 
 test('الصور تُسقط بعد 90 يوماً مع إبقاء الحدث نفسه', async () => {
@@ -148,7 +196,8 @@ test('المدد قابلة للضبط: تغييرها يغيّر حدّ الح�
     events: {
       deleteBefore: async (type, before) => { deleted.push({ type, before }); return 1; },
       listByType: async () => [],
-      clearImagesBefore: async () => 0
+      clearImagesBefore: async () => 0,
+      countByType: async () => 0
     },
     health: { deleteBefore: async () => 0, count: async () => 0, deleteOldest: async () => 0 }
   };

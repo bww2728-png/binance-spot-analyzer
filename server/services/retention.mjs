@@ -29,6 +29,24 @@ const SNAPSHOTS_KEPT_PER_SYMBOL = 10;
 const SAMPLE_TYPE = 'health_samples';
 const SAMPLE_DAYS_DEFAULT = 30;
 const SAMPLE_MAX_ROWS_DEFAULT = 10_000;
+
+/**
+ * سقوف صفوف لأنواع تنمو بالتغطية الكاملة لا بالوقت.
+ *
+ * القياس بعد رفع التغطية إلى 472 عملة حلالاً: `strategy2_direction` بلغ ~73 ألف صف
+ * في 24 ساعة (≈57 ميغابايت/يوم) لأنه يُكتب عند انتقال المرحلة في كل رمز وفريم، مع
+ * تكرار 2.6 لاحظه القياس (نفس الرمز والفريم والاتجاه والمرحلة). وهو **سجل ذاكرة
+ * النظام** فلا يُحذف بالزمن كالتشخيص، لكنه بلا سقف يملأ القاعدة.
+ *
+ * والسقف مُشتق من القارئ لا من التقدير: أكبر قراءة في النظام كله هي
+ * `db.events.strategy2DirectionEvents` وهي مقيّدة بـ2,000 صف (`Math.min(limit, 2000)`).
+ * لذلك إبقاء 20,000 صف = **عشرة أضعاف أكبر قراءة ممكنة** (≈11 ميغابايت) يضمن ألا
+ * ينقص أي شيء يقرأه النظام أصلاً، مع سدّ النمو الأبدي. الضبط من البيئة، والتقليم
+ * مُعلن في `storage.lastRetention` بالصفوف المحذوفة وحدّها.
+ */
+const ROW_CAPPED_TYPES = {
+  strategy2_direction: Number(process.env.RETENTION_DIRECTION_MAX_ROWS ?? 0) || 20_000
+};
 const IMAGE_TYPES_90D = [
   'liquidity_zone', 'liquidity_zone_reviewed',
   'live_opportunity', 'live_opportunity_closed', 'live_opportunity_rejected',
@@ -133,6 +151,33 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
   }
 
   // 4) صور المناطق الآلية بعد المدة المحددة (الصور أثقل بكثير من النصوص)
+  /**
+   * 3-ب) سقف صفوف لسجل الاتجاهات: ذاكرة تُصان لا تُفنى. يُحفظ أحدث `keep` صفاً
+   * ويُحذف ما قبلها — وهذا يبقي الاتجاهات الحديثة (وهي ما يُقرأ فعلاً) ويمنع نمواً
+   * أبدياً بمعدل 73 ألف صف/يوم. الحد مطبَّع من البيئة، ويظهر في `report` بالأرقام.
+   */
+  for (const [type, keep] of Object.entries(ROW_CAPPED_TYPES)) {
+    try {
+      const total = await db.events.countByType(type);
+      if (total <= keep) {
+        report.rowCaps = { ...(report.rowCaps ?? {}), [type]: { total, keep, deleted: 0 } };
+        continue;
+      }
+      // أحدث `keep` صفاً: الأقدم منها يُحذف (بمعرّفات لتفادي حذف ما بعد الحد)
+      const rows = await db.events.listByType(type, { select: 'id,ts', limit: keep });
+      const cutoff = Number(rows?.[rows.length - 1]?.ts ?? 0);
+      if (dryRun) {
+        report.skipped.push({ type, action: 'delete-before-rowcap', cutoff, total, keep });
+        continue;
+      }
+      const deleted = cutoff ? await db.events.deleteBefore(type, cutoff) : 0;
+      report.rowCaps = { ...(report.rowCaps ?? {}), [type]: { total, keep, cutoff, deleted: Number(deleted) || 0 } };
+      if (deleted) report.deleted[type] = (report.deleted[type] ?? 0) + (Number(deleted) || 0);
+    } catch (e) {
+      report.errors.push({ type, error: String(e?.message ?? e).slice(0, 200) });
+    }
+  }
+
   for (const type of IMAGE_TYPES_90D) {
     if (PROTECTED_TYPES.has(type)) continue;
     const before = t - imgDays * DAY;
