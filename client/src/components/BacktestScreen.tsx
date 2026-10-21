@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import type { BacktestCustomRun, BacktestFrameStat, BacktestResults, BacktestStatus, LiveOpportunitiesResponse } from '../lib/types';
 import Skeleton from './ui/Skeleton';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
+import StaleDataBanner from './StaleDataBanner';
+import { useScreenState } from '../lib/useScreenState';
 
 /* واجهة الباك تيست والفرص الحية — walk-forward + حلقة تعلم مستمرة + أدوات المخاطر (عرض فقط)
  * - ملخص: عدد الصفقات + النجاح النهائي + النجاح بعد قواعد المتعلّم (≥ 0.7 هدف)
@@ -69,7 +72,6 @@ export default function BacktestScreen() {
   const [customTo, setCustomTo] = useState('');
   const [customLaunching, setCustomLaunching] = useState(false);
   const [live, setLive] = useState<LiveOpportunitiesResponse | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // محرك الفَرض الحية (مستقل): poll سريع منفصل عن poll الباك تيست
   const loadLive = useCallback(async (signal?: AbortSignal) => {
@@ -79,16 +81,7 @@ export default function BacktestScreen() {
     } catch { /* فشل poll الفَرض لا يعطل الشاشة */ }
   }, []);
 
-  useEffect(() => {
-    const ac = new AbortController();
-    void loadLive(ac.signal);
-    return () => ac.abort();
-  }, [loadLive]);
-
-  useEffect(() => {
-    const iv = setInterval(() => void loadLive(), 10000);
-    return () => clearInterval(iv);
-  }, [loadLive]);
+  useVisiblePoll(loadLive, { intervalMs: 10000 });
 
   const RUN_FRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'];
 
@@ -118,12 +111,21 @@ export default function BacktestScreen() {
     return () => ac.abort();
   }, [load]);
 
-  // دوري: 15 ثانية — أثناء الجولة أسرع (5 ثوانٍ)
-  useEffect(() => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(() => void load(), status?.busy ? 5000 : 15000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [status?.busy, load]);
+  // دوري واعٍ بالإخفاء: 15 ثانية — أثناء الجولة أسرع (5 ثوانٍ)
+  useVisiblePoll(load, { intervalMs: status?.busy ? 5000 : 15000, immediate: false });
+
+  // شريحة الحالة: فلاتر العملة/الفريم والجولة المخصصة تُحفظ وتُستعاد
+  useScreenState('backtest', {
+    filters: { coin, frame, customSymbol, customFrame, customFrom, customTo },
+    onRestore: (s) => {
+      if (s.filters.coin != null) setCoin(s.filters.coin);
+      if (s.filters.frame != null) setFrame(s.filters.frame);
+      if (s.filters.customSymbol != null) setCustomSymbol(s.filters.customSymbol);
+      if (s.filters.customFrame) setCustomFrame(s.filters.customFrame);
+      if (s.filters.customFrom != null) setCustomFrom(s.filters.customFrom);
+      if (s.filters.customTo != null) setCustomTo(s.filters.customTo);
+    }
+  });
 
   const launch = useCallback(async () => {
     setLaunching(true);
@@ -203,6 +205,7 @@ export default function BacktestScreen() {
   return (
     <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-4">
       <div className="max-w-6xl mx-auto flex flex-col gap-4">
+        <StaleDataBanner />
         {/* الترويسة */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>

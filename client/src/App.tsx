@@ -1,19 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useStore } from './store/useStore';
-import AnalysisBoard from './components/AnalysisBoard';
-import Dashboard from './components/Dashboard';
-import SettingsPanel from './components/SettingsPanel';
 import ChartModal from './components/ChartModal';
-import CaseLedger from './components/CaseLedger';
-import AutoHistory from './components/AutoHistory';
-import BacktestScreen from './components/BacktestScreen';
-import LiquidityZonesScreen from './components/LiquidityZonesScreen';
-import LiquidityV2Screen from './components/LiquidityV2Screen';
-import CustomLiquidityScreen from './components/CustomLiquidityScreen';
-import LiveOpportunitiesScreen from './components/LiveOpportunitiesScreen';
-import StrategyScreen from './components/StrategyScreen';
-import NotificationCenter from './components/NotificationCenter';
 import ServerBadge from './components/ServerStatusBadge';
+import ScreensHost from './components/ScreensHost';
+import { useVisiblePoll } from './lib/useVisiblePoll';
 
 export default function App() {
   const screen = useStore(s => s.screen);
@@ -47,11 +37,8 @@ export default function App() {
     if (count > 0) setLastTick(Date.now());
   }, [prices]);
 
-  useEffect(() => {
-    const t = setInterval(() => setLive(Date.now() - lastTick < 10000), 3000);
-    setLive(Date.now() - lastTick < 10000);
-    return () => clearInterval(t);
-  }, [lastTick]);
+  // فحص دوري واعٍ بالإخفاء: يتوقف عند إخفاء التبويب ولا يتراكب مع نفسه
+  useVisiblePoll(() => { setLive(Date.now() - lastTick < 10000); }, { intervalMs: 3000 });
 
   const tabs = [
     { id: 'board', label: 'لوحة التحليل', shortLabel: 'اللوحة', count: analyses.length },
@@ -141,20 +128,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 overflow-auto scroll-contain">
-        {screen === 'board' && <AnalysisBoard />}
-        {screen === 'cases' && <CaseLedger />}
-        {screen === 'autoHistory' && <AutoHistory />}
-        {screen === 'backtest' && <BacktestScreen />}
-        {screen === 'liveOpportunities' && <LiveOpportunitiesScreen />}
-        {screen === 'strategy2' && <StrategyScreen />}
-        {screen === 'liquidityZones' && <LiquidityZonesScreen />}
-      {screen === 'liquidityV2' && <LiquidityV2Screen />}
-        {screen === 'customLiquidity' && <CustomLiquidityScreen />}
-        {screen === 'dashboard' && <Dashboard />}
-        {screen === 'settings' && <SettingsPanel />}
-        {screen === 'notifications' && <NotificationCenter />}
-      </main>
+      <ScreensHost />
       {chartModal && <ChartModal />}
     </div>
   );

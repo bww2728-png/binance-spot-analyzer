@@ -3,6 +3,8 @@ import { api } from '../lib/api';
 import { TIMEFRAMES } from '../lib/types';
 import type { AutoHistoryRow, AutoZoneScreenshot } from '../lib/types';
 import Skeleton from './ui/Skeleton';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
+import { useScreenState } from '../lib/useScreenState';
 
 const TYPE_BADGE = {
   BSL: { cls: 'badge-up', label: 'BSL سيولة شرائية' },
@@ -57,10 +59,23 @@ export default function AutoHistory() {
   useEffect(() => {
     const ac = new AbortController();
     void load(ac.signal);
-    // تحديث دوري: السجل آلي يتحرك مع جولات الكشف (كل 60 ثانية — خفيف على الشبكة)
-    const t = setInterval(() => void load(ac.signal), 60000);
-    return () => { ac.abort(); clearInterval(t); };
+    return () => ac.abort();
   }, [load]);
+
+  // تحديث دوري واعٍ بالإخفاء: السجل آلي يتحرك مع جولات الكشف (كل 60 ثانية)
+  useVisiblePoll(load, { intervalMs: 60000, immediate: false });
+
+  // شريحة الحالة: الفلاتر تُحفظ وتُستعاد
+  useScreenState('autoHistory', {
+    filters: { symbol, timeframe, type, minScore, fabioOnly: fabioOnly ? '1' : '0' },
+    onRestore: (s) => {
+      if (s.filters.symbol != null) setSymbol(s.filters.symbol);
+      if (s.filters.timeframe != null) setTimeframe(s.filters.timeframe);
+      if (s.filters.type === 'BSL' || s.filters.type === 'SSL' || s.filters.type === '') setType(s.filters.type);
+      if (s.filters.minScore != null) setMinScore(s.filters.minScore);
+      if (s.filters.fabioOnly != null) setFabioOnly(s.filters.fabioOnly === '1');
+    }
+  });
 
   const stats = useMemo(() => {
     const symbols = [...new Set(rows.map(r => r.symbol))].length;

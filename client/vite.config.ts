@@ -5,19 +5,33 @@ import tailwindcss from '@tailwindcss/vite';
 // process موجود وقت تشغيل Vite (Node) لكن أنواعه غير مثبتة في العميل — نقرأ البيئة دون معرّف process لتجاوز tsc بلا اعتماد جديد
 const nodeEnv = (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process?.env;
 
+// مضيف HMR يُقرأ من البيئة فقط — بلا قيمة مدمجة لمضيف معاينة من جلسة سابقة.
+// عند غيابه يُستنتج المضيف تلقائياً من الطلب (سلوك Vite الافتراضي).
+const hmrHost = nodeEnv?.VERDENT_HMR_HOST;
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     host: '0.0.0.0',
     allowedHosts: true,
-    // مضيف المعاينة يُقرأ من البيئة (VERDENT_HMR_HOST) — القيمة المدمجة احتياط تطوير فقط ولا تمس بناء الإنتاج
-    hmr: {
-      host: nodeEnv?.VERDENT_HMR_HOST || '9cd43386-5173-20-base.preview.verdent.ai',
-      protocol: 'wss',
-      clientPort: 443
-    },
+    ...(hmrHost ? { hmr: { host: hmrHost, protocol: 'wss', clientPort: 443 } } : {}),
     proxy: {
       '/api': 'http://localhost:8787'
+    }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // تقسيم الحزمة: مكتبات الأساس منفصلة عن الشاشات الثقيلة (شارت/سيولة/استراتيجية)
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('lightweight-charts')) return 'vendor-charts';
+          if (id.includes('@supabase')) return 'vendor-supabase';
+          if (id.includes('react-dom') || id.includes('/react/') || id.includes('scheduler')) return 'vendor-react';
+          if (id.includes('zustand')) return 'vendor-state';
+          return 'vendor';
+        }
+      }
     }
   }
 });

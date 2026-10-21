@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
 import { BigChart } from './ChartModal';
@@ -6,7 +6,9 @@ import type { BuyFeed, BuyHistoryEvent, BuyOpportunity, BuyWatchRow, BuyCalibrat
 import type { LiveOppTickRow, LiveWatchTickRow } from '../lib/binance';
 import LiveDashboard from './LiveDashboard';
 import { TIMEFRAMES } from '../lib/types';
-import { useServerHealth } from '../lib/serverHealth';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
+import StaleDataBanner from './StaleDataBanner';
+import { useScreenState } from '../lib/useScreenState';
 
 /**
  * واجهة «الفرص الحية» — دخول شراء فقط عبر سويب مناطق SSL + أدوات الأوردر فلو.
@@ -61,9 +63,6 @@ const ago = (ts: number | null | undefined, now: number) => {
 export default function LiveOpportunitiesScreen() {
   const [feed, setFeed] = useState<BuyFeed | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { health: serverHealth, status: serverStatus } = useServerHealth(15_000);
-  /** «بيانات قديمة» تُشتق من حالة الخادم، وهي حالتان: تعطّل محرك، أو تقادم بيانات */
-  const serverStale = serverStatus === 'stale' || serverStatus === 'stalled' || (serverHealth?.dataFresh?.ok === false);
   const [tfFilter, setTfFilter] = useState('');
   const [scopeFilter, setScopeFilter] = useState<'all' | 'halal'>('halal');
   const [section, setSection] = useState<'opps' | 'dashboard' | 'watch' | 'results' | 'rejected' | 'closed'>('opps');
@@ -74,7 +73,6 @@ export default function LiveOpportunitiesScreen() {
   const [closedError, setClosedError] = useState<string | null>(null);
   const [busyMsg, setBusyMsg] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
-  const timer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -89,10 +87,17 @@ export default function LiveOpportunitiesScreen() {
   useEffect(() => { void load(); }, [load]);
 
   // احتياطي بطيء فقط — التحديث اللحظي يأتي عبر بث tick (كل ثانية) من قناة الخادم
-  useEffect(() => {
-    const id = window.setInterval(() => { void load(); }, 60_000);
-    return () => window.clearInterval(id);
-  }, [load]);
+  useVisiblePoll(load, { intervalMs: 60_000, immediate: false });
+
+  // شريحة الحالة: الفلاتر والقسم الداخلي تُحفظ وتُستعاد
+  useScreenState('liveOpportunities', {
+    filters: { tfFilter, scopeFilter, section },
+    onRestore: (s) => {
+      if (s.filters.tfFilter != null) setTfFilter(s.filters.tfFilter);
+      if (s.filters.scopeFilter === 'all' || s.filters.scopeFilter === 'halal') setScopeFilter(s.filters.scopeFilter);
+      if (s.filters.section) setSection(s.filters.section as typeof section);
+    }
+  });
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -121,11 +126,8 @@ export default function LiveOpportunitiesScreen() {
     };
   }, [load]);
 
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    timer.current = id;
-    return () => window.clearInterval(id);
-  }, []);
+  // ساعة محلية للعرض النسبي («منذ …») — واعية بالإخفاء فلا تعمل في الخلفية
+  useVisiblePoll(() => setNow(Date.now()), { intervalMs: 1000 });
 
   const runScan = async () => {
     setBusyMsg('جارٍ تشغيل دورة مسح الآن…');
@@ -219,12 +221,7 @@ export default function LiveOpportunitiesScreen() {
         * وسم البيانات القديمة: الفرص تُبنى على أسعار، وسعر متقادم يعني قراراً على صورة
         * قديمة للسوق. الشرط من الخادم نفسه (عمر آخر سعر) لا من انطباع الواجهة.
         */}
-      {serverStale && (
-        <div className="rounded-xl px-4 py-3 text-[12px] flex items-start gap-2" style={{ background: 'var(--warn-soft)', border: '1px solid rgba(245,158,11,0.35)', color: '#b45309' }}>
-          <span className="font-bold">بيانات قديمة</span>
-          <span style={{ color: 'var(--text-2)' }}>{serverHealth?.dataFresh?.reason || 'بيانات السوق متقادمة — النتائج أدناه قد لا تعكس السوق الآن.'}</span>
-        </div>
-      )}
+      <StaleDataBanner />
 
       {/* شريط التقدم الحي */}
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-2">

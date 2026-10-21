@@ -15,6 +15,20 @@ export type Screen = 'liquidityV2' | 'board' | 'dashboard' | 'cases' | 'settings
 export type Theme = 'dark' | 'light';
 export type ArchiveSection = 'cases' | 'zones' | 'events';
 
+/**
+ * شريحة حالة لكل شاشة: تُحفظ عند مغادرتها وتُستعاد عند إعادة فتحها.
+ * الغرض أن لا يضيع الفلتر/الرمز/الفريم/التبويب الداخلي/التمرير عند التنقل،
+ * حتى لو هُدم المكوّن (تجاوز سقف الشاشات المحمّلة في حاضن الشاشات).
+ */
+export interface ScreenState {
+  filters: Record<string, string>;
+  symbol: string;
+  timeframe: string;
+  tab: string;
+  page: number;
+  scrollTop: number;
+}
+
 /* ═══ مركز الإشعارات — المكان الوحيد الذي تظهر فيه الإشعارات (بلا نوافذ منبثقة) ═══ */
 export type NotificationCategory = 'zones' | 'liveOpps' | 'shariah' | 'system' | 'actions';
 export type NotificationSeverity = 'info' | 'alert' | 'error';
@@ -89,6 +103,10 @@ interface StoreState {
   casesLoaded: boolean;
   caseFilter: string | null;
   archiveSection: ArchiveSection;
+  /* شرائح حالة الشاشات — تُحفظ عند المغادرة وتُستعاد عند العودة */
+  screenStates: Partial<Record<Screen, ScreenState>>;
+  saveScreenState: (screen: Screen, patch: Partial<ScreenState>) => void;
+  getScreenState: (screen: Screen) => ScreenState | undefined;
   /* اللقطة الحية للفرص المنشورة والمناطق قيد المراقبة (tick كل ثانية من الخادم عبر WS) */
   liveOppTick: { at: number; opportunities: Record<string, LiveOppTickRow>; watching: Record<string, LiveWatchTickRow> } | null;
   calibrationProgress: { done: number; total: number } | null;
@@ -179,6 +197,7 @@ export const useStore = create<StoreState>((set, get) => ({
   casesError: null,
   caseFilter: null,
   archiveSection: 'cases',
+  screenStates: {},
   liveOppTick: null,
   calibrationProgress: null,
   strategy2Pulse: null,
@@ -392,6 +411,19 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setArchiveSection: (s) => set({ archiveSection: s }),
+
+  /** دمج جزئي في شريحة الشاشة — لا يمس بقية الحقول */
+  saveScreenState: (screen, patch) => set((st) => {
+    const prev = st.screenStates[screen] ?? { filters: {}, symbol: '', timeframe: '', tab: '', page: 0, scrollTop: 0 };
+    return {
+      screenStates: {
+        ...st.screenStates,
+        [screen]: { ...prev, ...patch, filters: { ...prev.filters, ...(patch.filters ?? {}) } }
+      }
+    };
+  }),
+
+  getScreenState: (screen) => get().screenStates[screen],
 
   refreshCases: async () => {
     const symbol = get().caseFilter ?? undefined;

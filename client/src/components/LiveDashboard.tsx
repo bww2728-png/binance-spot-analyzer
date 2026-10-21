@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import type { BuyHistoryResponse } from '../lib/types';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
 
 /* ═══ لوحة تحكم الفرص الحية — تقويم · توزيع ساعات · KPIs · جدول زمني مفلتر ═══
  * التجميع كله محلياً (توقيت الجهاز) — الخادم يعيد الأحداث الخام من سجل الأحداث الدائم.
@@ -61,10 +62,8 @@ export default function LiveDashboard({ refreshKey = 0, fetchHistory, title = '�
   }, [fetchHistory]);
 
   useEffect(() => { void load(); }, [load, refreshKey]);
-  useEffect(() => {
-    const id = window.setInterval(() => { void load(); }, 60_000);
-    return () => window.clearInterval(id);
-  }, [load]);
+  // احتياطي دوري واعٍ بالإخفاء — يتوقف عند إخفاء الشاشة/التبويب
+  useVisiblePoll(load, { intervalMs: 60_000, immediate: false });
 
   const all = history?.timeline ?? [];
 

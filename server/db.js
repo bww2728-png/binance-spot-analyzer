@@ -1,5 +1,6 @@
 import { applyFeedback } from './liquidity/engine.mjs';
 import { gate, reportRateLimit, sleep, RATE_WAIT_CAP_MS } from './net/gate.mjs';
+import { compactSnapshot, expandSnapshotMeta } from './services/snapshotCodec.mjs';
 
 /**
  * المحدد الموحّد يُحقن من الخادم (أو من الاختبارات) عبر `setRateLimiter`.
@@ -197,7 +198,8 @@ const db = {
       for (const e of events) {
         if (latestPerSymbol.has(e.symbol)) continue;
         try {
-          const snap = JSON.parse(e.meta || 'null');
+          // فكّ الترميز بلا فقدان (اللقطات الجديدة) مع تحمّل اللقطات القديمة المباشرة
+          const snap = expandSnapshotMeta(e.meta);
           if (snap?.zones) latestPerSymbol.set(e.symbol, snap);
         } catch { /* تجاهل التالف */ }
       }
@@ -270,7 +272,7 @@ const db = {
         if (seen.has(e.symbol)) continue;
         seen.add(e.symbol);
         try {
-          const snap = JSON.parse(e.meta || 'null');
+          const snap = expandSnapshotMeta(e.meta);
           if (!symbol || snap?.symbol === symbol.toUpperCase()) return snap;
         } catch { /* تجاهل التالف */ }
       }
@@ -282,7 +284,12 @@ const db = {
         symbol: String(snap.symbol).toUpperCase(),
         type: 'auto_zones_snapshot',
         message: `لقطة مناطق آلية: ${snap.zones.length} منطقة`,
-        meta: JSON.stringify(snap),
+        /**
+         * الترميز بلا فقدان: اللقطة 100 منطقة ≈ 60KB و40% منها نصوص `reasons`
+         * المتكررة. القاموس المشترك يقصّها إلى أجزاء من حجمها، وكل مسارات القراءة
+         * تفكّها إلى الكائن الأصلي حرفياً (انظر `snapshotCodec.mjs`).
+         */
+        meta: JSON.stringify(compactSnapshot(snap)),
         ts: Date.now()
       },
       prefer: 'return=minimal'
@@ -475,6 +482,37 @@ const db = {
       q.set('order', 'ts.desc');
       q.set('limit', String(Math.min(Number(limit) || 500, 2000)));
       return rest(`/health_samples?${q}`);
+    },
+    /**
+     * عدد الصفوف — سياسة الاحتفاظ وقسم `storage` في الصحة يحتاجانه بالأرقام لا
+     * بالتقدير: قرار السعة كله مبني عليه، وبدونه يبقى الحذف تخميناً.
+     */
+    count: async () => {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/health_samples?select=id`, {
+        method: 'HEAD',
+        headers: { ...baseHeaders, Prefer: 'count=exact' },
+        signal: AbortSignal.timeout(20000)
+      });
+      if (!res.ok) throw new Error(`Supabase REST ${res.status}`);
+      return Number((res.headers.get('content-range') ?? '').split('/')[1] ?? 0) || 0;
+    },
+    deleteBefore: (beforeTs) => rest(
+      `/health_samples?ts=lt.${Number(beforeTs)}`,
+      { method: 'DELETE', prefer: 'return=minimal' }
+    ),
+    /** سقف احتياطي: يحذف الأقدم بدفعات عند تجاوز الحد المسموح للصفوف */
+    deleteOldest: async (n) => {
+      const want = Math.min(Math.max(0, Number(n) || 0), 20000);
+      if (!want) return 0;
+      const rows = await rest(`/health_samples?select=id&order=ts.asc&limit=${want}`);
+      const ids = (rows ?? []).map(r => r.id);
+      let done = 0;
+      for (let i = 0; i < ids.length; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        await rest(`/health_samples?id=in.(${chunk.join(',')})`, { method: 'DELETE', prefer: 'return=minimal' });
+        done += chunk.length;
+      }
+      return done;
     }
   },
   // سجل القرارات على events_log الإلحاقي (نفس معمارية باقي الوظائف — صفر تغيير مخطط):
@@ -549,6 +587,21 @@ const db = {
     create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
     /* ——— عمليات سياسة الاحتفاظ (حذف مقيّد بالموافقة المعتمدة) ——— */
     /** قراءة خفيفة لنوع واحد (معرّفات فقط عادةً) — للقطات المناطق */
+    /**
+     * عدد صفوف نوع واحد (اختياريًا منذ زمن) — يقيس حمل كل نوع على القاعدة بلا
+     * جلب صفوف: قسم `storage` يبني عليه قرار التقليم بالأرقام.
+     */
+    countByType: async (type, sinceTs = 0) => {
+      const q = new URLSearchParams({ select: 'id' });
+      if (sinceTs) q.set('ts', `gte.${Number(sinceTs)}`);
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/events_log?type=eq.${encodeURIComponent(type)}&${q}`, {
+        method: 'HEAD',
+        headers: { ...baseHeaders, Prefer: 'count=exact' },
+        signal: AbortSignal.timeout(20000)
+      });
+      if (!res.ok) throw new Error(`Supabase REST ${res.status}`);
+      return Number((res.headers.get('content-range') ?? '').split('/')[1] ?? 0) || 0;
+    },
     listByType: (type, { select = 'id,symbol', limit = 20000 } = {}) => {
       const q = new URLSearchParams({ select });
       q.set('type', `eq.${type}`);

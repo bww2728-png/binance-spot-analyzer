@@ -7,6 +7,7 @@ import type { Analysis, CaseChartView, CaseImage, CaseRow, LiquidityZone } from 
 import SkeletonRow from './ui/Skeleton';
 import ZonesHistory from './ZonesHistory';
 import EventsLog from './EventsLog';
+import { useScreenState } from '../lib/useScreenState';
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
 const NAV_TABS: { key: ArchiveSection; label: string; desc: string }[] = [
@@ -270,6 +271,12 @@ function CasesSection() {
   const casesError = useStore(s => s.casesError);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
+
+  // شريحة الحالة: بحث القرارات يُحفظ ويُستعاد
+  useScreenState('cases', {
+    filters: { search },
+    onRestore: (s) => { if (s.filters.search != null) setSearch(s.filters.search); }
+  });
 
   const byActor = useMemo(() => {
     const m = new Map<string, number>();

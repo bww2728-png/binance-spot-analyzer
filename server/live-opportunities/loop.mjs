@@ -83,7 +83,15 @@ const DEFAULT_CONFIG = {
     retestWindow: 12
   },
   /** نافذة منع تكرار حفظ الرفض لنفس السبب (ساعة افتراضياً) — إصلاح إغراق السجل */
-  rejectionDedupeMs: Number(process.env.REJECTION_DEDUPE_MS) || 60 * 60 * 1000
+  rejectionDedupeMs: Number(process.env.REJECTION_DEDUPE_MS) || 60 * 60 * 1000,
+  /**
+   * تكرار أحداث دورة الحياة: القياس الإنتاجي أعطى 143,433 صفاً/24س = 78 ميغابايت/يوم،
+   * ومتوسط تكرار 1.8 لنفس المفتاح في 5.4 دقيقة فقط. المعلومة الفعلية هي **انتقال
+   * الحالة** (سويب/استعادة) لكل مفتاح، وتكرارها بعد ذلك بلا معلومة جديدة، والاستعادة
+   * تقرأ أحدث صف لكل مفتاح فلا تفقد شيئاً. تخفيض التقليم هنا يقصّ أكبر كاتب في القاعدة
+   * إلى أقل من عُشر حجمه بلا فقدان دليل.
+   */
+  lifecycleDedupeMs: Number(process.env.LIFECYCLE_DEDUPE_MS) || 15 * 60 * 1000
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -205,6 +213,28 @@ export function createLiveOpportunityEngine(deps) {
       }
     }
     void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+  }
+
+  /**
+   * حفظ حدث دورة الحياة **مرة واحدة لكل انتقال** في نافذة التقليم.
+   * المفتاح يشمل النوع والفريم والمنطقة والطور، فلا يُدمج حدثان مختلفان أبداً؛
+   * ويُحدَّث الطابع الزمني عند كل ظهور حتى لا يُعيد التكرار بعد انقضاء النافذة.
+   */
+  const lifecycleSeen = new Map();
+  function persistLifecycleOnce(row) {
+    const key = `${row.symbol}|${row.timeframe ?? '-'}|${row.zoneId ?? row.key ?? '-'}|${row.kind}`;
+    const t = now();
+    const prev = lifecycleSeen.get(key);
+    if (prev != null && t - prev < cfg.lifecycleDedupeMs) return;
+    lifecycleSeen.set(key, t);
+    if (lifecycleSeen.size > 8000) {
+      // تقليم الأقدم: ما خرج من النافذة لم يعد يفيد المنع
+      for (const [k, at] of lifecycleSeen) {
+        if (t - at > cfg.lifecycleDedupeMs) lifecycleSeen.delete(k);
+        if (lifecycleSeen.size <= 6000) break;
+      }
+    }
+    void persist(row).catch(() => undefined);
   }
 
   function createLimiter(n) {
@@ -820,13 +850,13 @@ export function createLiveOpportunityEngine(deps) {
       for (const ev of sweepEvents.slice(0, 30)) broadcast({ type: 'live_sweep_detected', ...ev });
       // تسجيل دورة الحياة الدائم (أخذ عينات: swept/reclaimed فقط — بلا ضجيج)
       for (const ev of sweepEvents.slice(0, 30)) {
-        void persist(toLifecycleRow(ev.reclaim ? 'reclaim' : 'sweep', {
+        persistLifecycleOnce(toLifecycleRow(ev.reclaim ? 'reclaim' : 'sweep', {
           symbol: ev.symbol, timeframe: ev.timeframe, zoneId: ev.zoneId, key: ev.key,
           at: ev.at,
           payload: ev.reclaim
             ? { elapsedMs: ev.elapsedMs, elapsedBars: ev.elapsedBars, referenceLevel: ev.referenceLevel, liquidityLevel: ev.liquidityLevel }
             : { kind: ev.kind, referenceLevel: ev.referenceLevel, liquidityLevel: ev.liquidityLevel, sweepLow: ev.sweepLow }
-        })).catch(() => undefined);
+        }));
       }
 
       // 2) الترتيب + إزالة تكرار الحدث الواحد عبر الفريمات (عقيدة §11):

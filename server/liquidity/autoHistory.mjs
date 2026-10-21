@@ -5,6 +5,8 @@
  * - zoneKeyOf: مفتاح مستقر لربط صورة الشارت بالمنطقة عبر اللقطات.
  */
 
+import { expandSnapshotMeta } from '../services/snapshotCodec.mjs';
+
 /** ماركرات منطق المزاد في نص الأسباب — نفس قائمة فحص الحيوية المستخدمة في النشر */
 export const FABIO_REASON_MARKERS = [
   'منطقة القيمة', 'عقدة حجم منخفض', 'اليوم السابق',
@@ -82,7 +84,9 @@ export function flattenSnapshots(rawEvents, filters = {}) {
 }
 
 function tryParse(s) {
-  try { return JSON.parse(s ?? 'null'); } catch { return null; }
+  // التفكيك هنا يفكّ ترميز اللقطة (`snapshotCodec`) ويترك اللقطات القديمة كما هي،
+  // فتبقى هذه الوحدة نقية وحتمية كما كانت: `flattenSnapshots` لا يعرف شيئاً عن الترميز.
+  return expandSnapshotMeta(s);
 }
 
 /**

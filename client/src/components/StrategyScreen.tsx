@@ -4,6 +4,8 @@ import { useStore } from '../store/useStore';
 import LiveDashboard from './LiveDashboard';
 import OppDrawer, { oppLevels } from './OppDrawer';
 import type { BuyHistoryResponse, Strategy2DirectionsResponse, Strategy2DirectionRow, Strategy2Feed, Strategy2Opportunity } from '../lib/types';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
+import StaleDataBanner from './StaleDataBanner';
 
 /* ═══ الفرص الحية — استراتيجيتي (محرك SMC مستقل) ═══
  * تبويبات: الفرص (جدول + درج تفاصيل) · الاتجاهات · قيد التتبع · لوحة التحكم · المرفوضة.
@@ -197,11 +199,8 @@ export default function StrategyScreen() {
     dirDebounceRef.current = window.setTimeout(() => { void loadDirections(true); }, 1000);
     return () => { if (dirDebounceRef.current) window.clearTimeout(dirDebounceRef.current); };
   }, [pulse, tab, loadDirections]);
-  useEffect(() => {
-    if (tab !== 'directions') return;
-    const id = window.setInterval(() => { void loadDirections(true); }, 30_000);
-    return () => window.clearInterval(id);
-  }, [tab, loadDirections]);
+  // احتياطي دوري واعٍ بالإخفاء — يتوقف عند إخفاء الشاشة/التبويب
+  useVisiblePoll(() => loadDirections(true), { intervalMs: 30_000, enabled: tab === 'directions', immediate: false });
   // بحث الرمز في تبويب الاتجاهات مؤجل
   useEffect(() => {
     const id = window.setTimeout(() => setDirSymbol(dirSymbolInput.trim().toUpperCase()), 400);
@@ -260,10 +259,8 @@ export default function StrategyScreen() {
     debounceRef.current = window.setTimeout(() => { void load(true); }, 1200);
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
   }, [pulse, load]);
-  useEffect(() => {
-    const id = window.setInterval(() => { void load(true); }, 30_000);
-    return () => window.clearInterval(id);
-  }, [load]);
+  // احتياطي دوري واعٍ بالإخفاء — يتوقف عند إخفاء الشاشة/التبويب
+  useVisiblePoll(() => load(true), { intervalMs: 30_000, immediate: false });
 
   // بحث الرمز مؤجل
   useEffect(() => {
@@ -348,6 +345,7 @@ export default function StrategyScreen() {
 
   return (
     <div className="space-y-4">
+      <StaleDataBanner />
       {/* الترويسة */}
       <div className="card p-4">
         <div className="flex flex-wrap items-center gap-3 justify-between">

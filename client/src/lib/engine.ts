@@ -114,5 +114,8 @@ export function startEngine() {
     }
   });
 
-  setInterval(() => { void check().catch(() => { /* ignore */ }); }, 3000);
+  // دورة واعية بالإخفاء: تتوقف عند إخفاء التبويب ولا تتراكب مع نفسها
+  const tick = () => { if (document.visibilityState !== 'hidden') void check().catch(() => { /* ignore */ }); };
+  setInterval(tick, 3000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
 }

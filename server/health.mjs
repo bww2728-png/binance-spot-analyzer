@@ -13,6 +13,37 @@ import v8 from 'node:v8';
 const SAMPLER_MS = 5 * 60 * 1000;
 
 /**
+ * ضغط عيّنة الصحة قبل حفظها في القاعدة — **للحفظ فقط**، والفحص اللحظي يبقى كاملاً.
+ *
+ * السبب مُقاس: العيّنة الواحدة كانت 16,016 بايت وتُكتب كل 5 دقائق ولا يُحذف
+ * جدولها أبداً (4.6 ميغابايت/يوم إلى الأبد). وأكثر الحجم من مصفوفات كائنات
+ * تشخيصية (`liquidityV2.recent`، `shadow.records`، `zoneIdentity.examples`)
+ * وهي أمثلة للعرض لا قياس: تكفي منها العدّة.
+ *
+ * القاعدة: مصفوفة كائنات ⇒ `{ n }`؛ مصفوفة قيم أولية ⇒ تبقى (بسقف 20 عنصراً)؛
+ * نص ⇒ يُقصّ إلى 240 حرفاً؛ والكائنات تُعبر حتى عمق 4. البنية تبقى كما هي، فلا
+ * ينكسر أي مستهلك يتوقّع مفتاحاً (`zones.live.count` مثلاً يبقى).
+ */
+export function compactSample(input, { maxDepth = 4, maxString = 240, maxPrimArray = 20 } = {}) {
+  const walk = (v, depth) => {
+    if (v === null || v === undefined) return v;
+    if (typeof v === 'string') return v.length > maxString ? `${v.slice(0, maxString)}…` : v;
+    if (typeof v === 'number' || typeof v === 'boolean') return v;
+    if (Array.isArray(v)) {
+      const primitivesOnly = v.every(x => x === null || ['string', 'number', 'boolean'].includes(typeof x));
+      if (primitivesOnly) return v.length > maxPrimArray ? { n: v.length, head: v.slice(0, maxPrimArray) } : v;
+      return { n: v.length };
+    }
+    if (typeof v !== 'object') return String(v).slice(0, maxString);
+    if (depth >= maxDepth) return { keys: Object.keys(v).slice(0, 12) };
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k] = walk(val, depth + 1);
+    return out;
+  };
+  return walk(input, 0);
+}
+
+/**
  * سقف مقصّ للفترة. السبب مُقاس: فترة أكبر من 2^31-1 مللي ثانية تُفيض في `setTimeout`
  * فيحوّلها Node إلى 1ms (`TimeoutOverflowWarning`)، فينقلب المُعيّن إلى مطرقة على
  * القاعدة بدل عيّنة كل دقائق. ولا معنى لفترة أقل من 30 ثانية أصلاً.
@@ -80,7 +111,11 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
    */
   let candlesProvider = null;
   const engines = new Map();
-  const counters = { persistFailures: 0, persistWrites: 0, lastPersistAt: 0, lastPersistError: null };
+  const counters = {
+    persistFailures: 0, persistWrites: 0, lastPersistAt: 0, lastPersistError: null,
+    /** حجم آخر عيّنة قبل الضغط وبعده — دليل أثر التقليم على سعة التخزين */
+    sampleBytesFull: 0, sampleBytesSaved: 0
+  };
   const marks = {};
 
   /**
@@ -228,7 +263,18 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
         for (const [key, fn] of Object.entries(extraSections)) {
           try { extra[key] = fn(); } catch (e) { extra[key] = { error: String(e?.message ?? e).slice(0, 160) }; }
         }
-        await db.health.append({ ts: snap.now, data: { ...snap, ...extra } });
+        const full = { ...snap, ...extra };
+        const body = { ts: snap.now, data: compactSample(full) };
+        await db.health.append(body);
+        /**
+         * عدّاد النجاح كان **غير موصول بأي كاتب**، فيبقى `persistWrites` صفراً أبداً
+         * بينما الحفظ يعمل فعلاً — وهذا ينفي دليل الاستمرارية في الحكم النهائي.
+         * يُحتسب هنا، ويُسجَّل حجم العيّنة قبل/بعد الضغط ليكون أثر التقليم مقيساً لا مُدّعى.
+         */
+        counters.persistWrites += 1;
+        counters.lastPersistAt = snap.now;
+        counters.sampleBytesFull = JSON.stringify(full).length;
+        counters.sampleBytesSaved = JSON.stringify(body.data).length;
         resetLag();
       } catch (e) {
         counters.persistFailures += 1;

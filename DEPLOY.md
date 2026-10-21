@@ -28,7 +28,7 @@ npm ci
 cd client && npm ci
 npm run build        # يبني العميل إلى client/dist
 npm run server       # يشغّل الخادم (أو: npm run dev للتطوير المتزامن)
-npm test             # كل اختبارات الخادم (انظر العدد الفعلي في آخر تشغيل: يتجاوز 490 اختباراً)
+npm test             # كل اختبارات الخادم (آخر تشغيل مثبَّت: 534 اختباراً · 0 فشل)
 ```
 
 ثم افتح `http://localhost:8787` (الخادم يخدم العميل المبني).
@@ -42,30 +42,22 @@ docker run -p 8080:8080 binance-spot-analyzer
 
 الـ Dockerfile متعدد المراحل: يبني العميل ثم يشغّل الخادم على 8080 (`EXPOSE 8080` + `ENV PORT=8080`).
 
-## 4) النشر على Railway
+## 4) النشر على Verdent
 
-### الطريقة أ — Account Token (لمشروع جديد)
+النشر يجري من واجهة Verdent مباشرة (زر Publish) أو بأداة النشر الخاصة بالمشروع.
+عقد النشر في `.verdentc.json` (تطبيق كامل، `rootDir: "."`، منفذ التطبيق 8080)،
+والصورة تُبنى من `Dockerfile` متعدد المراحل.
 
-1. تثبيت CLI: `npm i -g @railway/cli`
-2. إنشاء Account Token: railway.com ← صورة الحساب ← **Account Settings** ← **API Tokens** ← Create
-3. التنفيذ:
-```bash
-set RAILWAY_API_TOKEN=<account-token>
-railway init --name binance-spot-analyzer
-railway up
-```
-4. توليد نطاق علني: `railway domain` (أو من لوحة Railway ← Settings ← Networking ← Generate Domain)
-
-### الطريقة ب — Project Token (مشروع قائم)
-
-1. من لوحة المشروع: Settings ← **Generate Token** (Project Token)
-2. التنفيذ:
-```bash
-set RAILWAY_TOKEN=<project-token>
-railway up
+```json
+{ "deploy": { "type": "fullstack", "rootDir": ".", "appPort": 8080 } }
 ```
 
-> ملاحظات: Railway يدعم WebSocket. النشر عبر **Dockerfile** (محدد في `railway.json`) — صورة حتمية بسقف ذاكرة `NODE_OPTIONS=--max-old-space-size=640` و`PORT` من بيئة Railway. لا توجد متغيرات بيئة مطلوبة (الافتراضيات مدمجة في `server/db.js`)؛ لضبطها: `railway variables --set "KEY=value"`. عند توليد نطاق جديد (مثال: `...-7604.up.railway.app`) حدّث روابط الفحص أدناه.
+> ملاحظات: المنصة تدعم WebSocket. سقف الذاكرة مضبوط بـ`NODE_OPTIONS=--max-old-space-size=640`
+> وهو **أقل** من حدّ الحاوية المقيس (1024MB) لأن القيم الأعلى جعلت الـcgroup يقتل العملية
+> عند التسخين. لا متغيرات بيئة مطلوبة: لكل سياسة افتراضية مبنية على قياس إنتاجي،
+> ولضبطها انظر `.env.example`. المشروع **خاص** (private)، فكل مسار يُحوَّل إلى بوابة
+> تسجيل دخول المنصة — ولذلك تُقرأ الأدلة التشغيلية من `GET /api/health/deep` أو من
+> عيّنات `health_samples` في قاعدة البيانات المُدارة.
 
 ## 5) رفع الكود إلى GitHub
 
@@ -93,8 +85,26 @@ git push -u origin main
 | مزامنة يدوية | `POST /api/symbols/sync` |
 | WebSocket | الاتصال بـ `wss(s)://<host>/ws` ← رسالة `hello` |
 | التصنيف الشرعي | `GET /api/shariah` |
+| سعة التخزين (صفوف وحجم كل نوع) | قسم `storage` في `GET /api/health/deep` |
 
-## 8) أمان (مهم)
+## 8) سياسة الاحتفاظ بالبيانات (مبنية على قياس إنتاجي)
+
+القياس من القاعدة المنشورة (24 ساعة): الإجمالي **≈107 ميغابايت/يوم**، أي أن احتفاظ
+30 يوماً للأنواع التشخيصية يعطي **≈2.4 غيغابايت** — يفوق سعة الخطة من التشخيص وحده.
+لذلك:
+
+| المجموعة | المدة | ملاحظة |
+| --- | --- | --- |
+| `live_lifecycle`, `live_opportunity_rejected` | 7 أيام | تشخيصي؛ ومنع تكراره بـ`LIFECYCLE_DEDUPE_MS` يقصّ 78MB/يوم إلى أقل من عُشرها |
+| `auto_zones_snapshot` | آخر 10 لكل رمز | اللقطة ~40KB بعد ترميز القاموس (كانت 63KB) |
+| `health_samples` | 30 يوماً + سقف 10,000 صف | كانت **محمية حماية مطلقة** فتنمو أبداً |
+| صور المناطق الآلية | 90 يوماً | الصور أثقل من النصوص |
+| الفرص ونتائجها، القرارات، المعايرات، التحليلات، التصنيفات الشرعية، سجل الاتجاهات، تغذية التعلم | **لا تُحذف أبداً** | ذاكرة النظام وقيمته |
+
+كل الحدود قابلة للضبط من `.env.example`، والمُدد الفعلية المطبَّقة تُقرأ من قسم
+`storage.policy` في الصحة فلا تُفترض.
+
+## 9) أمان (مهم)
 
 - `.env.example` في هذه الحزمة **منقّى** (قيم placeholder)؛ القيم الفعلية افتراضيات مدمجة في `server/db.js` وتظهر في التطبيق العلني أصلًا.
 - **أنصح بمراجعة سياسات RLS** لأنها تمنح anon وصولاً كاملاً — قرار الصلاحيات مسؤولية مالك القاعدة.

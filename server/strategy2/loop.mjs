@@ -610,9 +610,16 @@ export function createStrategyEngine(deps) {
     const t0 = now();
     try {
       const targets = (await resolveTargets().catch(() => null)) ?? [];
-      status.pairsTotal = Math.min(targets.length, cfg.maxSymbols);
+      /**
+       * `maxSymbols = 0` تعني **كل العملات الحلال** (المطلوب: تغطية كاملة بلا سقف
+       * صامت). كان السقف 180 من 472 ⇒ تغطية ناقصة بلا إعلان. التغطية الكاملة لا
+       * ترفع ذروة الذاكرة لأن المعالجة تجري بـCONC=6 رمزاً في المرة (المخصّص اللحظي
+       * محدود بها)، وإنما تطيل الدورة — ولذلك أُضيف تنازل دوري (`yieldEveryMs`).
+       */
+      const cap = Number(cfg.maxSymbols) > 0 ? Number(cfg.maxSymbols) : targets.length;
+      status.pairsTotal = Math.min(targets.length, cap);
       status.cycle += 1;
-      const symbols = targets.slice(0, cfg.maxSymbols);
+      const symbols = targets.slice(0, cap);
 
       // تحديث الأسعار الاحتياطية (REST شامل واحد لكل دورة) — البث الحي أولاً في pxOf،
       // وهذا الاحتياطي يغطي غياب market أو تأخره. كان موصولاً ولا يُستدعى أبداً.
@@ -631,10 +638,21 @@ export function createStrategyEngine(deps) {
       // معالجة متوازية محدودة (تحليل في الذاكرة — البذر REST هو المكلف)
       const CONC = 6;
       let idx = 0;
+      const yieldEveryMs = Number(process.env.STRATEGY2_YIELD_MS) || 120;
+      /**
+       * تنازل للحدث الحلقي (event loop): بلا هذا تخنق الدورة معالجة البث وطلبات HTTP
+       * بمجرد رفع التغطية إلى كل العملات، وهو ما رفع تأخّر الحلقة p99 إلى 1,229ms.
+       * التنازل لا يغيّر أي حساب — يوزّع الحمل فقط.
+       */
       const workers = Array.from({ length: CONC }, async () => {
+        let lastYield = Date.now();
         while (idx < symbols.length) {
           const s = symbols[idx++];
           for (const tf of cfg.entryTfs) await processSymbolTf(s, tf);
+          if (Date.now() - lastYield >= yieldEveryMs) {
+            lastYield = Date.now();
+            await new Promise(resolve => setImmediate(resolve));
+          }
         }
       });
       await Promise.all(workers);

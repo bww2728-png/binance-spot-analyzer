@@ -88,32 +88,72 @@ export function summarize(health: ServerHealth | null, error: string | null, loa
   return { status: 'live', health, label: 'مباشر', title, error, worstLagMs };
 }
 
+/**
+ * كاش صحة الخادم المشترك: طلب واحد لكل الفترات، والمشتركون يقرؤون نفس اللقطة.
+ *
+ * السبب: كانت كل شاشة (الشارة، لوحة التحكم، الفرص الحية) تستدعي `/api/health/deep`
+ * بدورتها الخاصة، فيتكرر الطلب نفسه عدة مرات في الثانية الواحدة. هنا دورة واحدة
+ * بأقصر فترة مطلوبة، وتُوقف عند إخفاء التبويب، ويُشارَك ناتجها مع كل المشتركين.
+ */
+type HealthListener = (state: ServerHealthState) => void;
+
+const healthListeners = new Set<HealthListener>();
+let healthTimer: ReturnType<typeof setInterval> | null = null;
+let healthInFlight = false;
+let healthIntervalMs = 15_000;
+let healthState: ServerHealthState = summarize(null, null, true);
+
+function emitHealth() {
+  for (const l of healthListeners) l(healthState);
+}
+
+async function fetchHealthOnce() {
+  if (healthInFlight) return;
+  healthInFlight = true;
+  try {
+    const res = await fetch('/api/health/deep');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as ServerHealth;
+    healthState = summarize(data, null, false);
+  } catch (e) {
+    healthState = summarize(healthState.health, e instanceof Error ? e.message : String(e), false);
+  } finally {
+    healthInFlight = false;
+    emitHealth();
+  }
+}
+
+function ensureHealthLoop(intervalMs: number) {
+  // أقصر فترة مطلوبة تحكم الدورة الواحدة — لا دورة لكل مشترك
+  if (intervalMs < healthIntervalMs) healthIntervalMs = intervalMs;
+  if (healthTimer != null) return;
+  const tick = () => { if (document.visibilityState !== 'hidden') void fetchHealthOnce(); };
+  void fetchHealthOnce();
+  healthTimer = setInterval(tick, healthIntervalMs);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void fetchHealthOnce();
+  });
+}
+
+function releaseHealthLoop() {
+  if (healthListeners.size > 0) return;
+  if (healthTimer != null) { clearInterval(healthTimer); healthTimer = null; }
+  healthIntervalMs = 15_000;
+}
+
 export function useServerHealth(intervalMs = 15_000): ServerHealthState {
-  const [health, setHealth] = useState<ServerHealth | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [state, setState] = useState<ServerHealthState>(healthState);
 
   useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const res = await fetch('/api/health/deep');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as ServerHealth;
-        if (!alive) return;
-        setHealth(data);
-        setError(null);
-      } catch (e) {
-        if (!alive) return;
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (alive) setLoading(false);
-      }
+    const listener: HealthListener = (s) => setState(s);
+    healthListeners.add(listener);
+    ensureHealthLoop(intervalMs);
+    setState(healthState);
+    return () => {
+      healthListeners.delete(listener);
+      releaseHealthLoop();
     };
-    void load();
-    const t = setInterval(() => void load(), intervalMs);
-    return () => { alive = false; clearInterval(t); };
   }, [intervalMs]);
 
-  return summarize(health, error, loading);
+  return state;
 }

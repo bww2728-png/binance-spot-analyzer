@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { ZoneCard, ZoneDetail, kindLabel } from './ZoneCards';
 import { TIMEFRAMES, type LiquidityDetection, type LiquidityZoneEngineStatus } from '../lib/types';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
+import StaleDataBanner from './StaleDataBanner';
+import { useScreenState } from '../lib/useScreenState';
 
 export default function LiquidityZonesScreen() {
   const [mode, setMode] = useState<'live' | 'history'>('live');
@@ -26,12 +29,20 @@ export default function LiquidityZonesScreen() {
     }
   }, [mode, symbol, timeframe, kind]);
 
-  useEffect(() => {
-    const ac = new AbortController();
-    void load(ac.signal);
-    const timer = setInterval(() => void load(), 10000);
-    return () => { ac.abort(); clearInterval(timer); };
-  }, [load]);
+  // استقصاء موحّد: يتوقف عند إخفاء الشاشة/التبويب ولا يتراكب مع نفسه
+  useVisiblePoll(load, { intervalMs: 10000 });
+
+  // شريحة الحالة: الفلاتر والتبويب الداخلي تُحفظ وتُستعاد
+  useScreenState('liquidityZones', {
+    filters: { mode, symbol, timeframe, kind, sortMode },
+    onRestore: (s) => {
+      if (s.filters.mode === 'live' || s.filters.mode === 'history') setMode(s.filters.mode);
+      if (s.filters.symbol != null) setSymbol(s.filters.symbol);
+      if (s.filters.timeframe != null) setTimeframe(s.filters.timeframe);
+      if (s.filters.kind != null) setKind(s.filters.kind);
+      if (s.filters.sortMode === 'confidence' || s.filters.sortMode === 'work') setSortMode(s.filters.sortMode);
+    }
+  });
 
   const reviewed = (zone: LiquidityDetection) => {
     setRows(prev => prev.map(x => x.id === zone.id ? zone : x));
@@ -66,6 +77,7 @@ export default function LiquidityZonesScreen() {
         <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>الافتراضي: أعلى ثقة أولاً</span>
       </div>
       {error && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{error}</div>}
+      <StaleDataBanner />
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
         {visible.map(zone => <ZoneCard key={zone.id} zone={zone} onOpen={setSelected} />)}
       </div>

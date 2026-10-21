@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
 import { classify, GROUP_LABELS, GROUP_ORDER, isUptrend, isDowntrend } from '../lib/sorting';
 import type { EventLog } from '../lib/types';
 import Skeleton from './ui/Skeleton';
 import { useServerHealth } from '../lib/serverHealth';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
+import StaleDataBanner from './StaleDataBanner';
 
 const GROUP_COLORS: Record<string, string> = {
   up_to_ssl: 'var(--up)',
@@ -151,12 +153,13 @@ export default function Dashboard() {
   const shariah = useStore(s => s.shariah);
   const [events, setEvents] = useState<EventLog[]>([]);
 
-  useEffect(() => {
-    const load = () => void api.getEvents({ limit: 300 }).then(setEvents).catch(() => { /* ignore */ });
-    load();
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
+  const loadEvents = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const rows = await api.getEvents({ limit: 300 });
+      if (!signal?.aborted) setEvents(rows);
+    } catch { /* ignore */ }
   }, []);
+  useVisiblePoll(loadEvents, { intervalMs: 15000 });
 
   const stats = useMemo(() => {
     const up = analyses.filter(isUptrend).length;
@@ -188,6 +191,7 @@ export default function Dashboard() {
 
   return (
     <div className="p-6 space-y-8 max-w-6xl">
+      <StaleDataBanner />
       <section>
         <h2 className="text-[15px] font-bold mb-4" style={{ color: 'var(--text-1)' }}>ملخص عام</h2>
         <div className="flex flex-wrap gap-3">

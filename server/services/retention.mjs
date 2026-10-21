@@ -5,9 +5,18 @@
  * متكرر (رفض نفس المرشح كل 5 ثوان، ولقطات مناطق ضخمة، وصور تصل إلى 1MB). سعة
  * الخطط محدودة (500MB مجاناً / 2GB للمدفوع)، فبلا سياسة حذف يتوقف الحفظ كلياً.
  *
+ * قياس إنتاجي حقيقي (عيّنة من القاعدة المنشورة، 24 ساعة) أعاد ضبط المُدد:
+ *  - live_lifecycle: 143,433 صفاً/24س بمعدل 572 بايت = **78 ميغابايت/يوم** وحده.
+ *  - auto_zones_snapshot: 231 صفاً/24س بمعدل 63,748 بايت = 14 ميغابايت/يوم.
+ *  - health_samples: 16,016 بايت للعيّنة الواحدة كل 5 دقائق = 4.6 ميغابايت/يوم
+ *    و**لا يُحذف أبداً**، أي نمو أبدي بلا سقف.
+ * الرقم الحاكم: ~107 ميغابايت/يوم ⇒ احتفاظ 30 يوماً للتشخيص = 2.4 غيغابايت، أي
+ * يفوق سعة الخطة (2 غيغابايت) من التشخيص وحده. لذلك:
+ *
  * ما يُحذف (موافقة المستخدم على الخطة):
- *  - الأنواع التشخيصية كثيفة الحجم بعد 30 يوماً: live_lifecycle، live_opportunity_rejected.
- *  - لقطات المناطق الآلية: يُبقى آخر 20 لكل رمز.
+ *  - الأنواع التشخيصية كثيفة الحجم بعد 7 أيام: live_lifecycle، live_opportunity_rejected.
+ *  - لقطات المناطق الآلية: يُبقى آخر 10 لكل رمز.
+ *  - عيّنات الصحة بعد 30 يوماً + سقف صفوف احتياطي (كانت محمية حماية مطلقة).
  *  - صور المناطق الآلية بعد 90 يوماً.
  *
  * ما لا يُحذف أبداً:
@@ -16,7 +25,10 @@
  */
 const DIAGNOSTIC_TYPES_30D = ['live_lifecycle', 'live_opportunity_rejected'];
 const SNAPSHOT_TYPE = 'auto_zones_snapshot';
-const SNAPSHOTS_KEPT_PER_SYMBOL = 20;
+const SNAPSHOTS_KEPT_PER_SYMBOL = 10;
+const SAMPLE_TYPE = 'health_samples';
+const SAMPLE_DAYS_DEFAULT = 30;
+const SAMPLE_MAX_ROWS_DEFAULT = 10_000;
 const IMAGE_TYPES_90D = [
   'liquidity_zone', 'liquidity_zone_reviewed',
   'live_opportunity', 'live_opportunity_closed', 'live_opportunity_rejected',
@@ -29,7 +41,7 @@ export const PROTECTED_TYPES = new Set([
   'strategy2_feedback', 'strategy2_direction',
   'live_opportunity', 'live_opportunity_closed', 'live_calibration',
   'liquidity_zone_decision', 'shariah_auto_change', 'shariah_researched',
-  'barcode_scan', 'symbols_updated', 'zones_changed', 'health_samples',
+  'barcode_scan', 'symbols_updated', 'zones_changed',
   /**
    * حالة المحركات الدائمة (تقرير الظل، وانحياز التعلّم، وملخصات الباك تيست) —
    * صف واحد لكل مفتاح ويُحدَّث في مكانه، فلا ينمو ولا يجوز حذفه: حذفه يعني
@@ -53,11 +65,16 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
   const t = now();
   const report = { at: t, dryRun, deleted: {}, errors: [], skipped: [] };
   /**
-   * المُدد تُقرأ من البيئة (مع الافتراضيين 30 و90 يوماً) لأنها سياسة تشغيل لا ثابت
-   * برمجي: قد يحتاج المشرف تقصيرها عند ضيق السعة أو إطالتها عند التحقيق في حادث.
+   * المُدد تُقرأ من البيئة لأنها سياسة تشغيل لا ثابت برمجي: قد يحتاج المشرف
+   * تقصيرها عند ضيق السعة أو إطالتها عند التحقيق في حادث. الافتراضيات مبنية على
+   * القياس أعلاه: 7 أيام للتشخيص، 30 للعيّنات، 90 للصور.
    */
-  const diagDays = Number(diagnosticDays ?? process.env.RETENTION_DIAGNOSTIC_DAYS ?? 30) || 30;
+  const diagDays = Number(diagnosticDays ?? process.env.RETENTION_DIAGNOSTIC_DAYS ?? 7) || 7;
   const imgDays = Number(imageDays ?? process.env.RETENTION_IMAGE_DAYS ?? 90) || 90;
+  // عيّنات الصحة سياسة صريحة الآن (كانت محمية حماية مطلقة فينمو الجدول أبداً)
+  const sampleDays = Number(process.env.RETENTION_SAMPLE_DAYS ?? SAMPLE_DAYS_DEFAULT) || SAMPLE_DAYS_DEFAULT;
+  const sampleMaxRows = Number(process.env.RETENTION_SAMPLE_MAX_ROWS ?? SAMPLE_MAX_ROWS_DEFAULT) || SAMPLE_MAX_ROWS_DEFAULT;
+  const snapshotsKept = Number(process.env.RETENTION_SNAPSHOTS_PER_SYMBOL ?? SNAPSHOTS_KEPT_PER_SYMBOL) || SNAPSHOTS_KEPT_PER_SYMBOL;
 
   // 1) الأنواع التشخيصية بعد المدة المحددة
   for (const type of agedDiagnosticTypes(diagDays)) {
@@ -71,7 +88,7 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
     }
   }
 
-  // 2) لقطات المناطق: آخر 20 لكل رمز
+  // 2) لقطات المناطق: آخر 10 لكل رمز (اللقطة 63KB، فالسقف هو الحاكم لا الزمن)
   try {
     const rows = await db.events.listByType(SNAPSHOT_TYPE, { select: 'id,symbol' });
     const counts = new Map();
@@ -80,7 +97,7 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
       const sym = String(r.symbol ?? '?');
       const n = (counts.get(sym) ?? 0) + 1;
       counts.set(sym, n);
-      if (n > SNAPSHOTS_KEPT_PER_SYMBOL) toDelete.push(r.id);
+      if (n > snapshotsKept) toDelete.push(r.id);
     }
     if (!dryRun && toDelete.length) {
       report.deleted[SNAPSHOT_TYPE] = await db.events.deleteByIds(toDelete);
@@ -91,7 +108,31 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
     report.errors.push({ type: SNAPSHOT_TYPE, error: String(e?.message ?? e).slice(0, 200) });
   }
 
-  // 3) صور المناطق الآلية بعد المدة المحددة (الصور أثقل بكثير من النصوص)
+  /**
+   * 3) عيّنات الصحة — تُضاف هنا لأول مرة.
+   * كانت داخل `PROTECTED_TYPES` فتنمو أبداً (4.6MB/يوم بلا أي سقف)، وهي في الوقت
+   * نفسه دليل الجاهزية الذي يحتاج التاريخ لا الأبدية. السياسة: حذف ما تجاوز المدة،
+   * ثم سقف صفوف احتياطي يقتل أي نمو غير متوقع مهما كان سببه.
+   */
+  try {
+    if (dryRun) {
+      report.skipped.push({
+        type: SAMPLE_TYPE, action: 'delete-before-and-cap',
+        before: t - sampleDays * DAY, maxRows: sampleMaxRows
+      });
+    } else {
+      const byAge = await db.health.deleteBefore(t - sampleDays * DAY);
+      const total = await db.health.count();
+      const over = Math.max(0, (Number(total) || 0) - sampleMaxRows);
+      const byCap = over > 0 ? await db.health.deleteOldest(over) : 0;
+      if (byAge || byCap) report.deleted[SAMPLE_TYPE] = (Number(byAge) || 0) + (Number(byCap) || 0);
+      report.samples = { total: Number(total) || 0, over, cap: sampleMaxRows, days: sampleDays };
+    }
+  } catch (e) {
+    report.errors.push({ type: SAMPLE_TYPE, error: String(e?.message ?? e).slice(0, 200) });
+  }
+
+  // 4) صور المناطق الآلية بعد المدة المحددة (الصور أثقل بكثير من النصوص)
   for (const type of IMAGE_TYPES_90D) {
     if (PROTECTED_TYPES.has(type)) continue;
     const before = t - imgDays * DAY;

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useStore, type NotificationCategory, type NotificationSeverity } from '../store/useStore';
+import { useScreenState } from '../lib/useScreenState';
 
 /* ═══ مركز الإشعارات — الشاشة المستقلة الوحيدة التي تظهر فيها الإشعارات ═══ */
 
@@ -50,6 +51,18 @@ export default function NotificationCenter() {
   const [query, setQuery] = useState('');
   const [sortAsc, setSortAsc] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  // شريحة الحالة: الفلاتر والبحث تُحفظ وتُستعاد عند العودة للشاشة
+  useScreenState('notifications', {
+    filters: { severity, unreadOnly: unreadOnly ? '1' : '0', range, query, sortAsc: sortAsc ? '1' : '0' },
+    onRestore: (s) => {
+      if (s.filters.severity === 'all' || s.filters.severity === 'info' || s.filters.severity === 'alert' || s.filters.severity === 'error') setSeverity(s.filters.severity);
+      if (s.filters.unreadOnly != null) setUnreadOnly(s.filters.unreadOnly === '1');
+      if (s.filters.range) setRange(s.filters.range as typeof range);
+      if (s.filters.query != null) setQuery(s.filters.query);
+      if (s.filters.sortAsc != null) setSortAsc(s.filters.sortAsc === '1');
+    }
+  });
 
   const catCounts = useMemo(() => {
     const counts: Record<string, number> = {};

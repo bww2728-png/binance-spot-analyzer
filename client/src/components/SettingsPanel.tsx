@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
 import { factsForSymbol } from '../lib/shariah';
 import type { ShariahResearchStatus } from '../lib/types';
 import Toggle from './ui/Toggle';
+import { useVisiblePoll } from '../lib/useVisiblePoll';
 
 const QUOTES = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH'];
 
@@ -34,15 +35,14 @@ export default function SettingsPanel() {
   }, [symbols, shariah]);
 
   const [researchStatus, setResearchStatus] = useState<ShariahResearchStatus | null>(null);
-  useEffect(() => {
-    let disposed = false;
-    const load = () => void api.shariahResearchStatus()
-      .then(s => { if (!disposed) setResearchStatus(s); })
-      .catch(() => undefined);
-    load();
-    const timer = setInterval(load, 60000);
-    return () => { disposed = true; clearInterval(timer); };
+  const loadResearch = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const s = await api.shariahResearchStatus();
+      if (!signal?.aborted) setResearchStatus(s);
+    } catch { /* ignore */ }
   }, []);
+  // استقصاء موحّد واعٍ بالإخفاء
+  useVisiblePoll(loadResearch, { intervalMs: 60000 });
 
   const barcodeStats = useMemo(() => {
     const values = Object.values(barcodeScans);

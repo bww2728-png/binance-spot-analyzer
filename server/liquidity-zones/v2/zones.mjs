@@ -50,6 +50,21 @@ export const ZONE_DEFAULTS = {
 };
 
 /**
+ * خانة سعرية **لوغاريتمية** للمعرّف: عرض الخانة نسبة من السعر لا مقدار ثابت، فتصلح
+ * لعملة بثمن 100$ ولأخرى بثمن 0.00001$ بالمعيار نفسه.
+ *
+ * التقريب «لأقرب خانة» لا «لأرضية القسمة»: الأرضية تجعل مستويين يفصلهما جزء من الألف
+ * يقعان في خانتين متجاورتين عند حدود الخانات، فينفجر الدوران بلا تغيّر حقيقي.
+ * (نفس المعيار المُعاير في `services/zoneIdCandidate.mjs` حيث اختير 0.002 بقياس 12.2%).
+ */
+export function stableBucket(price, step = 0.002) {
+  const p = Number(price);
+  if (!Number.isFinite(p) || p <= 0) return 0;
+  const s = Math.max(1e-9, Number(step) || 0.002);
+  return Math.round(Math.log(p) / s);
+}
+
+/**
  * تجميع اللمسات بتسامح ATR.
  * كل نقطة تنضم لأقرب تجمّع قائم إن كانت داخل `toleranceAtr × atr`، وإلا تفتح تجمّعاً جديداً.
  * التجمّع يحمل عدّاد لمسات — وهو مقياس القوة (‏«Highs ×3» أقوى من مستوى لم يُختبر).
@@ -78,7 +93,19 @@ export function clusterByAtr(points, toleranceAtr = ZONE_DEFAULTS.toleranceAtr, 
   }
   return clusters.map((c, i) => ({
     ...c,
-    id: `cluster-${c.points[0].kind}-${i}-${Math.round(c.price * 1e8)}`,
+    /**
+     * معرّف من **محتوى** العنقود لا من ترتيبه: كان `cluster-<kind>-<i>-<price×1e8>`
+     * حيث `i` ترتيب العنقود بين أشقائه، فيتغيّر المعرّف كلما ظهرت قمة أو قاع جديد
+     * قبله (عين عيب A4). القياس على مسار الكود نفسه:
+     *   الصيغة القديمة: **9.4%** دوران (وفي الإنتاج 12.2%).
+     *   البدائل المقيسة: خانة فقط 2.4% لكن بتصادمات، وخانة+عدد اللمسات 2.9%
+     *   (عدد اللمسات يتغيّر مع كل لمسة جديدة ⇒ دوران بلا تغيّر المنطقة).
+     * المختار: **خانة لوغاريتمية + زمن أول لمسة** = 2.5% دوران مع تمييز كامل
+     * (زمن أول لمسة لا يتغيّر إلا إذا تغيّر أقدم عنصر في العنقود فعلاً).
+     * و`i` يبقى للعرض فقط في `clusterIndex` ولا يدخل المعرّف.
+     */
+    id: `cluster-${c.points[0].kind}-${stableBucket(c.price)}-${Number(c.points[0].time ?? c.points[0].index ?? 0)}`,
+    clusterIndex: i,
     touches: c.points.length,
     firstIndex: Math.min(...c.points.map(x => Number(x.index))),
     lastIndex: Math.max(...c.points.map(x => Number(x.index))),
@@ -345,7 +372,12 @@ export function buildTrendlineZone({ symbol, timeframe, fitted, cluster, candles
   const points = fitted.points.map(p => ({ ...p, kind: direction === 'down' ? 'high' : 'low', atr: atrAt(candles, p.index, cfg.atrPeriod) }));
   const trendCluster = {
     ...cluster,
-    id: cluster?.id ?? `trendline-${kind}-${Math.round(fitted.projected * 1e8)}`,
+    /**
+     * معرّف خط الاتجاه من محتواه: أول نقطة (زمنها وموقعها) وعدد نقاطه وشدة ميله
+     * مقرَّبة. كان `Math.round(fitted.projected * 1e8)` — والسعر المُسقَط يتحرك مع كل
+     * شمعة جديدة، فيتغيّر المعرّف بلا تغيّر الخط نفسه (عين عيب A4).
+     */
+    id: cluster?.id ?? `trendline-${kind}-${Number(points[0]?.time ?? points[0]?.index ?? 0)}-${points.length}-${Math.round((Number(fitted.slope) || 0) * 1e6)}`,
     price: fitted.projected,
     points: points.length ? points : (cluster?.points ?? []),
     touches: Math.max(points.length, cluster?.touches ?? points.length),

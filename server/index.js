@@ -1220,7 +1220,10 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
    */
   if (LIQUIDITY_V2_SHADOW && workOrder % LIQUIDITY_V2_STRIDE === 0) {
     try {
-      const compared = compareEngines({ symbol, timeframe, candles, endIndex: candles.length - 1, now: Date.now() });
+      // المناطق المحسوبة في `detectLiveZonesForKey` تُمرَّر كما هي: بلا كشف ثانٍ
+      const compared = compareEngines({
+        symbol, timeframe, candles, endIndex: candles.length - 1, now: Date.now(), oldZones: zones
+      });
       liquidityV2Collector.add(summarizeSample(compared));
       liquidityV2Last.set(`${symbol}|${timeframe}`, {
         at: Date.now(),
@@ -2419,9 +2422,18 @@ const strategy2Engine = createStrategyEngine({
   },
   log: console,
   config: {
-    // إصلاح OOM: 462 رمز × 3 فريمات × 500 شمعة كان يقتل الحاوية (heap 455MB).
-    // 180 رمز × 3 × 250 = ~135k شمعة بدل ~693k (خفض ~80%).
-    maxSymbols: Number(process.env.STRATEGY2_MAX_SYMBOLS) || 180,
+    /**
+     * السقف صفر يعني **كل العملات الحلال** (472) — وهو المطلوب: كان 180 سقفاً
+     * صامتاً يترك 62% من العملات بلا تحليل.
+     *
+     * وسبب رفع السقف الآن بلا خطر ذاكرة: تخفيف OOM القديم بُني على أن الشموع
+     * تُحفظ ككائنات/نصوص لكل رمز، وقد تغيّر التمثيل إلى `Float64Array` في المخزن
+     * الحي (`candleStore`)، والمعالجة تجري بـCONC=6 رمزاً في المرة فتبقى الذروة
+     * اللحظية محدودة. ما زاد فعلاً هو **زمن الدورة**، فقابله تنازل دوري للحدث
+     * الحلقي (`STRATEGY2_YIELD_MS`). أي تراجع في الذاكرة يُكشف من قسم الصحة
+     * (`memory`) ومن عيّنات `deployment.processMemory`.
+     */
+    maxSymbols: Number(process.env.STRATEGY2_MAX_SYMBOLS) || 0,
     analysisWindow: Number(process.env.STRATEGY2_WINDOW) || 400,
     warmupBars: Number(process.env.STRATEGY2_WARMUP) || 200,
     // فريمات الدخول (والأكبر ×8 تلقائياً): افتراضياً من الدقيقة — قابلة للضبط عبر البيئة
@@ -3564,18 +3576,102 @@ setInterval(() => void runShariahJob('دوري'), 30 * 60 * 1000);
  * القواعد المحمية (النتائج، القرارات، المعايرات، التحليلات، الأحكام) لا تُمس.
  */
 const retentionJob = health.register('retention', { stallMs: 26 * 3600_000 });
+/** آخر حصيلة احتفاظ: تُقرأ في قسم `storage` مع أرقام النوع، لا في سجل منفصل */
+const retentionLastRun = { value: null };
 const retention = startRetention({
   db,
   intervalMs: Number(process.env.RETENTION_HOURS || 12) * 3600_000,
   log: console,
   /** الإبلاغ بعد كل دورة: بدونه بقيت دورات الاحتفاظ صفراً في الصحة أبداً */
   onRun: ({ ms = null, extra = null, error = null } = {}) => {
+    retentionLastRun.value = { at: Date.now(), ms, extra };
     if (error) retentionJob.fail(error); else retentionJob.beat({ ms, extra });
   }
 });
 
 // ---- مزامنة دورية بالفرق + بث التغييرات لحظياً ----
 const SYNC_MS = (Number(process.env.SYMBOLS_SYNC_MIN) || 30) * 60 * 1000;
+
+/**
+ * مراقب سعة التخزين — يجيب سؤال «كم يستهلك كل نوع فعلاً؟» بالأرقام لا بالتقدير.
+ *
+ * القياس الحي قبل هذا القسم كان خارجياً فقط (عيّنة يدوية من القاعدة)، فكان قرار
+ * التقليم بلا دليل داخلي. الآن يجمع: صفوف كل نوع في آخر 24 ساعة، والإجمالي، وحجم
+ * عيّنة الصحة بعد الضغط (لقياس أثر الترميز)، وحصيلة آخر دورة احتفاظ.
+ *
+ * يعمل كل 10 دقائق على نوعين في المرة (تناوب) ليبقى حمله على القاعدة مهملاً،
+ * والنتيجة تُخزَّن في قسم الصحة `storage` بلا أي جلب عند قراءة الصفحة.
+ */
+const STORAGE_TYPES = [
+  'live_lifecycle', 'live_opportunity', 'live_opportunity_closed', 'live_opportunity_rejected',
+  'strategy2_direction', 'strategy2_published', 'auto_zones_snapshot', 'zone_feedback'
+];
+const storageState = { at: null, errors: 0, lastError: null, types: {}, historyRows: null };
+const storageJob = health.register('storage-watcher', { stallMs: 3 * 3600_000 });
+
+const refreshStorageStats = async () => {
+  const dayAgo = Date.now() - 86_400_000;
+  try {
+    const out = {};
+    for (const type of STORAGE_TYPES) {
+      const perDay = await db.events.countByType(type, dayAgo);
+      const total = await db.events.countByType(type);
+      out[type] = { perDay, total };
+    }
+    let historyRows = null;
+    let samples = null;
+    try { historyRows = await db.events.countByType('zone_calibration'); } catch { /* اختياري */ }
+    try { samples = { total: await db.health.count() }; } catch { /* اختياري */ }
+    storageState.types = out;
+    storageState.historyRows = historyRows;
+    if (samples) storageState.samples = samples;
+    storageState.at = Date.now();
+    storageState.lastError = null;
+    const daySum = Object.values(out).reduce((a, t) => a + Number(t.perDay || 0), 0);
+    const rowSum = Object.values(out).reduce((a, t) => a + Number(t.total || 0), 0);
+    storageJob.beat({ extra: { rowsPerDay: daySum, rowsTotal: rowSum, types: STORAGE_TYPES.length } });
+  } catch (e) {
+    storageState.errors += 1;
+    storageState.lastError = String(e?.message ?? e).slice(0, 200);
+    storageJob.fail(e);
+  }
+};
+let storageBusy = false;
+const runStorageWatcher = async () => {
+  if (storageBusy) return;            // دورة سابقة لم تنتهِ ⇒ لا تراكب
+  storageBusy = true;
+  try { await refreshStorageStats(); } finally { storageBusy = false; }
+};
+const storageTimer = setInterval(() => void runStorageWatcher(), 10 * 60 * 1000);
+storageTimer.unref?.();
+void runStorageWatcher();
+
+/**
+ * قسم `storage` في الصحة: يقرأ آخر حصيلة محسوبة بلا أي جلب عند قراءة الصفحة،
+ * ويرفق حصيلة آخر دورة احتفاظ فتُقرأ كلها من مكان واحد.
+ */
+health.addSection('storage', () => {
+  try {
+    const r = retentionLastRun.value ?? null;
+    return {
+      at: storageState.at,
+      errors: storageState.errors,
+      lastError: storageState.lastError,
+      types: storageState.types,
+      samples: storageState.samples ?? null,
+      calibrationRows: storageState.historyRows,
+      sampleBytes: (() => { try { return health.snapshot()?.persist ?? null; } catch { return null; } })(),
+      lastRetention: r ? { at: r.at ?? null, ms: r.ms ?? null, deleted: r.extra?.deleted ?? null, errors: r.extra?.errors ?? null } : null,
+      policy: {
+        diagnosticDays: Number(process.env.RETENTION_DIAGNOSTIC_DAYS ?? 7),
+        sampleDays: Number(process.env.RETENTION_SAMPLE_DAYS ?? 30),
+        sampleMaxRows: Number(process.env.RETENTION_SAMPLE_MAX_ROWS ?? 10_000),
+        snapshotsPerSymbol: Number(process.env.RETENTION_SNAPSHOTS_PER_SYMBOL ?? 10),
+        imageDays: Number(process.env.RETENTION_IMAGE_DAYS ?? 90)
+      }
+    };
+  } catch { return null; }
+});
 
 const buildRowsFromInfo = (info) => {
   const now = Date.now();

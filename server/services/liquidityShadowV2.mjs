@@ -142,17 +142,31 @@ export function createParityCollector() {
 
 /**
  * مقارنة محركَي السيولة على نفس الشموع ونفس اللحظة.
- * @param {Object} p { symbol, timeframe, candles, endIndex, tolerancePct, now }
+ *
+ * **إزالة الكشف المكرر (سبب مباشر في ارتفاع تأخّر الحلقة):** المستدعي في
+ * `server/index.js` يشغّل المحرك الأول بالفعل على نفس المفاتيح، ثم كانت هذه الدالة
+ * تُعيد تشغيله من جديد — أي كشفان كاملان للمحرك الأول على نفس المدخل. القياس أظهر
+ * أن الكشف هو الجزء الأغلى في الدورة، وتأخّرها p99 بلغ 1,229ms بينما معيار المشروع
+ * أقل من 200ms. لذلك تُقبل المناطق المحسوبة مسبقاً عبر `oldZones` فتُستعمل كما هي،
+ * وإن لم تُمرَّر يبقى السلوك القديم (تشغيل ذاتي) توافقاً خلفياً للاختبارات والسكربتات.
+ *
+ * @param {Object} p { symbol, timeframe, candles, endIndex, tolerancePct, now, oldZones }
  */
-export function compareEngines({ symbol, timeframe, candles, endIndex, tolerancePct = 0.002, now = 0 }) {
+export function compareEngines({
+  symbol, timeframe, candles, endIndex, tolerancePct = 0.002, now = 0, oldZones: precomputed = null
+}) {
   const empty = { old: [], v2: [], match: { matched: 0, sameState: 0, onlyOld: 0, onlyNew: 0, stateChanges: [] } };
   if (!Array.isArray(candles) || candles.length < 60) return empty;
 
   const t0 = process.hrtime.bigint();
   let oldZones = [];
-  try {
-    oldZones = detectLiquidityZones({ symbol, timeframe, candles, endIndex }) ?? [];
-  } catch { oldZones = []; }
+  if (Array.isArray(precomputed)) {
+    oldZones = precomputed;           // محسوبة عند المستدعي ⇒ لا كشف ثانٍ
+  } else {
+    try {
+      oldZones = detectLiquidityZones({ symbol, timeframe, candles, endIndex }) ?? [];
+    } catch { oldZones = []; }
+  }
   const t1 = process.hrtime.bigint();
 
   let v2Zones = [];

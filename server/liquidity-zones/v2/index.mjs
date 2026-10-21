@@ -18,7 +18,8 @@ import {
   clusterByAtr,
   fitTrendline,
   buildHorizontalZone,
-  buildTrendlineZone
+  buildTrendlineZone,
+  stableBucket
 } from './zones.mjs';
 
 export const LIQUIDITY_KINDS_V2 = [
@@ -35,7 +36,13 @@ function supplyDemandToZone(sd, { symbol, timeframe, candles, endIndex, opts, st
     + Math.min((sd.fvgs?.length ?? 1) * 0.05, 0.15);
   const mid = (Number(sd.zoneHigh) + Number(sd.zoneLow)) / 2;
   return {
-    id: `${symbol}-${timeframe}-${kind}-${sd.form}-${sd.originCandleIndex}`,
+    /**
+     * معرّف من المحتوى لا من الترتيب: الشكل + خانة سعرية لوغاريتمية + زمن أول شمعة.
+     * كان `originCandleIndex` — أي إزاحة في نافذة الكشف تُغيّر المعرّف كله وإن لم
+     * تتغيّر المنطقة (عين عيب A4). والخانة نسبية فتصلح لكل الأسعار، والزمن ثابت
+     * في الزمن الحقيقي فلا يتحرك بتقدّم الشموع.
+     */
+    id: `${symbol}-${timeframe}-${kind}-${sd.form}-${stableBucket(sd.zoneHigh)}-${Number(sd.time ?? 0)}`,
     symbol,
     timeframe,
     kind,
