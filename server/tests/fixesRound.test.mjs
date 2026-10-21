@@ -298,3 +298,45 @@ test('★5: بلا جمّاع ظل لا يتعطّل المحرك (القياس 
   assert.ok(engine.getCalibration().parity, 'القياس يعمل بلا جمّاع ظل');
   assert.equal(typeof engine.start, 'function');
 });
+
+test('B2: عند فشل القاعدة لا تُضرب بلا سقف — كاش سلبي قصير يعيد نفس الخطأ', async () => {
+  let clock = 1_000;
+  let calls = 0;
+  const cache = createTwoTierCache({
+    fetchManual: async () => { calls += 1; throw new Error('db down'); },
+    fetchAuto: async () => [2],
+    negativeMs: 3_000,
+    now: () => clock
+  });
+  await assert.rejects(() => cache.get(), /db down/);
+  const afterFirst = calls;
+  // عاصفة قراءات خلال نافذة الكاش السلبي: لا محاولات جديدة على القاعدة المتعثّرة
+  for (let i = 0; i < 20; i += 1) {
+    clock += 100;
+    await assert.rejects(() => cache.get(), /db down/);
+  }
+  assert.equal(calls, afterFirst, `لا محاولة جديدة داخل النافذة (المحاولات: ${calls})`);
+  const s = cache.stats();
+  assert.equal(s.negativeHits, 20, 'القراءات المخدومة من الكاش السلبي معدودة');
+  // بعد انتهاء النافذة: محاولة جديدة (الشفاء ممكن بلا إعادة تشغيل)
+  clock += 5_000;
+  await assert.rejects(() => cache.get(), /db down/);
+  assert.equal(calls, afterFirst + 1, 'محاولة واحدة بعد انتهاء النافذة');
+});
+
+test('B2: كتابة ناجحة تُسقط الكاش السلبي فوراً', async () => {
+  let clock = 0;
+  let failing = true;
+  const cache = createTwoTierCache({
+    fetchManual: async () => { if (failing) throw new Error('down'); return [1]; },
+    fetchAuto: async () => [2],
+    negativeMs: 60_000,
+    now: () => clock
+  });
+  await assert.rejects(() => cache.get(), /down/);
+  failing = false;
+  cache.invalidate(); // إبطال صريح بعد كتابة
+  const rows = await cache.get();
+  assert.deepEqual(rows, [1, 2], 'الشفاء فوري بلا انتظار النافذة');
+  assert.equal(cache.stats().negativeHits, 0);
+});

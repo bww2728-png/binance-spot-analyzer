@@ -642,7 +642,8 @@ const zonesCache = createTwoTierCache({
   fetchManual: () => db.zones.list(),
   fetchAuto: () => db.zones.listAuto(),
   manualMs: MANUAL_ZONES_CACHE_MS,
-  autoMs: AUTO_ZONES_CACHE_MS
+  autoMs: AUTO_ZONES_CACHE_MS,
+  negativeMs: Math.max(0, Number(process.env.ZONES_NEGATIVE_CACHE_MS ?? 3000))
 });
 async function zonesCached() { return zonesCache.get(); }
 function invalidateZonesCache() { zonesCache.invalidate(); }

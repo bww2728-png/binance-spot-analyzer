@@ -13,7 +13,7 @@
  * وحدة نقية بلا شبكة: تُختبر بزمن مُحقون.
  */
 
-export function createTwoTierCache({ fetchManual, fetchAuto, manualMs = 5000, autoMs = 120_000, now = () => Date.now() } = {}) {
+export function createTwoTierCache({ fetchManual, fetchAuto, manualMs = 5000, autoMs = 120_000, negativeMs = 3000, now = () => Date.now() } = {}) {
   const state = { manual: null, manualTs: -1, auto: null, autoTs: -1 };
   /** عدّادات الجلب الفعلي (الطبقة الثقيلة أولاً في العرض) */
   /**
@@ -21,7 +21,7 @@ export function createTwoTierCache({ fetchManual, fetchAuto, manualMs = 5000, au
    * و`manualFetches` يزيد عند وصول بيانات فعلية. بلا هذا الفصل يظهر «صفر جلب» عند
    * تعذّر القاعدة، فيُقرأ الرقم كأنه تخفيف ناجح بينما الحقيقة فشل متكرر.
    */
-  const stats = { manualAttempts: 0, autoAttempts: 0, manualFetches: 0, autoFetches: 0, combined: 0, hitBoth: 0, errors: 0, lastErrorAt: null, lastGapMs: null, lastManualAt: null, lastAutoAt: null };
+  const stats = { manualAttempts: 0, autoAttempts: 0, manualFetches: 0, autoFetches: 0, combined: 0, hitBoth: 0, negativeHits: 0, errors: 0, lastErrorAt: null, lastGapMs: null, lastManualAt: null, lastAutoAt: null };
   let lastManualFetchAt = null;
 
   /**
@@ -30,10 +30,22 @@ export function createTwoTierCache({ fetchManual, fetchAuto, manualMs = 5000, au
    */
   const fresh = (value, ts, windowMs) => value !== null && ts >= 0 && now() - ts < windowMs;
 
+  /**
+   * كاش سلبي لقصير زمن: عند فشل الجلب لا تُعاد المحاولة بلا سقف.
+   *
+   * السبب مقيس: بلا هذا، فشل القاعدة يعني أن كل قراءة (وكل دورة مراقب، وكل نداء واجهة)
+   * تُطلق طلباً فاشلاً جديداً — فالخدمة المتعثّرة تُضرب عشرات المرات في الثانية وتتأخر
+   * استعادتها. النافذة 3 ثوانٍ: تمنع العاصفة، وتسمح بالعودة السريعة عند شفاء القاعدة.
+   * والخطأ **يُعاد رميه** كما هو (لا يُبتلع) حتى يبقى المسار الأصلي مسؤولاً عن المعالجة.
+   */
+  let negativeUntil = 0;
+  let lastError = null;
+
   async function get() {
     const manualFresh = fresh(state.manual, state.manualTs, manualMs);
     const autoFresh = fresh(state.auto, state.autoTs, autoMs);
     if (manualFresh && autoFresh) { stats.hitBoth += 1; return [...state.manual, ...state.auto]; }
+    if (now() < negativeUntil && lastError) { stats.negativeHits += 1; throw lastError; }
     const t = now();
     const [manual, auto] = await Promise.all([
       manualFresh ? Promise.resolve(state.manual) : (stats.manualAttempts += 1, fetchManual().then((rows) => {
@@ -46,12 +58,12 @@ export function createTwoTierCache({ fetchManual, fetchAuto, manualMs = 5000, au
         lastManualFetchAt = t;
         stats.lastManualAt = t;
         return rows;
-      }).catch((e) => { stats.errors += 1; stats.lastErrorAt = now(); throw e; })),
+      }).catch((e) => { stats.errors += 1; stats.lastErrorAt = now(); negativeUntil = now() + negativeMs; lastError = e; throw e; })),
       autoFresh ? Promise.resolve(state.auto) : (stats.autoAttempts += 1, fetchAuto().then((rows) => {
         stats.autoFetches += 1;
         stats.lastAutoAt = t;
         return rows;
-      }).catch((e) => { stats.errors += 1; stats.lastErrorAt = now(); throw e; }))
+      }).catch((e) => { stats.errors += 1; stats.lastErrorAt = now(); negativeUntil = now() + negativeMs; lastError = e; throw e; }))
     ]);
     if (!manualFresh) { state.manual = manual; state.manualTs = t; }
     if (!autoFresh) { state.auto = auto; state.autoTs = t; }
@@ -62,10 +74,11 @@ export function createTwoTierCache({ fetchManual, fetchAuto, manualMs = 5000, au
   return {
     get,
     /** إبطال كامل — عند أي كتابة يدوية (تغيير فوري) */
-    invalidate() { state.manual = null; state.manualTs = -1; state.auto = null; state.autoTs = -1; },
+    /** إبطال كامل + إسقاط الكاش السلبي: كتابة ناجحة تعني أن القاعدة شُفيت */
+    invalidate() { state.manual = null; state.manualTs = -1; state.auto = null; state.autoTs = -1; negativeUntil = 0; lastError = null; },
     /** إبطال الطبقة الآلية وحدها — لا يُهدِر كاش اليدوي */
     invalidateAuto() { state.auto = null; state.autoTs = -1; },
-    stats: () => ({ ...stats, manualMs, autoMs, manualCached: fresh(state.manual, state.manualTs, manualMs), autoCached: fresh(state.auto, state.autoTs, autoMs) })
+    stats: () => ({ ...stats, manualMs, autoMs, negativeMs, manualCached: fresh(state.manual, state.manualTs, manualMs), autoCached: fresh(state.auto, state.autoTs, autoMs) })
   };
 }
 
