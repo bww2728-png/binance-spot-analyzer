@@ -335,3 +335,64 @@ test('مدخلات فاسدة: [] وNaN وstructureEvents غير مصفوفة �
   assert.doesNotThrow(() => detectSupplyDemand(cs, null, 'x', 2, {}));
   assert.deepEqual(detectSupplyDemand(cs, null, [], 2, {}), []);
 });
+
+// ============================================================================
+// 12) تنقية مناطق العرض/الطلب (المرحلة 4ب)
+// ============================================================================
+test('الشكل A يشترط كسر **دعم حديث** لا أي قاع قديم — إصلاح الإغراق', () => {
+  /**
+   * عطل مُثبت بالقياس: الشرط القديم «كسر أي قاع سابق» صحيح دائماً تقريباً بعد عشر شموع،
+   * فأنتج ~940 منطقة عرض/طلب لكل (رمز، فريم). الصواب: يكسر **أدنى قاع في نافذة
+   * structureWindow السابقة** (= قاع N شمعة جديد) — وهو ما تعنيه «كسر دعم حديث».
+   *
+   * البيانات: قيعان صاعدة 96..106 (فهارس 1..12)، ثم الشمعة 13 قاعها 100.
+   *  - بنافذة 10: أدنى قاع في (3..12) = 98 ⇒ 100 ليس كسراً ⇒ لا منطقة.
+   *  - بنافذة 3:  أدنى قاع في (10..12) = 104 ⇒ 100 كسر ⇒ تُنتج منطقة.
+   * النافذة هي الفرق الوحيد، فالاختبار يثبت أن الشرط فعّال لا شكلي.
+   */
+  const rows = [
+    [95, 100, 80, 98],
+    [98, 106, 96, 105], [105, 107, 97, 106], [106, 108, 98, 107], [107, 109, 99, 108],
+    [108, 110, 100, 109], [109, 111, 101, 110], [110, 112, 102, 111], [111, 113, 103, 112],
+    [112, 114, 104, 113], [113, 115, 105, 114], [114, 116, 106, 115], [115, 117, 104, 116],
+    [116, 120, 100, 119],  // 13: القاع 100 + فجوة صاعدة [117,121]
+    [119, 132, 121, 130]   // 14: كسر القمة (تأكيد)
+  ];
+  const cs = series(rows);
+  const fvgs = detectFvgs(cs, 14, [], { minSizeAtr: 0 });
+  assert.ok(fvgs.some(f => f.index === 13 && f.kind === 'bullish'), 'البيانات يجب أن تُنتج فجوة عند 13');
+  const events = [{ type: 'bos_up', index: 14, time: 840, price: 132, external: true }];
+
+  const narrow = detectSupplyDemand(cs, fvgs, events, 14, { minSizeAtr: 0, structureWindow: 3 });
+  assert.ok(narrow.find(z => z.form === 'A' && z.kind === 'demand'), 'بنافذة 3 يُقبل كسر الدعم الحديث');
+
+  const wide = detectSupplyDemand(cs, fvgs, events, 14, { minSizeAtr: 0, structureWindow: 10 });
+  assert.equal(wide.find(z => z.form === 'A' && z.kind === 'demand'), undefined, 'بنافذة 10 القاع ليس جديداً ⇒ لا شكل A');
+});
+
+test('التنقية: شموع متجاورة بنفس الصندوق ⇒ منطقة واحدة، وأشكال الشمعة نفسها تبقى منفصلة', () => {
+  /**
+   * التكرار الحقيقي: شمعتان متجاورتان تُنتجان نفس الصندوق السعري تقريباً ⇒ تُبقى الأقوى وحدها.
+   * أما الأشكال الثلاثة على **نفس** الشمعة فتبقى جميعها (طلب صاحب النظام: كل التعريفات).
+   */
+  const rows = [
+    [100, 110, 95, 108],
+    [108, 112, 100, 111],
+    [110, 120, 109, 119],  // 2: فجوة صاعدة #1 ([110,111] مع 0)
+    [119, 125, 116, 124]
+  ];
+  const cs = series(rows);
+  const fvgs = detectFvgs(cs, 3, [], { minSizeAtr: 0 });
+  const events = [{ type: 'bos_up', index: 3, time: 180, price: 125, external: true }];
+  const zones = detectSupplyDemand(cs, fvgs, events, 3, { minSizeAtr: 0 });
+
+  // لا صندوقين من شمعتين مختلفتين يتداخلان بنسبة ≥ 70%
+  for (const a of zones) {
+    for (const b of zones) {
+      if (a === b || a.kind !== b.kind || a.index === b.index) continue;
+      const inter = Math.min(a.zoneHigh, b.zoneHigh) - Math.max(a.zoneLow, b.zoneLow);
+      const minSpan = Math.min(a.zoneHigh - a.zoneLow, b.zoneHigh - b.zoneLow);
+      assert.ok(minSpan <= 0 || inter / minSpan < 0.7, `تكرار لم يُنقَّ: ${a.index}/${a.form} و${b.index}/${b.form}`);
+    }
+  }
+});

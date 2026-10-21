@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse, LiquidityV2ZonesResponse, LiquidityV2StatusResponse, Candle } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -291,6 +291,22 @@ const sbApi = {
   getLiquidityZone(id: string, signal?: AbortSignal): Promise<{ zone: LiquidityDetection; screenshotAt: string; screenshotAfter: string }> {
     return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}`, { signal }).then(j<{ zone: LiquidityDetection; screenshotAt: string; screenshotAfter: string }>);
   },
+  /** شموع من وكيل الخادم (نفس مصدر المخزن) — يستخدمها عرض v2 بدل الاتصال المباشر ببينانس */
+  getKlines(symbol: string, interval: string, limit = 500, signal?: AbortSignal): Promise<Candle[]> {
+    return fetch(`${BASE}/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`, { signal }).then(j<Candle[]>);
+  },
+  /** محرك السيولة v2: حصيلة قياس الظل. عرض فقط — لا يُغذّي أي قرار منشور */
+  getLiquidityV2Status(signal?: AbortSignal): Promise<LiquidityV2StatusResponse> {
+    return fetch(`${BASE}/liquidity-zones/v2/status`, { signal }).then(j<LiquidityV2StatusResponse>);
+  },
+  /** محرك السيولة v2: مناطق (رمز، فريم) محسوبة عند الطلب من المخزن نفسه */
+  getLiquidityV2Zones(opts: { symbol: string; timeframe: string; cap?: number; state?: string; kind?: string }, signal?: AbortSignal): Promise<LiquidityV2ZonesResponse> {
+    const q = new URLSearchParams({ symbol: opts.symbol, timeframe: opts.timeframe });
+    if (opts.cap != null) q.set('cap', String(opts.cap));
+    if (opts.state) q.set('state', opts.state);
+    if (opts.kind) q.set('kind', opts.kind);
+    return fetch(`${BASE}/liquidity-zones/v2/zones?${q}`, { signal }).then(j<LiquidityV2ZonesResponse>);
+  },
   reviewLiquidityZone(id: string, body: { verdict: 'accept' | 'reject' | 'confirm' | 'clear'; note?: string; correction?: unknown }): Promise<{ ok: boolean; zone: LiquidityDetection; adjustment: LiquidityZoneEngineStatus['adjustment'] }> {
     return fetch(`${BASE}/liquidity-zones/${encodeURIComponent(id)}/review`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -433,6 +449,20 @@ const restApi = {
     fetch(`${BASE}/symbols/targets`, { signal }).then(j<{ targets: string[] }>),
   getMarketRead: (symbol: string, timeframes: string, signal?: AbortSignal) =>
     fetch(`${BASE}/market-read?symbol=${encodeURIComponent(symbol)}&timeframes=${encodeURIComponent(timeframes)}`, { signal }).then(j<MarketReadResponse>),
+  /** شموع من وكيل الخادم (نفس مصدر المخزن) — يستخدمها عرض v2 بدل الاتصال المباشر ببينانس */
+  getKlines: (symbol: string, interval: string, limit = 500, signal?: AbortSignal): Promise<Candle[]> =>
+    fetch(`${BASE}/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`, { signal }).then(j<Candle[]>),
+  /** محرك السيولة v2 (محرك موازٍ — عرض فقط، بلا أي تفعيل): حصيلة قياس الظل */
+  getLiquidityV2Status: (signal?: AbortSignal) =>
+    fetch(`${BASE}/liquidity-zones/v2/status`, { signal }).then(j<LiquidityV2StatusResponse>),
+  /** محرك السيولة v2: مناطق (رمز، فريم) محسوبة عند الطلب من نفس المخزن */
+  getLiquidityV2Zones: (opts: { symbol: string; timeframe: string; cap?: number; state?: string; kind?: string }, signal?: AbortSignal) => {
+    const q = new URLSearchParams({ symbol: opts.symbol, timeframe: opts.timeframe });
+    if (opts.cap != null) q.set('cap', String(opts.cap));
+    if (opts.state) q.set('state', opts.state);
+    if (opts.kind) q.set('kind', opts.kind);
+    return fetch(`${BASE}/liquidity-zones/v2/zones?${q}`, { signal }).then(j<LiquidityV2ZonesResponse>);
+  },
   getLiquidityZoneStatus: (signal?: AbortSignal) =>
     fetch(`${BASE}/liquidity-zones/status`, { signal }).then(j<LiquidityZoneEngineStatus>),
   getLiquidityZones: (opts: { mode: 'live' | 'history'; symbol?: string; timeframe?: string; kind?: string; limit?: number; offset?: number } = { mode: 'live' }, signal?: AbortSignal) => {

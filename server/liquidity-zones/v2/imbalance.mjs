@@ -15,7 +15,18 @@ import { normalizeCandles, atrAt, adaptiveConfig } from '../engine.mjs';
 export const DEFAULT_OPTS = {
   minSizeAtr: 0.25,   // حد أدنى لحجم الفجوة بوحدات ATR
   atrPeriod: 14,      // فترة ATR
-  maxFvgAge: 0        // 0 = بلا حد للعمر (يُحسب حتى endIndex فقط)
+  maxFvgAge: 0,       // 0 = بلا حد للعمر (يُحسب حتى endIndex فقط)
+  /**
+   * نافذة الدعم/المقاومة التي يجب أن يكسرها الشكل A.
+   *
+   * عطل مُثبت بالقياس: كان الشرط «كسر **أي** قاع سابق» — وهذا صحيح دائماً تقريباً على
+   * أي شمعة بعد عشر شموع، فأنتج ~940 منطقة عرض/طلب لكل (رمز، فريم) مقابل ~60 ذات معنى.
+   * الشرط الصحيح لتعريف صاحب النظام («شمعة كسرت قاعاً/دعماً») أن يكسر **دعماً حديثاً**
+   * = أدنى قاع في نافذة `structureWindow` شمعة السابقة. لا نظر مستقبلي: النافذة كلها قبل الشمعة.
+   */
+  structureWindow: 10,
+  /** نسبة التداخل التي تجعل منطقتين متطابقة فيُبقى الأقوى (تنقية مناطق العرض/الطلب) */
+  overlapPrune: 0.7
 };
 
 const isFiniteNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -57,6 +68,50 @@ function resolveOpts(opts) {
 
 /** اتجاه الفجوة: صاعدة (bullish) أو هابطة (bearish) */
 const dirOf = (kind) => (kind === 'bullish' ? 'up' : 'down');
+
+/** أدنى قاع/أعلى قمة في نافذة سابقة للشمعة `i` (بلا نظر مستقبلي: كلها قبل i) */
+function priorLow(cs, i, w) {
+  let lo = Infinity;
+  for (let k = Math.max(0, i - w); k <= i - 1; k += 1) {
+    if (validCandle(cs[k])) lo = Math.min(lo, Number(cs[k].low));
+  }
+  return lo;
+}
+function priorHigh(cs, i, w) {
+  let hi = -Infinity;
+  for (let k = Math.max(0, i - w); k <= i - 1; k += 1) {
+    if (validCandle(cs[k])) hi = Math.max(hi, Number(cs[k].high));
+  }
+  return hi;
+}
+
+/** نسبة تداخل صندوقين = التقاطع / أصغر الصندوقين */
+function overlapRatio(a, b) {
+  const inter = Math.min(a.zoneHigh, b.zoneHigh) - Math.max(a.zoneLow, b.zoneLow);
+  if (inter <= 0) return 0;
+  const minSpan = Math.min(a.zoneHigh - a.zoneLow, b.zoneHigh - b.zoneLow);
+  return minSpan > 0 ? inter / minSpan : 1;
+}
+
+/**
+ * تنقية مناطق العرض/الطلب: ترتيب بالقوة (مؤكدة ← أكثر فجوات ← الأحدث)، ثم إسقاط أي منطقة
+ * تتداخل مع منطقة أقوى منها بحد `overlapPrune` — **بشرط اختلاف الشمعة الأصلية**.
+ *
+ * الاشتراط مقصود: الأشكال الثلاثة على **نفس** الشمعة تبقى ظاهرة منفصلة (طلب صاحب النظام
+ * «تعريفات العرض/الطلب الثلاثة كلها») لأنها ثلاث قراءات للشمعة نفسها لا تكرار.
+ * التكرار الحقيقي هو شموع متجاورة تُنتج **نفس** الصندوق السعري، وهو ما يُسقَط هنا.
+ */
+function pruneOverlapping(zones, threshold) {
+  const rank = (a, b) => (Number(b.confirmed) - Number(a.confirmed))
+    || (b.fvgs.length - a.fvgs.length)
+    || (b.index - a.index);
+  const kept = [];
+  for (const z of zones.slice().sort(rank)) {
+    if (kept.some(k => k.kind === z.kind && k.index !== z.index && overlapRatio(k, z) >= threshold)) continue;
+    kept.push(z);
+  }
+  return kept.sort((a, b) => a.index - b.index);
+}
 
 /** هل الحدث البنيوي في اتجاه الفجوة؟ يقبل 'bullish'/'bearish' أو 'up'/'down' */
 function eventMatchesDirection(ev, kind) {
@@ -239,26 +294,20 @@ export function detectSupplyDemand(candles, fvgs, structureEvents = [], endIndex
     });
   };
 
-  // ---- الشكل A: كسر قاع سابق + FVG + كسر قمة (طلب) / كسر قمة سابقة + FVG + كسر قاع (عرض)
+  // ---- الشكل A: كسر دعم حديث + FVG + كسر قمة (طلب) / كسر مقاومة حديثة + FVG + كسر قاع (عرض)
   for (let i = 1; i <= end - 1; i += 1) {
     const c = cs[i];
     if (!validCandle(c)) continue;
     const bullFvg = fvgAt(list, i, 'bullish');
     const bearFvg = fvgAt(list, i, 'bearish');
     if (bullFvg) {
-      // كسر أدنى سعر لشمعة سابقة (قاع فرعي/دعم)
-      let brokeLow = false;
-      for (let k = 0; k < i; k += 1) {
-        if (validCandle(cs[k]) && c.low < cs[k].low) { brokeLow = true; break; }
-      }
-      if (brokeLow) build(i, 'demand', 'A', [bullFvg]);
+      // كسر الدعم الحديث = أدنى قاع في نافذة structureWindow السابقة
+      const support = priorLow(cs, i, cfg.structureWindow);
+      if (Number.isFinite(support) && Number(c.low) < support) build(i, 'demand', 'A', [bullFvg]);
     }
     if (bearFvg) {
-      let brokeHigh = false;
-      for (let k = 0; k < i; k += 1) {
-        if (validCandle(cs[k]) && c.high > cs[k].high) { brokeHigh = true; break; }
-      }
-      if (brokeHigh) build(i, 'supply', 'A', [bearFvg]);
+      const resistance = priorHigh(cs, i, cfg.structureWindow);
+      if (Number.isFinite(resistance) && Number(c.high) > resistance) build(i, 'supply', 'A', [bearFvg]);
     }
   }
 
@@ -288,5 +337,5 @@ export function detectSupplyDemand(candles, fvgs, structureEvents = [], endIndex
     }
   }
 
-  return out;
+  return pruneOverlapping(out, cfg.overlapPrune);
 }

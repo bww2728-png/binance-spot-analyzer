@@ -811,3 +811,97 @@ export interface ChartLevel {
   color: string;
   title: string;
 }
+
+/* ============================================================================
+ * محرك السيولة v2 — أنواع العرض البصري (محرك موازٍ، عرض فقط بلا تفعيل)
+ * ==========================================================================*/
+
+export type LiquidityKindV2 = 'horizontal_bsl' | 'horizontal_ssl' | 'trendline_bsl' | 'trendline_ssl' | 'supply' | 'demand';
+export type ZoneStateV2 = 'potential' | 'candidate' | 'confirmed' | 'swept';
+
+export interface TouchPointV2 { index: number; time: number | null; price: number }
+export interface BreakStepV2 { index: number; time: number | null; reactionPrice: number }
+export interface StructureEventV2 {
+  type: 'idm' | 'bos_up' | 'bos_down' | 'choch_up' | 'choch_down';
+  index: number;
+  time: number | null;
+  price: number;
+  brokenLevel?: number;
+  confirmBasis?: 'close' | 'wick';
+  external?: boolean;
+  evidence?: unknown;
+}
+
+/** منطقة محرك v2 كما تُعاد من `/api/liquidity-zones/v2/zones` */
+export interface LiquidityZoneV2 {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  kind: LiquidityKindV2;
+  referenceLevel: number;
+  referenceAlt: number | null;
+  liquidityLevel: number;
+  retailStop: number;
+  state: ZoneStateV2;
+  createdAt: number | null;
+  confirmedAt: number | null;
+  sweptAt: number | null;
+  confidence: number;
+  touches: number;
+  touchPoints: TouchPointV2[];
+  breakSteps: BreakStepV2[];
+  reasons: string[];
+  zoneBox: { high: number; low: number };
+  bodyBox?: { high: number; low: number };
+  fvgs?: { index: number; kind: 'bullish' | 'bearish'; top: number; bottom: number }[];
+  form?: 'A' | 'B' | 'C';
+  structureEvents: StructureEventV2[];
+  premium: { low: number; high: number; position: number; premium: boolean } | null;
+  trendline: { points: TouchPointV2[]; slope: number; errorAtr: number; maxDeviationAtr: number; projected: number } | null;
+  htf?: boolean;
+  bars?: number;
+}
+
+export interface LiquidityV2ZonesResponse {
+  symbol: string;
+  timeframe: string;
+  group: string[];
+  perTf: Record<string, { bars: number; zones: number; skipped?: string }>;
+  cap: number;
+  total: number;
+  shown: number;
+  hidden: number;
+  zones: LiquidityZoneV2[];
+  merged: {
+    key: string; kind: LiquidityKindV2; price: number; liquidityLevel: number; retailStop: number;
+    referenceAlt: number | null; zoneBox: { high: number; low: number }; state: ZoneStateV2;
+    touches: number; confidence: number; timeframes: string[]; ids: string[]; states: ZoneStateV2[];
+  }[];
+  structure: (StructureEventV2 & { symbol: string; timeframe: string; kind: LiquidityKindV2 })[];
+  fvgs: { index: number; kind: 'bullish' | 'bearish'; symbol: string; timeframe: string; zoneId: string }[];
+  ms: number;
+  source: string;
+  note: string;
+}
+
+export interface LiquidityV2StatusResponse {
+  enabled: boolean;
+  stride: number;
+  errors: number;
+  samples: number;
+  zones: { old: number; v2: number; matched: number };
+  parityPct: number | null;
+  stateParityPct: number | null;
+  byKind: Record<string, { old: number; new: number; matched: number; sameState: number }>;
+  sharedKinds: Record<string, { old: number; new: number; matched: number; sameState: number }>;
+  addedKinds: Record<string, { old: number; new: number; matched: number; sameState: number }>;
+  onlyOld: number;
+  onlyNew: number;
+  structure: { idm: number; bosUp: number; bosDown: number; chochUp: number; chochDown: number };
+  fvg: number;
+  sdConfirmed: number;
+  sdProvisional: number;
+  ms: { avgOld: number; avgV2: number; maxV2: number };
+  recent: { key: string; at: number; old: number; v2: number; matched: number; onlyOld: number; onlyNew: number; ms: number }[];
+  activation: { ready: boolean; reason: string };
+}

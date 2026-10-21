@@ -39,6 +39,12 @@ import {
 } from './services/zoneStore.mjs';
 import { reviveDecision, REVIVE_COOLDOWN_MS, REVIVE_MAX } from './services/revive.mjs';
 import { measureIdentityStability, createIdentityCollector } from './services/zoneIdentityShadow.mjs';
+/**
+ * محرك السيولة v2 الموازي: يُقاس في الظل ولا يُغذّي أي قرار منشور.
+ * راجع `server/liquidity-zones/v2/index.mjs` و`server/services/liquidityShadowV2.mjs`.
+ */
+import { detectLiquidityZonesV2 } from './liquidity-zones/v2/index.mjs';
+import { compareEngines, summarizeSample, createParityCollector } from './services/liquidityShadowV2.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1037,6 +1043,17 @@ const LIVE_MAX_ZONES = Number(process.env.LIQUIDITY_LIVE_MAX_ZONES || DEFAULT_LI
  * عيّنة في الدورة (‎+0.8% كلفة CPU) وهو ما يكفي لتجمّع دليل حقيقي في ساعات.
  */
 const ZONE_ID_SHADOW_STRIDE = Math.max(10, Number(process.env.ZONE_ID_SHADOW_STRIDE || 120));
+
+/**
+ * قياس ظل محرك السيولة v2. المفتاح `LIQUIDITY_V2_SHADOW=0` يعطّله تماماً (افتراضي مفعّل)،
+ * و`LIQUIDITY_V2_STRIDE` يحدد حجم العيّنة (كل N مفتاحاً). ولاحظ أن التفعيل هنا **قياس فقط**:
+ * لا يُكتب ناتج v2 في مخزون المناطق الحيّ ولا يقرأه أي قرار.
+ */
+const LIQUIDITY_V2_SHADOW = process.env.LIQUIDITY_V2_SHADOW !== '0';
+const LIQUIDITY_V2_STRIDE = Math.max(5, Number(process.env.LIQUIDITY_V2_STRIDE || 40));
+const liquidityV2Collector = createParityCollector();
+const liquidityV2Last = new Map();
+let liquidityV2Errors = 0;
 /**
  * ★2: نافذة المقارنة. 4 شموع هي الفجوة الواقعية بين دورتي فحص لنفس الزوج والفريم،
  * وشمعة واحدة تُبخّس العيب (22% مقابل 37.6% بالقياس على بيانات حقيقية).
@@ -1116,6 +1133,38 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
     });
     zoneIdentityCollector.add(sample);
     shadowCompareIdentitySamples(sample);
+  }
+  /**
+   * محرك السيولة v2 — قياس ظل بالعيّنات: يُشغَّل على **نفس الشموع ونفس اللحظة** التي
+   * قرأها المحرك الأول أعلاه، ثم تُتراكم حصيلته في `liquidityV2Collector`.
+   *
+   * لماذا عيّنات لا كل مفتاح: v2 يشغّل أربع مراحل (بنية + فجوات + عرض/طلب + تجميع) وكلفته
+   * ~14ms للمفتاح. تشغيله على 6,006 مفتاحاً في كل دورة يضاعف عمل الدورة بلا فائدة قياسية،
+   * والعيّنة المشذّبة بـ`stride` تعطي الرقم نفسه بجزء من الكلفة.
+   *
+   * و**لا يُغذّي شيئاً**: لا يُكتب في `liquidityState`، ولا يقرأه أي قرار منشور.
+   */
+  if (LIQUIDITY_V2_SHADOW && workOrder % LIQUIDITY_V2_STRIDE === 0) {
+    try {
+      const compared = compareEngines({ symbol, timeframe, candles, endIndex: candles.length - 1, now: Date.now() });
+      liquidityV2Collector.add(summarizeSample(compared));
+      liquidityV2Last.set(`${symbol}|${timeframe}`, {
+        at: Date.now(),
+        old: compared.old.length,
+        v2: compared.v2.length,
+        matched: compared.match.matched,
+        onlyOld: compared.match.onlyOld,
+        onlyNew: compared.match.onlyNew,
+        ms: Number(compared.newMs.toFixed(2))
+      });
+      if (liquidityV2Last.size > 500) {
+        const oldest = liquidityV2Last.keys().next().value;
+        liquidityV2Last.delete(oldest);
+      }
+    } catch (e) {
+      liquidityV2Errors += 1;
+      if (liquidityV2Errors <= 3) console.warn('[liquidity-v2] فشل قياس الظل:', String(e?.message ?? e).slice(0, 160));
+    }
   }
   return zones.length;
 };
@@ -1428,6 +1477,150 @@ app.get('/api/liquidity-zones/history', handle(async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   res.json({ results: rows.slice(offset, offset + limit), total: rows.length, rotation: liquidityState.historyRotation });
+}));
+
+/**
+ * محرك السيولة v2 — العرض البصري **بلا أي تفعيل**.
+ *
+ * `status`: حصيلة قياس الظل التراكمية (نفس أرقام قسم الصحة) لتُقرأ من الشاشة.
+ * `zones`: تُحسب **عند الطلب** من المخزن الحالي لـ(رمز، فريم) وللفريمات الأعلى منه
+ *          (وسم HTF) — لا تُقرأ من مخزون المناطق الحيّ ولا تُكتب فيه. الحساب عند الطلب
+ *          هو ما يضمن «نفس الشموع، بلا شبكة، وبلا شبكة تقريبية أخرى».
+ *          **سقف مصرَّح** `cap` وعدّاد `hidden`: لا حذف صامت.
+ */
+app.get('/api/liquidity-zones/v2/status', handle(async (_req, res) => {
+  const rep = liquidityV2Collector.report();
+  res.json({
+    enabled: LIQUIDITY_V2_SHADOW,
+    stride: LIQUIDITY_V2_STRIDE,
+    errors: liquidityV2Errors,
+    samples: rep.samples,
+    zones: { old: rep.oldZones, v2: rep.newZones, matched: rep.matched },
+    parityPct: rep.parityPct,
+    stateParityPct: rep.stateParityPct,
+    byKind: rep.byKind,
+    sharedKinds: rep.sharedKinds,
+    addedKinds: rep.addedKinds,
+    onlyOld: rep.onlyOld,
+    onlyNew: rep.onlyNew,
+    structure: rep.structure,
+    fvg: rep.fvg,
+    sdConfirmed: rep.sdConfirmed,
+    sdProvisional: rep.sdProvisional,
+    ms: { avgOld: rep.avgOldMs, avgV2: rep.avgNewMs, maxV2: Number(rep.maxNewMs.toFixed(2)) },
+    recent: [...liquidityV2Last.entries()].slice(-12).map(([key, v]) => ({ key, ...v })),
+    /** التطابق ليس 100% ⇒ لا تفعيل. يُعرض السبب صريحاً لا مخفياً */
+    activation: rep.samples === 0 ? { ready: false, reason: 'لا عيّنات بعد' }
+      : rep.parityPct === 100 ? { ready: true, reason: 'تطابق كامل على الأنواع المشتركة' }
+        : { ready: false, reason: `فرق مقيس ${rep.parityPct}% عن المحرك الحالي — ينتظر قرار صاحب النظام` }
+  });
+}));
+
+app.get('/api/liquidity-zones/v2/zones', handle(async (req, res) => {
+  const symbol = String(req.query.symbol || '').toUpperCase();
+  const timeframe = String(req.query.timeframe || '1h');
+  const cap = Math.min(Math.max(Number(req.query.cap) || 300, 20), 1000);
+  const state = String(req.query.state || 'all');
+  const kindFilter = String(req.query.kind || 'all');
+  if (!symbol) return res.status(400).json({ error: 'رمز مفقود' });
+
+  /** الفريم المطلوب + ما فوقه من الفريمات الـ14 (وسم HTF) — بحد أقصى ثلاثة أعلى */
+  const tfIndex = ALL_TIMEFRAMES.indexOf(timeframe);
+  const group = tfIndex < 0 ? [timeframe] : ALL_TIMEFRAMES.slice(tfIndex).slice(0, 4);
+
+  const started = Date.now();
+  const collected = [];
+  const structure = [];
+  const fvgs = [];
+  const perTf = {};
+  /**
+   * مصدر الشموع: **المخزن أولاً ودائماً** (وهو مصدر القرار الحيّ). فإن كان المفتاح غير
+   * مُسخَّر بعد، يُسمح باحتياطي REST **للعرض فقط** كي تُرى الشاشة في أول دقائق التشغيل،
+   * ويُوسم صراحةً في `perTf[tf].source` كي لا يُظن أن الشموع من المخزن. وهذا الاحتياطي
+   * لا يُستخدم في أي حساب قرار ولا يُكتب في مخزون المناطق.
+   */
+  const allowRest = String(req.query.rest ?? '1') !== '0';
+  for (const tf of group) {
+    let rows = marketStreams.candles.getRows(symbol, tf);
+    let source = 'store';
+    if ((!rows || rows.length < LIQUIDITY_MIN_BARS) && allowRest) {
+      try {
+        const raw = await db.binance.klines(symbol, tf, 500);
+        if (Array.isArray(raw) && raw.length) { rows = raw; source = 'rest'; }
+      } catch { /* نتجاهل الاحتياطي الفاشل ونُعلن النقص */ }
+    }
+    if (!rows || rows.length < LIQUIDITY_MIN_BARS) {
+      perTf[tf] = { bars: rows?.length ?? 0, zones: 0, source, skipped: 'شموع غير كافية' };
+      continue;
+    }
+    const candles = normalizeCandles(rows);
+    const endIndex = candles.length - 1;
+    const zones = detectLiquidityZonesV2({ symbol, timeframe: tf, candles, endIndex, opts: { nowMs: Date.now() } });
+    perTf[tf] = { bars: candles.length, zones: zones.length, source };
+    for (const z of zones) collected.push({ ...z, htf: tf !== timeframe, bars: candles.length });
+  }
+  for (const z of collected) {
+    for (const e of z.structureEvents ?? []) structure.push({ ...e, symbol, timeframe: z.timeframe, kind: z.kind });
+    for (const f of z.fvgs ?? []) fvgs.push({ ...f, symbol, timeframe: z.timeframe, zoneId: z.id });
+  }
+
+  /** تنقية العرض: المبدئية (بلا كسر بنيوي) لا تُعرض افتراضياً لأن صاحب النظام شرط الكسر */
+  let rows2 = collected;
+  if (state !== 'all') rows2 = rows2.filter(z => z.state === state);
+  if (kindFilter !== 'all') rows2 = rows2.filter(z => z.kind === kindFilter);
+  rows2 = rows2.slice().sort((a, b) => b.confidence - a.confidence);
+
+  /**
+   * دمج المستوى المتطابق على عدة فريمات **للعرض فقط** (قرار صاحب النظام: كل فريم مستقل في
+   * الحساب). المستويان يُعدّان متطابقين إن تقارب سعراهما داخل 0.15% وتوافق نوعهما.
+   * وهذا الدمج لا يمسّ أي حساب: أرقام الأداء أعلاه لكل فريم على حدة.
+   */
+  const merged = [];
+  for (const z of rows2) {
+    const hit = merged.find(m => m.kind === z.kind
+      && Math.abs(m.price - z.referenceLevel) / Math.max(m.price, 1e-12) <= 0.0015);
+    if (hit) {
+      hit.timeframes.push(z.timeframe);
+      hit.ids.push(z.id);
+      hit.touches = Math.max(hit.touches, z.touches);
+      hit.confidence = Math.max(hit.confidence, z.confidence);
+      hit.states.push(z.state);
+      continue;
+    }
+    merged.push({
+      key: `${z.kind}@${z.referenceLevel.toPrecision(7)}`,
+      kind: z.kind,
+      price: Number(z.referenceLevel),
+      liquidityLevel: z.liquidityLevel,
+      retailStop: z.retailStop,
+      referenceAlt: z.referenceAlt,
+      zoneBox: z.zoneBox,
+      state: z.state,
+      touches: z.touches,
+      confidence: z.confidence,
+      timeframes: [z.timeframe],
+      ids: [z.id],
+      states: [z.state]
+    });
+  }
+
+  res.json({
+    symbol,
+    timeframe,
+    group,
+    perTf,
+    cap,
+    total: rows2.length,
+    shown: Math.min(merged.length, cap),
+    hidden: Math.max(merged.length - cap, 0),
+    zones: rows2.slice(0, cap),
+    merged: merged.slice(0, cap),
+    structure: structure.slice(0, 200),
+    fvgs: fvgs.slice(0, 200),
+    ms: Date.now() - started,
+    source: 'liquidity-engine-v2',
+    note: 'عرض فقط — لا يُغذّي أي قرار منشور'
+  });
 }));
 
 app.get('/api/liquidity-zones/:id', handle(async (req, res) => {
@@ -2991,6 +3184,42 @@ health.addSection('stateRestore', () => { try { return runtime.stateRestore?.() 
 health.addSection('shadow', () => { try { return runtime.shadow?.() ?? null; } catch { return null; } });
 /** ★2 قياس: نسبة دوران هوية المنطقة تتراكم في العيّنات فيصير للقرار دليل رقمي */
 health.addSection('zoneIdentity', () => { try { return zoneIdentityCollector.summary(); } catch { return null; } });
+/**
+ * محرك السيولة v2 — قسم الصحة: أرقام حقيقية مقيسة على عيّنات من نفس الشموع التي قرأها
+ * المحرك الأول في نفس اللحظة. تُجيب على سؤال واحد: «هل يُنتج الجديد نفس ما ينتجه القديم؟»
+ * وتذكر صراحةً ما أضافه الجديد فقط. ولا قسم قرار هنا لأن v2 لا يُغذّي أي قرار منشور.
+ */
+health.addSection('liquidityV2', () => {
+  try {
+    const rep = liquidityV2Collector.report();
+    return {
+      enabled: LIQUIDITY_V2_SHADOW,
+      stride: LIQUIDITY_V2_STRIDE,
+      errors: liquidityV2Errors,
+      samples: rep.samples,
+      zones: { old: rep.oldZones, v2: rep.newZones, matched: rep.matched },
+      parityPct: rep.parityPct,
+      stateParityPct: rep.stateParityPct,
+      byKind: rep.byKind,
+      sharedKinds: rep.sharedKinds,
+      addedKinds: rep.addedKinds,
+      onlyOld: rep.onlyOld,
+      onlyNew: rep.onlyNew,
+      structure: rep.structure,
+      fvg: rep.fvg,
+      sdConfirmed: rep.sdConfirmed,
+      sdProvisional: rep.sdProvisional,
+      ms: { avgOld: rep.avgOldMs, avgV2: rep.avgNewMs, maxV2: Number(rep.maxNewMs.toFixed(2)) },
+      /** يُفعَّل تلقائياً فقط إذا ثبت أن أثره صفر — وإلا يبقى بانتظار قرار صاحب النظام */
+      activation: rep.samples < 20
+        ? { ready: false, reason: 'العيّنات غير كافية للحكم بعد' }
+        : rep.parityPct === 100
+          ? { ready: true, reason: 'تطابق كامل على الأنواع المشتركة' }
+          : { ready: false, reason: `فرق مقيس ${rep.parityPct}% — ينتظر قرار صاحب النظام` },
+      recent: [...liquidityV2Last.entries()].slice(-5).map(([key, v]) => ({ key, ...v }))
+    };
+  } catch { return null; }
+});
 
 // عيّنات الصحة الدورية — دليل التشغيل المستمر يُكتب في القاعدة كل 5 دقائق
 const healthSampler = health.startSampler({
