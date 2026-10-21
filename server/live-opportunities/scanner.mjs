@@ -484,6 +484,63 @@ export function calibrateSweeps({
 }
 
 /**
+ * ★5 — قياس فرق **المعايرة عن الحي** على نفس السويبات (قياس فقط، لا يغيّر أي نشر).
+ *
+ * المشكلة الموصوفة في التدقيق (A5): المعايرة تقيس شيئاً غير ما يُنشر —
+ *   • نافذة الاستعادة: 12 شمعة في المعايرة مقابل 3 في المحرك الحي.
+ *   • نمط الدخول: إعادة اختبار في المعايرة مقابل دخول على الإغلاق في الحي.
+ *   • لحظة الاستعادة: إغلاق الشمعة تاريخياً مقابل السعر اللحظي في الحي (هذا الجزء
+ *     لا يمكن إعادة إنتاجه تاريخياً — يُقاس في `fabio-expiry-and-hilo`).
+ * فتصبح نسب النجاح المعروضة (60% فأكثر) غير وصفية للفرص المنشورة فعلاً.
+ *
+ * هنا تُعاد محاكاة **نفس السويبات** مرتين: بمعاملات المعايرة المنشورة، وبمعاملات
+ * حيَّـية مكافئة (نافذة استعادة 3 + دخول على الاستعادة). الفرق الناتج هو حجم
+ * الانفصال بالأرقام، ويُغذّي `shadow.compare('calibration-live-parity', ...)`.
+ */
+export function sweepModeParity({
+  candles, zones, timeframe, raw = null,
+  bandPct = 0.0025, maxBars = 96, minRR = 2,
+  maxStopAtr = 3, minDepthAtr = 0.15, maxDepthAtr = 3,
+  maxRangePos = 0.8, minBuyRatioPct = 48,
+  sessionTierOf = null, requireSessionPrime = false,
+  published = { entryMode: 'retest', retestTolAtr: 0.3, retestWindow: 12, maxReclaimBars: 12 },
+  live = { entryMode: 'close', retestTolAtr: 0.3, retestWindow: 3, maxReclaimBars: 6 },
+  limit = 40
+} = {}) {
+  const pairs = [];
+  if (!Array.isArray(candles) || !Array.isArray(zones) || !zones.length) return { pairs, compared: 0, diffs: 0 };
+  const byTime = new Map();
+  candles.forEach((c, i) => byTime.set(Number(c.time), i));
+  const takerBuy = Array.isArray(raw) && raw.length === candles.length ? raw.map(k => Number(k?.[9])) : null;
+  const common = {
+    candles, bandPct, maxBars, minRR, maxStopAtr, minDepthAtr, maxDepthAtr,
+    maxRangePos, minBuyRatioPct, sessionTierOf, requireSessionPrime, takerBuy
+  };
+  for (const zone of zones) {
+    if (pairs.length >= limit) break;
+    if (!String(zone?.kind ?? '').includes('ssl')) continue;
+    if (zone.state !== 'swept' || !zone.sweptAt) continue;
+    const sweepIndex = byTime.get(Number(zone.sweptAt));
+    if (sweepIndex == null) continue;
+    const run = (mode) => simulateSweep({ ...common, ...mode, zone, sweepIndex, atr: zone.atr });
+    const a = run(published);
+    const b = run(live);
+    const view = (r) => ({ outcome: r.outcome, win: r.win ?? null, netRr: Number.isFinite(Number(r.netRr)) ? Number(r.netRr) : null, bars: r.bars ?? null });
+    const va = view(a);
+    const vb = view(b);
+    pairs.push({
+      timeframe,
+      symbol: String(zone?.symbol ?? '').toUpperCase() || null,
+      sweepAt: Number(zone.sweptAt) || null,
+      published: va,
+      live: vb,
+      same: va.outcome === vb.outcome && va.win === vb.win
+    });
+  }
+  return { pairs, compared: pairs.length, diffs: pairs.filter(p => !p.same).length };
+}
+
+/**
  * تجميع صفقات إلى شرائح (فريم × فئة الثقة) — تقدير إحصائي احترافي للعينات الصغيرة:
  *
  * 1) Empirical-Bayes: الـprior ليس 0.5 ثابتاً بل المعدل العالمي لكل الصفقات (partial pooling) —
@@ -557,9 +614,19 @@ export function summarizeSegments(trades, {
     for (const key of [`${t.timeframe}|all|${t.band}`, `${t.timeframe}|all|all`]) {
       if (!map.has(key)) map.set(key, new Map());
       const byRR = map.get(key);
-      const row = byRR.get(rrKey) ?? { trades: 0, wins: 0, rrSum: 0, rrCount: 0, durations: [] };
+      const row = byRR.get(rrKey) ?? { trades: 0, wins: 0, rrSum: 0, rrCount: 0, durations: [], netSum: 0, netCount: 0, netWins: 0 };
       row.trades += 1;
       if (t.win === 1) row.wins += 1;
+      /**
+       * الصافي بعد التكاليف (رسوم + انزلاق) — يُجمَّع بجانب الإجمالي لا بدلاً منه:
+       * `win` يقرره السعر (شرط الاستراتيجية، بلا مساس)، أما `netRr` فيقرره السعر ناقص
+       * التكاليف. عرضهما معاً يُظهر الفرق الحقيقي بين «أصاب الهدف» و«ربح بعد الرسوم».
+       */
+      if (Number.isFinite(Number(t.netRr))) {
+        row.netSum += Number(t.netRr);
+        row.netCount += 1;
+        if (Number(t.netRr) > 0) row.netWins += 1;
+      }
       if (Number.isFinite(t.rr)) { row.rrSum += t.rr; row.rrCount += 1; }
       if (Number.isFinite(Number(t.durationMs))) row.durations.push(Number(t.durationMs));
       byRR.set(rrKey, row);
@@ -586,6 +653,13 @@ export function summarizeSegments(trades, {
         smoothedWinRate: Number(smoothed.toFixed(3)),
         wilsonLB: Number(wilsonLowerBound(r.wins, r.trades).toFixed(3)),
         avgRR: r.rrCount ? Number((r.rrSum / r.rrCount).toFixed(2)) : null,
+        /**
+         * الصافي بعد التكاليف: متوسط R الصافي لكل صفقة، ونسبة الصفقات الرابحة **صافياً**.
+         * الفرق بينها وبين `winRate` هو أثر الرسوم والانزلاق الصريح — يُرى لا يُدَّعى.
+         */
+        avgNetRr: r.netCount ? Number((r.netSum / r.netCount).toFixed(3)) : null,
+        netWinRate: r.netCount ? Number((r.netWins / r.netCount).toFixed(3)) : null,
+        netTrades: r.netCount,
         medianDurationMs: dur.value,
         durationN: dur.n,
         durationShrunk: dur.shrunk,

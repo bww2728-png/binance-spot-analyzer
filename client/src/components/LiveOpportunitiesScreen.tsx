@@ -383,6 +383,39 @@ export default function LiveOpportunitiesScreen() {
               <div className="num font-bold">{feed?.stats.wins ?? 0} هدف · {feed?.stats.losses ?? 0} وقف</div>
             </div>
           </div>
+          {(() => {
+            /**
+             * ★5: فرق المعايرة عن الحي — عرض وقياس فقط.
+             * الغرض أن تُقرأ نسب النجاح أعلاه على حقيقتها: إن اختلفت المعاملات بين ما
+             * تُعايَر عليه وما يُنشر فعلاً، فالنسبة أعلاه تحتاج هذا السياق بجانبها.
+             */
+            const p = feed?.calibration.parity;
+            if (!p) return null;
+            const has = p.compared > 0;
+            return (
+              <div className="rounded-xl p-3 text-[11px]" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="font-bold" style={{ color: 'var(--text-1)' }}>تطابق المعايرة مع الحي</span>
+                  <span className="num" style={{ color: has ? 'var(--text-2)' : 'var(--text-3)' }}>
+                    نافذة المعايرة {p.publishedWindow} شمعة · نافذة الحي {p.liveWindow} شمعة
+                  </span>
+                  {has ? (
+                    <>
+                      <span className="num" style={{ color: 'var(--text-2)' }}>عيّنات: {p.compared}</span>
+                      <span className="num" style={{ color: p.diffs > 0 ? 'var(--down)' : 'var(--up)' }}>
+                        اختلاف: {p.diffs} ({pct(p.diffRate ?? 0)})
+                      </span>
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--text-3)' }}>بانتظار أول قياس بعد دورة معايرة</span>
+                  )}
+                </div>
+                <div className="mt-1" style={{ color: 'var(--text-3)' }}>
+                  قياس فقط: لا يغيّر أي شرط ولا فرصة ولا شريحة — يكشف الفرق بين ما تُعايَر عليه وما يُنشر.
+                </div>
+              </div>
+            );
+          })()}
           {!segments.length && (
             <div className="rounded-xl py-16 text-center text-sm" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>
               لا شرائح بعد — شغّل المعايرة لتوليد إحصاء تاريخي بنفس منطق الفرص

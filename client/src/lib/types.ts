@@ -604,6 +604,28 @@ export interface BuyFeed {
     segments: BuyCalibrationSegment[];
     error: string | null;
     targetWinRate: number;
+    /**
+     * ★5: قياس فرق المعايرة عن الحي — عرض فقط. يقيس الفرق بين ما تعايرة عليه
+     * (نافذة استعادة 12 ودخول بإعادة الاختبار) وما ينشره المحرك الحي فعلاً
+     * (نافذة 3 ودخول على الاستعادة)، على نفس السويبات.
+     */
+    parity?: {
+      compared: number;
+      diffs: number;
+      diffRate: number | null;
+      frames: number;
+      runs: number;
+      publishedWindow: number;
+      liveWindow: number;
+      samples: Array<{
+        timeframe: string | null;
+        symbol: string | null;
+        sweepAt: number | null;
+        same: boolean;
+        published: { outcome: string | null; win: number | null; netRr: number | null };
+        live: { outcome: string | null; win: number | null; netRr: number | null };
+      }>;
+    } | null;
   };
 }
 

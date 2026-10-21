@@ -28,7 +28,7 @@ npm ci
 cd client && npm ci
 npm run build        # يبني العميل إلى client/dist
 npm run server       # يشغّل الخادم (أو: npm run dev للتطوير المتزامن)
-npm test             # كل اختبارات الخادم (393 اختباراً: منطق، صحة بيانات، استعادة، ذاكرة، أمان)
+npm test             # كل اختبارات الخادم (انظر العدد الفعلي في آخر تشغيل: يتجاوز 490 اختباراً)
 ```
 
 ثم افتح `http://localhost:8787` (الخادم يخدم العميل المبني).
@@ -65,7 +65,7 @@ set RAILWAY_TOKEN=<project-token>
 railway up
 ```
 
-> ملاحظات: Railway يدعم WebSocket. النشر عبر **Dockerfile** (محدد في `railway.json`) — صورة حتمية بسقف ذاكرة `NODE_OPTIONS=--max-old-space-size=460` و`PORT` من بيئة Railway. لا توجد متغيرات بيئة مطلوبة (الافتراضيات مدمجة في `server/db.js`)؛ لضبطها: `railway variables --set "KEY=value"`. عند توليد نطاق جديد (مثال: `...-7604.up.railway.app`) حدّث روابط الفحص أدناه.
+> ملاحظات: Railway يدعم WebSocket. النشر عبر **Dockerfile** (محدد في `railway.json`) — صورة حتمية بسقف ذاكرة `NODE_OPTIONS=--max-old-space-size=640` و`PORT` من بيئة Railway. لا توجد متغيرات بيئة مطلوبة (الافتراضيات مدمجة في `server/db.js`)؛ لضبطها: `railway variables --set "KEY=value"`. عند توليد نطاق جديد (مثال: `...-7604.up.railway.app`) حدّث روابط الفحص أدناه.
 
 ## 5) رفع الكود إلى GitHub
 

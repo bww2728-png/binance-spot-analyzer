@@ -67,8 +67,20 @@ export function idStability(prev = [], next = [], tolerancePct = 0.002, keepPair
     /**
      * الأزواج تُعاد لتُغذّى بها مقارنة الظل **بالحبيبة الصحيحة** وهي المنطقة لا العيّنة:
      * نسبة دوران مرجّحة بعدد المناطق. `stable` مُبقى للعرض السريع فقط.
+     * وفيها النوع والمستوى والفريم أيضاً، لتُقاس عليها ★2 (المعرّف المرشَّح من المحتوى)
+     * بلا إعادة تشغيل الكشف مرة ثالثة.
      */
-    if (pairs.length < keepPairs) pairs.push({ before: prev[best].id, after: zone.id, same });
+    if (pairs.length < keepPairs) {
+      pairs.push({
+        before: prev[best].id,
+        after: zone.id,
+        same,
+        kind: zone.kind,
+        timeframe: zone.timeframe ?? null,
+        level: Number(zone.referenceLevel.toPrecision(10)),
+        prevLevel: Number(prev[best].referenceLevel.toPrecision(10))
+      });
+    }
   }
 
   /**

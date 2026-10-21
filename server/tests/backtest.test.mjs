@@ -6,7 +6,7 @@ import assert from 'node:assert';
 import { kellyF, fractionalKelly, positionUnits, buildPlan, checkPlan } from '../backtest/risk.mjs';
 import { zScore, betaSpread, cointegrationCheck, regimeGate, inventoryBiasSimple } from '../backtest/regime.mjs';
 import { fitLogistic, featurize, learnedScore, synthFilters, walkForwardSplit, evaluateStrategy, activeDecision, stratifiedLift } from '../backtest/learn.mjs';
-import { loadKlinesPaginated } from '../backtest/engine.mjs';
+import { loadKlinesPaginated, simulateZone, summarizeNet } from '../backtest/engine.mjs';
 import { applyLearnedRules, discoverLiveOpportunities } from '../backtest/live.mjs';
 import { adaptiveConfig, detectLiquidityZones, findPivots, feedbackToAdjustment, scanHistory } from '../liquidity-zones/engine.mjs';
 import { renderChart, gafEncode, mtfEncode, ts2vecEmbed, bocpd, detectVisualZones } from '../liquidity-zones/visual.mjs';
@@ -642,4 +642,56 @@ test('تعلّم فعّال: انحياز القبول/الرفض يعدّل ث�
   bias0[key] = Math.min(1.5, bias0[key] + 0.03); // قبول
   bias0[key] = Math.max(0, bias0[key] - 0.05); // رفض
   assert.equal(bias0[key], 0);
+});
+
+// ---------- تكاليف التنفيذ: الصافي بجانب الخام (إصلاح B8 الموسَّع) ----------
+
+/** شموع مُصنَّعة: لمست السعر عند منطقة BSL ثم صعدت للهدف */
+const mkTradeCandles = ({ hitTarget }) => {
+  const touch = { time: 1000, open: 100, high: 100.2, low: 99.8, close: 100, volume: 10 };
+  const after = hitTarget
+    ? { time: 2000, open: 100, high: 106, low: 99.9, close: 105, volume: 10 }
+    : { time: 2000, open: 100, high: 100.4, low: 96, close: 97, volume: 10 };
+  return [touch, after];
+};
+
+test('التكاليف: الهدف المصاب يُسجَّل ربحاً خاماً وصافيه أقل بمقدار التكلفة فقط', () => {
+  const candles = mkTradeCandles({ hitTarget: true });
+  const zone = { id: 'z', type: 'BSL', price: 100, bandPct: 0.0025, score: 1, reasons: [], clusterCount: 2 };
+  const gross = simulateZone(candles, 0, zone, { protectedPrice: 100, targets: [105], feePct: 0, slippagePct: 0 });
+  const net = simulateZone(candles, 0, zone, { protectedPrice: 100, targets: [105], feePct: 0.001, slippagePct: 0.0005 });
+  assert.equal(gross.win, 1);
+  assert.equal(net.win, 1, 'الحكم بالسعر لا بالتكاليف — لم يتغيّر');
+  assert.equal(gross.netRr, gross.rr, 'بلا تكاليف: الصافي = الخام');
+  assert.ok(net.netRr < gross.netRr, 'التكاليف تخصم من الصافي');
+  assert.ok(Math.abs(net.tradeCostPct - 0.0025) < 1e-9, 'الرسوم في الاتجاهين + الانزلاق');
+  assert.ok(net.costR > 0, 'التكلفة محوَّلة إلى R بعملة المخاطرة');
+});
+
+test('التكاليف: الخاسر يبقى خاسراً وصافيه أسوأ — لا انقلاب في الإشارة', () => {
+  const candles = mkTradeCandles({ hitTarget: false });
+  const zone = { id: 'z', type: 'BSL', price: 100, bandPct: 0.0025, score: 1, reasons: [], clusterCount: 2 };
+  const net = simulateZone(candles, 0, zone, { protectedPrice: 100, targets: [105], feePct: 0.001, slippagePct: 0.0005 });
+  assert.equal(net.win, 0);
+  assert.ok(net.netRr < -1, `خسارة أكبر من 1R بسبب التكلفة (${net.netRr})`);
+});
+
+test('التكاليف: ملخص الصافي يستبعد المعلَّق ويُظهر الفرق عن الإجمالي', () => {
+  const s = summarizeNet([
+    { win: 1, netRr: 2 - 0.25, costR: 0.25 },
+    { win: 0, netRr: -1 - 0.25, costR: 0.25 },
+    { win: 1, netRr: 1.6, costR: 0.4 },
+    { win: undefined, netRr: null }
+  ]);
+  assert.equal(s.trades, 3, 'المعلَّق خارج الحساب');
+  assert.equal(s.wins, 2);
+  assert.equal(s.winRate, 0.6667);
+  assert.equal(s.netWinRate, 0.6667);
+  assert.ok(s.avgNetRr < 1, 'المتوسط الصافي محسوب فعلاً');
+  assert.ok(s.avgCostR > 0);
+});
+
+test('التكاليف: بلا صفقات مُحسَمة لا أرقام مُفبركة', () => {
+  const s = summarizeNet([{ win: undefined, netRr: null }]);
+  assert.deepEqual(s, { trades: 0, wins: 0, winRate: null, netWinRate: null, avgNetRr: null, avgCostR: null });
 });

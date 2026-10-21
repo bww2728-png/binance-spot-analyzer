@@ -1,4 +1,12 @@
 import { applyFeedback } from './liquidity/engine.mjs';
+import { gate, reportRateLimit, sleep, RATE_WAIT_CAP_MS } from './net/gate.mjs';
+
+/**
+ * المحدد الموحّد يُحقن من الخادم (أو من الاختبارات) عبر `setRateLimiter`.
+ * إعادة التصدير هنا مقصودة: نقطة الحقن الفعلية هي `net/gate.mjs` لتفادي دورة الاستيراد
+ * (orderbook ← gate) لكن مستهلكي `db.js` القائمين يبقون بلا تغيير.
+ */
+export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 
 // تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -34,15 +42,19 @@ const BINANCE_HOSTS = [
 ];
 
 /**
+ * عدد مرات إعادة النداء على **نفس المضيف** بعد 429/418 قبل تجربة مضيف آخر.
+ * 1 = إعادة واحدة بعد انتظار محدود: تكفي لامتصاص الرفض العابر بلا تعليق الدورة،
+ * وأكثر منها يعني حجز خيط المحرك في انتظار طويل بلا فائدة (المحدد يحظر البقية أصلاً).
+ */
+const RATE_RETRY_ATTEMPTS = Math.max(0, Number(process.env.BINANCE_RATE_RETRIES ?? 1));
+
+/**
  * محدّد معدل موحّد لكل نداءات بينانس REST (إصلاح B6).
  * قبل التوصيل: كل محرك كان يطلق طلباته بلا تنظيم مشترك، وعند 429/418 كان الكود
  * ينتقل لمضيف آخر — وهو ما يزيد خطر الحظر الفعلي لعنوان الخادم لأن الرفض بسبب
  * المعدل لا المضيف. الآن: دلو أوزان بأولويات (حي > معايرة > تاريخي)، واحترام
  * Retry-After، وتهدئة إجبارية عند الرفض.
- * ملاحظة: rateLimiter قابل للحقن من الاختبارات (بلا شبكة).
  */
-let rateLimiter = null;
-export function setRateLimiter(limiter) { rateLimiter = limiter; }
 
 function pathWeightOf(path) {
   const p = String(path).split('?')[0];
@@ -66,28 +78,41 @@ function priorityOf(path, explicit) {
 
 async function fetchBinanceJson(path, timeoutMs = 30000, { priority, weight } = {}) {
   // الحصول على دور قبل أي نداء — نقطة الاختناق الوحيدة
-  if (rateLimiter) {
-    await rateLimiter.acquire(priorityOf(path, priority), weight ?? pathWeightOf(path));
-  }
+  await gate(priorityOf(path, priority), weight ?? pathWeightOf(path));
   let lastErr;
   for (const host of BINANCE_HOSTS) {
-    try {
-      const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!res.ok) {
-        const status = res.status;
-        // 429/418 بسبب المعدل: تُبلَّغ للمحدد ليوقف كل الطلبات بدل تجربة مضيف آخر
-        if (status === 429 || status === 418) {
-          const retryAfter = Number(res.headers.get('retry-after'));
-          rateLimiter?.report(status, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0);
-          lastErr = new Error(`HTTP ${status} (rate limited) from ${host}`);
-          continue;
+    /**
+     * 429/418 سببها المعدل لا المضيف (إصلاح B6 — الجزء الثاني): كان الكود ينتقل
+     * للمضيف التالي فوراً، فيكرّر المخالفة نفسها من العنوان نفسه ويقرّب الحظر الكامل.
+     * الصواب: يُبلَّغ المحدد بالحظر، ثم يُعاد النداء **على نفس المضيف** بعد انتظار
+     * محدود بسقف، ومضيف آخر لا يُجرَّب إلا كملاذ أخير بعد فشل الإعادة.
+     */
+    for (let attempt = 0; attempt <= RATE_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) {
+          const status = res.status;
+          if (status === 429 || status === 418) {
+            const retryAfter = Number(res.headers.get('retry-after'));
+            const declared = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
+            reportRateLimit(status, declared);
+            lastErr = new Error(`HTTP ${status} (rate limited) from ${host}`);
+            const waitMs = Math.min(declared || (status === 418 ? 120_000 : 20_000), RATE_WAIT_CAP_MS);
+            const canRetry = attempt < RATE_RETRY_ATTEMPTS && waitMs > 0;
+            if (canRetry) {
+              await sleep(waitMs);
+              continue; // نفس المضيف — لا تبديل
+            }
+            break; // سقف الانتظار انتهى: مضيف آخر كملاذ أخير
+          }
+          lastErr = new Error(`HTTP ${status} from ${host}`);
+          break; // خطأ غير متعلق بالمعدل: لا معنى لإعادة المحاولة على نفس المضيف
         }
-        lastErr = new Error(`HTTP ${status} from ${host}`);
-        continue;
+        return await res.json();
+      } catch (e) {
+        lastErr = e;
+        break; // فشل شبكة/مهلة: المضيف التالي أنسب من إعادة المحاولة
       }
-      return await res.json();
-    } catch (e) {
-      lastErr = e;
     }
   }
   throw lastErr ?? new Error('all Binance hosts failed');
@@ -420,6 +445,13 @@ const db = {
   },
   coinShariah: {
     list: () => rest('/coin_shariah?select=*'),
+    /**
+     * أسماء وأحكام فقط — للاستهلاك الجاري (قائمة المستهدفة كل دقيقة).
+     * السبب المقيس: `list()` تجلب `facts` و`reasons` و`evidence`، وهي نصوص الأدلة
+     * الشرعية الكاملة (ميغابايتات) لكل رمز؛ وطلبها كل دقيقة من كل محرك كان أثقل
+     * جلب في النظام بلا أي استخدام للنتيجة. من يحتاج النصوص يستخدم `list()` صراحةً.
+     */
+    listVerdicts: () => rest('/coin_shariah?select=symbol,verdict'),
     upsert: (row) => rest('/coin_shariah?on_conflict=symbol&select=*', { method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=representation' }),
     /** إدراج دفعي — يمنع آلاف الطلبات عند حساب الأحكام على الخادم */
     upsertChunk: (rows) => rest('/coin_shariah?on_conflict=symbol&select=symbol', {

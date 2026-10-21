@@ -245,10 +245,27 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
   /** ربط قسم إضافي بالعيّنات المحفوظة (market/targets/shariah/dataFresh/workers) */
   function addSection(key, fn) { if (typeof fn === 'function') extraSections[key] = fn; }
 
+  /**
+   * تقييم كل الأقسام المسجَّلة وإرجاعها كائناً واحداً.
+   *
+   * السبب: نقطة `/api/health/deep` كانت تنسخ الأقسام **يدوياً** في جسم الرد، فكل قسم
+   * يُسجَّل لاحقاً يظهر في العيّنات المحفوظة ولا يظهر في الفحص اللحظي بلا أي إنذار —
+   * وهو ما حدث فعلاً مع `liquidityV2`: مسجَّل ومكتوب في العيّنات، وغائب كلياً عن الرد
+   * اللحظي. الآن مصدر واحد: ما يُسجَّل يُعرض، بلا قائمة تُنسى.
+   * فشل قسم واحد لا يُسقط الفحص: يُعرض كخطأ نصي في مكانه.
+   */
+  function sections() {
+    const out = {};
+    for (const [key, fn] of Object.entries(extraSections)) {
+      try { out[key] = fn(); } catch (e) { out[key] = { error: String(e?.message ?? e).slice(0, 160) }; }
+    }
+    return out;
+  }
+
   /** ربط مزوّد قسم الشموع المجمّعة (يُعرض في كل لقطة صحة) */
   function setCandlesProvider(fn) { candlesProvider = typeof fn === 'function' ? fn : null; }
 
-  return { register, snapshot, startSampler, notePersist, mark, resetLag, addSection, setCandlesProvider };
+  return { register, snapshot, startSampler, notePersist, mark, resetLag, addSection, sections, setCandlesProvider };
 }
 
 export default createHealth;

@@ -32,11 +32,16 @@ import { setRateLimiter } from './db.js';
 import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
 import { startRetention } from './services/retention.mjs';
+import { createTwoTierCache } from './services/twoTierCache.mjs';
+import {
+  startInventorySaver, loadInventory, loadBacktestRun, saveBacktestRun
+} from './services/inventoryStore.mjs';
 import { createShadow } from './services/shadow.mjs';
 import {
   mergeZones, replaceSymbolScan, boundByNewest, shouldStartRotation, capState,
   DEFAULT_HISTORY_MAX_ZONES, DEFAULT_LIVE_MAX_ZONES
 } from './services/zoneStore.mjs';
+import { candidateZoneId, createCandidateCollector } from './services/zoneIdCandidate.mjs';
 import { reviveDecision, REVIVE_COOLDOWN_MS, REVIVE_MAX } from './services/revive.mjs';
 import { measureIdentityStability, createIdentityCollector } from './services/zoneIdentityShadow.mjs';
 /**
@@ -103,6 +108,16 @@ const scanHistoryAsync = async (args, timeoutMs = Number(process.env.WORKER_TASK
  * معرّف قبل `runtime` تفادياً لأي وصول قبل التهيئة.
  */
 let stateRestoreInfo = null;
+/**
+ * ملخص آخر باك تيست محفوظ قبل إعادة التشغيل (المرحلة 6 الناقصة): يُعرض بوسم صريح
+ * `restored` في `/api/backtest/results` بجانب دورة الجلسة الحالية، ولا يُخلط بها.
+ */
+let backtestRestoredSummary = null;
+/**
+ * قياس حفظ ملخص المخزون: آخر نتيجة وعدد النجاحات والإخفاقات (بند معيار الجاهزية
+ * «صفر إخفاقات حفظ مستمرة»).
+ */
+let inventorySaveInfo = null;
 
 /** حالة تشغيل مشتركة تُبلّغ عنها المحركات (تُقرأ في /api/health/deep) */
 const runtime = {
@@ -144,25 +159,26 @@ app.get('/api/health/deep', (req, res) => {
   const snap = health.snapshot();
   let fresh = { ok: null, reason: 'غير مُهيّأ' };
   try { fresh = runtime.dataFresh() ?? fresh; } catch (e) { fresh = { ok: false, reason: `فشل القياس: ${e.message}` }; }
+  /**
+   * كل الأقسام المسجَّلة عبر `health.addSection` تُدمج هنا آلياً.
+   *
+   * كان هنا سرد يدوي للأقسام، و`liquidityV2` سُجِّل لاحقاً فظهر في العيّنات المحفوظة
+   * وحدها وغاب عن الفحص اللحظي بلا إنذار. المصدر الآن واحد: ما يُسجَّل يُعرض في
+   * الاثنين. قسم `shadow` وحده يُعرض هنا مُختصراً (المجاميع والأمثلة الأخيرة) لأن
+   * التقرير الكامل عالي التفصيل ومتاح كاملاً في `/api/shadow/report`.
+   */
+  let sections = {};
+  try { sections = health.sections(); } catch { sections = {}; }
+  const shadowView = (() => {
+    try {
+      const s = sections.shadow ?? runtime.shadow?.();
+      return s ? { enabled: s.enabled, fixes: Object.keys(s.fixes ?? {}).length, records: (s.records ?? []).map(r => ({ key: r.key, samples: r.samples, diff: r.diff, diffRate: r.diffRate })) } : null;
+    } catch { return null; }
+  })();
   res.json({
     ...snap,
-    market: (() => { try { return runtime.marketStats(); } catch { return null; } })(),
-    /** الشموع المجمّعة: دليل أثر التحويل الحادث (بلا REST لكل رمز وفريم) */
-    candles: (() => { try { return runtime.candles?.() ?? null; } catch { return null; } })(),
-    workers: (() => { try { return runtime.workers?.() ?? null; } catch { return null; } })(),
-    rateLimiter: (() => { try { return runtime.rateLimiter?.() ?? null; } catch { return null; } })(),
-    shadow: (() => { try { const s = runtime.shadow?.(); return s ? { enabled: s.enabled, fixes: Object.keys(s.fixes ?? {}).length, records: s.records.map(r => ({ key: r.key, samples: r.samples, diff: r.diff, diffRate: r.diffRate })) } : null; } catch { return null; } })(),
-    targets: (() => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } })(),
-    shariah: (() => { try { return runtime.shariahVerdicts(); } catch { return null; } })(),
-    /**
-     * مخزون المناطق: كان يُسجَّل في العيّنات المحفوظة فقط، فلا يظهر في الفحص اللحظي —
-     * وهو أكبر مخزن في الذاكرة، فلا يُقبل أن يُقاس كل 5 دقائق فقط.
-     */
-    zones: (() => { try { return runtime.zones?.() ?? null; } catch { return null; } })(),
-    /** دليل بقاء الحالة عبر إعادات التشغيل (تعلّم المراجعات + قياس ★) */
-    stateRestore: (() => { try { return runtime.stateRestore?.() ?? null; } catch { return null; } })(),
-    /** ★2 قياس: نسبة دوران هوية المنطقة (مرجّحة بعدد المناطق) — قياس فقط بلا أثر */
-    zoneIdentity: (() => { try { return zoneIdentityCollector.summary(); } catch { return null; } })(),
+    ...sections,
+    shadow: shadowView,
     dataFresh: fresh
   });
 });
@@ -611,17 +627,27 @@ app.get('/api/shariah-research/status', handle(async (_req, res) => {
 }));
 
 // ---- مناطق السيولة: CRUD + بث + مراقبة الاقتراب والسحب ----
-// كاش 5 ثوانٍ: يمتص انفجارات النداءات عند كل جولة كشف (WS يطلق العدادات لكل عملة)
-const zonesCache = { data: null, ts: 0 };
-async function zonesCached() {
-  const now = Date.now();
-  if (zonesCache.data && now - zonesCache.ts < 5000) return zonesCache.data;
-  const data = await db.zones.listAll();
-  zonesCache.data = data;
-  zonesCache.ts = now;
-  return data;
-}
-function invalidateZonesCache() { zonesCache.data = null; zonesCache.ts = 0; }
+/**
+ * كاش على **جزئين** لا كاش واحد، لأن الجزئين يتغيّران بوتيرتين مختلفتين تماماً:
+ *  - اليدوي (`liquidity_zone`): يكتبه المستخدم، فتغييره فوري فنستخدم نافذة 5 ثوانٍ
+ *    ويُبطَل صراحةً عند كل كتابة.
+ *  - الآلي (`auto_zones_snapshot` + `zone_feedback`): يكتبه الفحص الدوري كل 5 دقائق،
+ *    وقراءته هي **الأثقل في النظام**: حتى 5000 حدث مناطق + 60 لقطة + 1000 تغذية راجعة.
+ *    فالنافذة هنا دقيقتان مع إبطال بعد كل كتابة آلي — أي جلب ثقيل عندما تتغيّر البيانات
+ *    فعلاً، لا 20 مرة في كل 10 دقائق كما كان (نافذة 5 ثوانٍ لمراقب كل 30 ثانية).
+ */
+const MANUAL_ZONES_CACHE_MS = 5000;
+const AUTO_ZONES_CACHE_MS = Math.max(30_000, Number(process.env.AUTO_ZONES_CACHE_MS || 120_000));
+const zonesCache = createTwoTierCache({
+  fetchManual: () => db.zones.list(),
+  fetchAuto: () => db.zones.listAuto(),
+  manualMs: MANUAL_ZONES_CACHE_MS,
+  autoMs: AUTO_ZONES_CACHE_MS
+});
+async function zonesCached() { return zonesCache.get(); }
+function invalidateZonesCache() { zonesCache.invalidate(); }
+/** إبطال الجزء الآلي وحده — لا يُهدِر كاش اليدوي عند كتابة لقطة آلية */
+function invalidateAutoZonesCache() { zonesCache.invalidateAuto(); }
 
 app.get('/api/zones', handle(async (_req, res) => {
   res.json({ zones: await zonesCached() });
@@ -792,8 +818,8 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
 // قائمة المستهدفة: العملات التي حكمها «حلال» بصيغة زوج USDT حقيقي.
 // التغيير الجوهري عن السابق:
 //  1) الحكم يُحسب على الخادم (server/shariah.mjs) فلا يتوقف النظام على فتح المتصفح.
-//  2) جدول التصنيف يُقرأ مرة كل دقيقة ويُخزَّن كأسماء فقط (بلا نصوص الأدلة الضخمة)
-//     بدل جلبه كاملاً في كل نداء من كل محرك.
+//  2) جدول التصنيف يُقرأ مرة كل دقيقة **بأسماء وأحكام فقط** (`listVerdicts` بلا نصوص
+//     الأدلة الضخمة) بدل جلبه كاملاً في كل نداء من كل محرك.
 //  3) الباركود لم يُعد مُستبعِداً: صار وسم تحذيري يُمرَّر مع الفرصة (التعليم لا الإخفاء)،
 //     وفق القرار المعتمد.
 const TARGETS_TTL_MS = Number(process.env.TARGETS_CACHE_MS) || 60_000;
@@ -810,7 +836,14 @@ const invalidateTargets = () => { targetsCache = { ...targetsCache, at: 0 }; };
  * هذا ليس تخفيفاً لشرط استراتيجية: الرمز بلا سوق لا يمكن أن يعطي فرصة صحيحة.
  */
 const computeTargets = async () => {
-  const rows = await db.coinShariah.list().catch(() => []);
+  /**
+   * `listVerdicts` لا `list`: هذا الحساب لا يحتاج إلا الرمز والحكم، و`list` تجلب
+   * `facts`/`reasons`/`evidence` — نصوص الأدلة الشرعية الكاملة لكل رمز (ميغابايتات)
+   * كل دقيقة بلا استخدام. الفشل يرجع للجلب الكامل حتى لا تفرغ قائمة المستهدفة.
+   */
+  const rows = await db.coinShariah.listVerdicts()
+    .catch(() => db.coinShariah.list())
+    .catch(() => []);
   const counts = { halal: 0, haram: 0, uncertain: 0 };
   const halalAll = [];
   const seen = new Set();
@@ -1082,6 +1115,44 @@ const shadowCompareIdentitySamples = (sample) => {
 const mergeLiquidityResults = (rows, incoming) => mergeZones(rows, incoming);
 
 /**
+ * ★2 — قياس المعرّف المرشَّح (من محتوى المنطقة لا من ترتيبها). قياس فقط:
+ * لا يُستبدل معرّف في المخزون، ولا يتغيّر أي دمج، ولا يُقرأ الناتج في أي قرار.
+ *
+ * لا يُشغَّل الكشف مرة ثالثة: الأزواج المُطابَقة (نفس المنطقة مادياً) تحمل النوع
+ * والفريم والمستوى، فيُحسب المرشَّح عليها مباشرة. الشبكات الثلاث تُقاس معاً لأن
+ * السؤال الحقيقي ليس «هل المرشَّح ثابت؟» بل «أي عرض شبكة أقل دوراناً؟» — وكل شبكة
+ * أنعم تعني معرّفات أكثر تشابهاً لمناطق متجاورة (دمج خاطئ محتمل)، وهذا ما يظهر
+ * في نسبة الدوران لا في الرأي.
+ */
+const CANDIDATE_GRIDS = (process.env.ZONE_ID_CANDIDATE_GRIDS || '0.001,0.002,0.004')
+  .split(',').map(v => Number(v)).filter(v => Number.isFinite(v) && v > 0);
+const zoneIdCandidateCollector = createCandidateCollector();
+
+const shadowCompareCandidateIds = (sample) => {
+  if (!shadow || !sample?.pairs?.length) return;
+  const rows = CANDIDATE_GRIDS.map(grid => {
+    let matched = 0, churned = 0;
+    for (const pair of sample.pairs) {
+      const beforeId = candidateZoneId({ kind: pair.kind, timeframe: pair.timeframe, liquidityLevel: pair.prevLevel }, grid);
+      const afterId = candidateZoneId({ kind: pair.kind, timeframe: pair.timeframe, liquidityLevel: pair.level }, grid);
+      if (beforeId == null || afterId == null) continue;
+      matched += 1;
+      const same = beforeId === afterId;
+      if (!same) churned += 1;
+      shadow.compare(
+        'zone-id-candidate',
+        { id: beforeId },
+        { id: afterId },
+        (a, b) => a?.id != null && a.id === b?.id,
+        { symbol: sample.symbol, timeframe: sample.timeframe, kind: pair.kind, grid, level: pair.level }
+      );
+    }
+    return { grid, matched, churned, keepRate: matched ? Number(((matched - churned) / matched).toFixed(4)) : null, churnRate: matched ? Number((churned / matched).toFixed(4)) : null };
+  });
+  zoneIdCandidateCollector.add({ zonesFull: sample.zonesFull, zonesTrimmed: sample.zonesTrimmed, grids: rows });
+};
+
+/**
  * ★التحويل الحادث: فحص مناطق السيولة الحي كان يطلب REST لكل (رمز × فريم) في كل دورة
  * (6,006 طلباً مقيساً). الآن الشموع تُقرأ من مخزن البث المجمّع (marketStreams.candles)
  * والكشف يُشغَّل على حدث إغلاق الشمعة. المفتاحان يسمحان بالعودة للمسار القديم عند الطوارئ.
@@ -1133,6 +1204,8 @@ const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder }) => {
     });
     zoneIdentityCollector.add(sample);
     shadowCompareIdentitySamples(sample);
+    // ★2 قياس: نفس الأزواج تُقاس عليها الشبكات المرشَّحة بلا كشف ثالث
+    shadowCompareCandidateIds(sample);
   }
   /**
    * محرك السيولة v2 — قياس ظل بالعيّنات: يُشغَّل على **نفس الشموع ونفس اللحظة** التي
@@ -1272,6 +1345,7 @@ const runLiquidityLiveRotation = async () => {
               });
               zoneIdentityCollector.add(sample);
               shadowCompareIdentitySamples(sample);
+              shadowCompareCandidateIds(sample);
             }
           } else {
             // المسار الحادث: قراءة من المخزن المجمّع بلا REST
@@ -1852,6 +1926,24 @@ const summarizeResults = (rows) => {
     decided: decided.length,
     wins,
     winRate: decided.length ? wins / decided.length : null,
+    /**
+     * الصافي بعد الرسوم والانزلاق بجانب الإجمالي: الفرق بين الرقمين هو أثر التكاليف
+     * الصريح على نتائج الباك تيست (كانت صفراً قبل الإصلاح). `win` لم يتغيّر — الحكم
+     * على السعر كما هو، والصافي معلومة إضافية.
+     */
+    ...(() => {
+      const withNet = decided.filter(t => Number.isFinite(Number(t.netRr)));
+      const netWins = withNet.filter(t => Number(t.netRr) > 0).length;
+      return {
+        netDecided: withNet.length,
+        netWins,
+        netWinRate: withNet.length ? netWins / withNet.length : null,
+        avgNetRr: withNet.length ? withNet.reduce((a, t) => a + Number(t.netRr), 0) / withNet.length : null,
+        avgCostR: withNet.length ? withNet.reduce((a, t) => a + (Number(t.costR) || 0), 0) / withNet.length : null,
+        feePct: Number(process.env.TRADE_FEE_PCT ?? 0.001),
+        slippagePct: Number(process.env.TRADE_SLIPPAGE_PCT ?? 0.0005)
+      };
+    })(),
     avgRR: rrRatios.length ? rrRatios.reduce((a, t) => a + t.rr, 0) / rrRatios.length : null,
     avgBars: decided.length ? decided.reduce((a, t) => a + (t.bars || 0), 0) / decided.length : null,
     perFrame: [...frames.entries()].map(([tf, m]) => ({ timeframe: tf, ...m })).sort((a, b) => a.timeframe.localeCompare(b.timeframe))
@@ -1860,7 +1952,18 @@ const summarizeResults = (rows) => {
 
 app.get('/api/backtest/results', handle(async (req, res) => {
   const run = backtestState.lastRun;
-  if (!run) return res.json({ exists: false, message: 'الحلقة المستمرة تعمل — بانتظار اكتمال أول دورة', custom: backtestState.customRun });
+  if (!run) {
+    return res.json({
+      exists: false,
+      message: 'الحلقة المستمرة تعمل — بانتظار اكتمال أول دورة',
+      /**
+       * إن كانت هناك دورة محفوظة قبل إعادة التشغيل تُعرض هنا بوسم `restored` صريح،
+       * فلا يظهر للمستخدم «لا يوجد شيء» بينما تاريخه موجود في المخزن الدائم.
+       */
+      restoredRun: backtestRestoredSummary,
+      custom: backtestState.customRun
+    });
+  }
   let rows = run.results ?? [];
   const coin = req.query.coin ? String(req.query.coin).toUpperCase() : undefined;
   const timeframe = req.query.timeframe ? String(req.query.timeframe) : undefined;
@@ -1878,6 +1981,22 @@ app.get('/api/backtest/results', handle(async (req, res) => {
     results: rows.slice(offset, offset + limit),
     summary: summarizeResults(rows),
     learn: run.learn ?? null,
+    /**
+     * آخر دورة محفوظة **قبل** إعادة التشغيل، بوسم صريح. لا تُخلط بنتائج الجلسة:
+     * الصفقات الكاملة لا تُحفظ (تضخّم)، فالمعروض منها عدد الأزواج والصفقات ونسبة
+     * الفوز وانحياز التعلّم — وهي ما يحتاجه من يسأل «ماذا كان تاريخي؟».
+     */
+    restoredRun: backtestRestoredSummary
+      ? {
+        restored: true,
+        lastRunAt: backtestRestoredSummary.lastRunAt ?? null,
+        pairs: backtestRestoredSummary.pairs ?? 0,
+        trades: backtestRestoredSummary.trades ?? 0,
+        wins: backtestRestoredSummary.wins ?? 0,
+        winRate: backtestRestoredSummary.winRate ?? null,
+        learn: backtestRestoredSummary.learn ?? null
+      }
+      : null,
     custom: backtestState.customRun
   });
 }));
@@ -2177,7 +2296,14 @@ const liveOppEngine = createLiveOpportunityEngine({
     calibration: {
       symbols: Number(process.env.LIVE_CALIB_SYMBOLS) || 48,
       bars: Number(process.env.LIVE_CALIB_BARS) || 1000,
-      concurrency: Number(process.env.LIVE_CALIB_CONC) || 2
+      concurrency: Number(process.env.LIVE_CALIB_CONC) || 2,
+      /**
+       * ★5: كل كم مهمة معايرة (رمز × فريم) تُعاد مقارنة معاملات المعايرة بمعاملات
+       * المحرك الحي على نفس السويبات. قياس فقط لا يُكتب في أي فرصة ولا صف محفوظ.
+       * 12 يعني قياساً واحداً كل 12 مهمة — كلفته إعادة محاكاة سويبات محمّلة في الذاكرة.
+       */
+      parityStride: Math.max(1, Number(process.env.LIVE_PARITY_STRIDE) || 12),
+      parityLimit: Math.max(1, Number(process.env.LIVE_PARITY_LIMIT) || 40)
     }
   },
   workers: workerPool,
@@ -2642,6 +2768,11 @@ const periodicDetection = async () => {
           });
         if (snap.zones.length || prevSnap.length) {
           await db.zones.appendAutoSnapshot(snap);
+          /**
+           * إبطال الجزء الآلي بعد الكتابة: بدونه تبقى القراءة تعرض لقطة قديمة حتى
+           * نافذة الكاش — والمراقب يعتمد على هذه اللقطة في إشعارات السحب.
+           */
+          invalidateAutoZonesCache();
           broadcast({ type: 'zones_changed', symbol: a.symbol });
           broadcast({ type: 'zones_auto_updated', symbol: a.symbol, added: snap.zones.length, removed: Math.max(0, prevSnap.length - snap.zones.length) });
           void changed;
@@ -2680,7 +2811,13 @@ const zoneNotify = new Map();
 setInterval(() => {
   void (async () => {
     try {
-      const zones = await db.zones.listAll();
+      /**
+       * الكاش لا `listAll`: هذا الفحص يعمل كل 30 ثانية، و`listAll` تجلب 5000 حدث
+       * مراجعة + 60 لقطة آلية + 1000 تغذية راجعة في كل مرة — أي أثقل جلب في النظام
+       * مقابل معلومة (معرّف/سعر/نوع/حدود صلاحية) موجودة في الذاكرة أصلاً، ونفس الكاش
+       * يخدم `/api/zones` ويُبطَل عند أي كتابة. بهذا لا يعود الجلب الثقيل إلا بعد تعديل.
+       */
+      const zones = await zonesCached();
       const now = Date.now();
       const live = zones.filter(z => z.active && z.feedback !== 'reject' && (!z.expires_at || z.expires_at > now));
       if (!live.length) return;
@@ -3175,15 +3312,50 @@ health.addSection('rateLimiter', () => { try { return runtime.rateLimiter?.() ??
  * مخزون المناطق في العيّنات: بلا هذا لا يُرى نمو الذاكرة إلا بعد موت الحاوية.
  * يُعرض كمّ المناطق وسقف كل مخزون ونسبة الاستهلاك.
  */
-health.addSection('zones', () => { try { return runtime.zones(); } catch { return null; } });
+health.addSection('zones', () => {
+  try {
+    /**
+     * مخزون المناطق + **عدّادات الجلب الفعلي** للكاش بطبقتيه: بند B2 كان «جلب أثقل
+     * بيانات في النظام كل 30 ثانية»، والدليل على إصلاحه ليس التعليق بل رقم الجلب.
+     */
+    return { ...runtime.zones(), cache: zonesCache.stats() };
+  } catch { return null; }
+});
 /**
  * دليل بقاء الحالة عبر إعادات التشغيل (تعلّم المراجعات + قياس ★) — يُسجَّل في العيّنات
  * حتى يُرى بعد كل نشر أن الحالة عادت فعلاً، لا أن تُفترض.
  */
-health.addSection('stateRestore', () => { try { return runtime.stateRestore?.() ?? null; } catch { return null; } });
+health.addSection('stateRestore', () => {
+  try {
+    /**
+     * استعادة الحالة + **قياس حفظ** ملخص المخزون وملخص الباك تيست في مكان واحد:
+     * السؤالان مترابطان (ما حُفظ يُسترجع، وما لم يُحفظ لا يُسترجع)، وفصلهما في قسمين
+     * يجعل من يقرأ الفحص عليه أن يربط بينهما بنفسه.
+     */
+    const restore = runtime.stateRestore?.() ?? null;
+    return {
+      ...(restore ?? {}),
+      inventorySave: inventorySaveInfo,
+      backtestSaved: backtestRestoredSummary
+        ? { lastRunAt: backtestRestoredSummary.lastRunAt ?? null, trades: backtestRestoredSummary.trades ?? 0, pairs: backtestRestoredSummary.pairs ?? 0 }
+        : null
+    };
+  } catch { return null; }
+});
 health.addSection('shadow', () => { try { return runtime.shadow?.() ?? null; } catch { return null; } });
 /** ★2 قياس: نسبة دوران هوية المنطقة تتراكم في العيّنات فيصير للقرار دليل رقمي */
-health.addSection('zoneIdentity', () => { try { return zoneIdentityCollector.summary(); } catch { return null; } });
+health.addSection('zoneIdentity', () => {
+  try {
+    /**
+     * ★2: يُضاف قياس المعرّف **المرشَّح** إلى جانب دوران المعرّف الحالي، فالمقارنة
+     * بين الرقمين هي الدليل: كم ينزل الدوران لو اعتُمد معرّف من محتوى المنطقة؟
+     * ولا شيء هنا مُفعَّل — المخزون والدمج والقرارات كما هي.
+     */
+    const current = zoneIdentityCollector.summary();
+    const candidate = zoneIdCandidateCollector.summary();
+    return { ...current, candidate, note: candidate.note };
+  } catch { return null; }
+});
 /**
  * محرك السيولة v2 — قسم الصحة: أرقام حقيقية مقيسة على عيّنات من نفس الشموع التي قرأها
  * المحرك الأول في نفس اللحظة. تُجيب على سؤال واحد: «هل يُنتج الجديد نفس ما ينتجه القديم؟»
@@ -3500,22 +3672,71 @@ const runStateRestore = async () => {
   const learning = await restoreLearning();
   const shadowReport = await shadow.loadDb(db);
   /**
+   * (المرحلة 6 الناقصة) استعادة مخزون المناطق وملخص آخر باك تيست:
+   * كان الاثنان في الذاكرة فقط فيعود التاريخ إلى الصفر مع كل نشرة، و`/api/backtest/results`
+   * يقول «لا يوجد» بعد دورة كاملة استغرقت دقائق من نداءات بينانس.
+   */
+  const inventory = await loadInventory(db);
+  const backtest = await loadBacktestRun(db);
+  /**
+   * الملخص يُعرض في حقله الخاص (`restoredRun`) ولا يُوضع في مكان دورة هذه الجلسة:
+   * لصق ملخص قديم في `lastRun` يجعل `/api/backtest/results` يقول «يوجد» ويعرض صفقات
+   * فارغة — عرض مضلّل. الفرق مصرَّح به: `restored: true` يعني «من قبل إعادة التشغيل».
+   */
+  if (backtest) backtestRestoredSummary = backtest;
+  /**
    * يُحفظ في متغير ثم يُعرض بدالة: واجهة `runtime` كلها دوال، وتخصيص قيمة مكانها
    * يجعل القراءة تفشل بصمت (كانت تُرجع null دائماً بلا أي أثر للاستعادة).
    */
   stateRestoreInfo = {
     at: Date.now(),
     learningRestored: learning.restored,
-    shadowRecords: shadowReport?.records?.length ?? 0
+    shadowRecords: shadowReport?.records?.length ?? 0,
+    inventory: inventory
+      ? { total: inventory.total ?? 0, symbols: inventory.symbols ?? 0, savedAt: inventory.savedAt ?? null }
+      : null,
+    backtest: backtest
+      ? { lastRunAt: backtest.lastRunAt ?? null, pairs: backtest.pairs ?? 0, trades: backtest.trades ?? 0, restored: true }
+      : null
   };
-  console.log(`[state] استعادة: مراجعات ${learning.restored}، مفاتيح ظل ${stateRestoreInfo.shadowRecords}`);
+  console.log(`[state] استعادة: مراجعات ${learning.restored}، مفاتيح ظل ${stateRestoreInfo.shadowRecords}، مخزون ${stateRestoreInfo.inventory?.total ?? 0} منطقة${stateRestoreInfo.backtest ? `، باك تيست ${stateRestoreInfo.backtest.trades} صفقة` : ''}`);
 };
 void runStateRestore();
+/**
+ * الحفظ الدوري: تقرير الظل + تعلّم المراجعات + **ملخص مخزون المناطق** + ملخص آخر
+ * باك تيست. مخزون المناطق يُحفظ في جدوله الخاص (10 دقائق) لأنه كيلوبايتات فقط ولا
+ * يحتاج وتيرة الظل.
+ */
 setInterval(() => {
   shadow.persist();
   void shadow.persistDb(db);
   void persistLearning();
+  void saveBacktestRun(db, backtestState.lastRun);
 }, 5 * 60 * 1000);
+
+const inventorySaver = startInventorySaver({
+  db,
+  snapshotFn: () => liquidityState.liveResults,
+  intervalMs: Math.max(60_000, Number(process.env.INVENTORY_SAVE_MS ?? 10 * 60_000)),
+  log: console,
+  /**
+   * يُقاس الحفظ بدل افتراضه: «صفر إخفاقات حفظ مستمرة» بند في معيار الجاهزية،
+   * ولا سبيل لمعرفته بلا عدّاد صريح في الفحص العميق.
+   */
+  onSaved: (info) => {
+    inventorySaveInfo = {
+      at: info.at,
+      ok: info.ok,
+      zones: info.zones,
+      symbols: info.symbols,
+      failures: (inventorySaveInfo?.failures ?? 0) + (info.ok ? 0 : 1),
+      saves: (inventorySaveInfo?.saves ?? 0) + (info.ok ? 1 : 0)
+    };
+  }
+});
+/** حفظ أول ملخص بعد دقيقتين من الإقلاع (لا نزاحم بدء التشغيل وموجات البذر) */
+const firstInventorySave = setTimeout(() => { void inventorySaver.run(); }, 120_000);
+if (firstInventorySave.unref) firstInventorySave.unref();
 
 // مزامنة تلقائية عند البدء إذا كانت فارغة أو متقادمة + بث فوري لأي جديد
 void (async () => {

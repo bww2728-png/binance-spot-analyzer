@@ -4,30 +4,46 @@
  * - Global Long/Short Account Ratio: انحياز التجزئة
  * - CVD: من عمود Taker Buy في شموع السبوت — بلا أي مصدر خارجي
  */
-import { createRateLimiter } from '../research.mjs';
+import { gate, reportRateLimit, sleep, RATE_WAIT_CAP_MS } from '../net/gate.mjs';
 
 const FAPI_HOSTS = ['https://fapi.binance.com', 'https://fapi1.binance.com'];
+
+/**
+ * إصلاح B6 (الجزء الناقص): كان لهذا المسار محدّد محلي بسيط — «طلب واحد كل 300ms»
+ * بلا دلو أوزان ولا أولويات ولا احترام Retry-After — فلم يكن منضبطاً أمام طلبات
+ * الخادم الأخرى (باك تيست، بحث، معايرة، محركات حية) على حدود الشبكة.
+ * الآن يمرّ بالمحدد الموحّد. الوزن 1 عن قصد: نقاط FAPI تستهلك وزنها الخاص (‎+40/د
+ * لكل نداء وزنٍ 1، وحدّها 2400/د)، وتُحسب هنا على ميزانية السبوت كتحفّظ إضافي —
+ * أي أن السقف الفعلي أقل من المسموح، لا أكثر.
+ */
+const FAPI_WEIGHT = 1;
 
 async function fetchFapiJson(path, timeoutMs = 12000) {
   let lastErr;
   for (const host of FAPI_HOSTS) {
-    try {
-      const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!res.ok) { lastErr = new Error(`HTTP ${res.status} from ${host}`); continue; }
-      return await res.json();
-    } catch (e) {
-      lastErr = e;
+    for (let attempt = 0; attempt <= 1; attempt += 1) {
+      await gate('calibration', FAPI_WEIGHT);
+      try {
+        const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) {
+          lastErr = new Error(`HTTP ${res.status} from ${host}`);
+          if (res.status === 429 || res.status === 418) {
+            const retryAfter = Number(res.headers.get('retry-after'));
+            const declared = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
+            reportRateLimit(res.status, declared);
+            const waitMs = Math.min(declared || 20_000, RATE_WAIT_CAP_MS);
+            if (attempt === 0 && waitMs > 0) { await sleep(waitMs); continue; }
+          }
+          break; // خطأ غير متعلق بالمعدل، أو استُهلكت محاولة الإعادة: المضيف التالي
+        }
+        return await res.json();
+      } catch (e) { lastErr = e; break; }
     }
   }
   throw lastErr ?? new Error('all fapi hosts failed');
 }
 
-const fapiLimiter = createRateLimiter(300);
-
-const fapiLimited = async (path) => {
-  await fapiLimiter.acquire();
-  return fetchFapiJson(path);
-};
+const fapiLimited = async (path) => fetchFapiJson(path);
 
 /** تغير الفائدة المفتوحة: آخر قراءة مقابل ما قبل lookback قراءات (%) */
 export async function oiChange(symbol, { period = '1h', limit = 25, lookback = 24 } = {}) {

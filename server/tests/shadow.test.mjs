@@ -10,7 +10,12 @@ import { createShadow, SHADOW_FIXES } from '../services/shadow.mjs';
 
 test('كل الإصلاحات ★ معروفة ولها وصف عربي واضح', () => {
   const keys = Object.keys(SHADOW_FIXES);
-  assert.equal(keys.length, 6, 'ستة إصلاحات ★ كما في الخطة');
+  /**
+   * السبعة: الستة الأصلية + `zone-id-candidate` (قياس المعرّف المرشَّح من محتوى
+   * المنطقة لعدة شبكات). إضافة مفتاح جديد مقصودة ولا يغيّر سلوكاً: كل مفتاح هنا
+   * قياس-فقط، وشرط التفعيل يبقى موافقتك الصريحة بعد عرض الدليل.
+   */
+  assert.equal(keys.length, 7, 'سبعة إصلاحات ★: الستة الأصلية + قياس المعرّف المرشَّح');
   for (const [k, v] of Object.entries(SHADOW_FIXES)) {
     assert.ok(k && typeof k === 'string');
     assert.ok(v && v.length > 5, `وصف ${k} موجود`);

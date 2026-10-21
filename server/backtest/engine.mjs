@@ -103,30 +103,48 @@ export function findTouch(candles, from, to, zone, bandPct = 0.0025) {
   return null;
 }
 
+/**
+ * تكاليف التنفيذ في الباك تيست — **للصافي فقط، بلا أي أثر على الشروط**:
+ * نفس معاملتَي المعايرة الحية (`TRADE_FEE_PCT` و`TRADE_SLIPPAGE_PCT`) حتى لا يُقارَن
+ * رقمان محسوبان بمعيارين مختلفين. قبل هذا كان الباك تيست بلا رسوم ولا انزلاق إطلاقاً،
+ * فتظهر نسب نجاح لا يمكن تحقيقها على الحساب الحقيقي.
+ */
+const FEE_PCT_DEFAULT = Number(process.env.TRADE_FEE_PCT ?? 0.001);
+const SLIPPAGE_PCT_DEFAULT = Number(process.env.TRADE_SLIPPAGE_PCT ?? 0.0005);
+
 /** محاكاة صفقة من اللمس: أي جانب يلمس أولاً (هدف أو وقف) — walk-forward صارم (بلا إعادة إدخال).
  *  وقف الخسارة: منطق النظام الحالي حرفياً — المستوى المحمي ± bandPct. صفر تعديل. */
-export function simulateZone(candles, touchIdx, zone, { protectedPrice, targets = [], bandPct = 0.0025, maxBars = 96, capital = 10000 }) {
+export function simulateZone(candles, touchIdx, zone, { protectedPrice, targets = [], bandPct = 0.0025, maxBars = 96, capital = 10000, feePct = FEE_PCT_DEFAULT, slippagePct = SLIPPAGE_PCT_DEFAULT }) {
   const entry = candles[touchIdx].close; // الدخول على إغلاق شمعة اللمس (المعيار المنشور)
   const plan = buildPlan({ zoneType: zone.type, entry, protectedPrice, bandPct, targets });
   const check = checkPlan({ plan, protectedPrice, zoneType: zone.type });
   if (!check.ok || !plan.tp) return null;
   const long = zone.type === 'BSL';
+  /**
+   * الصافي بالمضاعف R بعملة المخاطرة: التكلفة المئوية تُحوَّل إلى R بقسمتها على المخاطرة
+   * المئوية، فصفقة مخاطرتها 1% وتكلفتها 0.25% تفقد 0.25R. `win` يبقى كما هو حرفياً
+   * (يقرره السعر لا التكاليف)، والصافي يحمل أثر الرسوم والانزلاق بشكل صريح.
+   */
+  const tradeCostPct = Number(feePct) * 2 + Number(slippagePct);
+  const riskPct = Math.abs(entry - plan.stop) / Math.max(Math.abs(entry), 1e-12);
+  const costR = riskPct > 0 ? tradeCostPct / riskPct : 0;
+  const netOf = (gross) => Number((gross - costR).toFixed(3));
   for (let i = touchIdx + 1; i < Math.min(touchIdx + maxBars, candles.length); i += 1) {
     const c = candles[i];
     const hitStop = long ? c.low <= plan.stop : c.high >= plan.stop;
     const hitTp = long ? c.high >= plan.tp : c.low <= plan.tp;
     if (hitStop && hitTp) {
       // الشمعة أمسكت الاثنين — الافتتاح يحدد الجانب القريب (المعيار المتحفظ)
-      return { win: 0, ts: c.time, exit: plan.stop, bars: i - touchIdx, rr: plan.rr };
+      return { win: 0, ts: c.time, exit: plan.stop, bars: i - touchIdx, rr: plan.rr, netRr: netOf(-1), tradeCostPct, costR: Number(costR.toFixed(4)) };
     }
-    if (hitStop) return { win: 0, ts: c.time, exit: plan.stop, bars: i - touchIdx, rr: plan.rr };
-    if (hitTp) return { win: 1, ts: c.time, exit: plan.tp, bars: i - touchIdx, rr: plan.rr };
+    if (hitStop) return { win: 0, ts: c.time, exit: plan.stop, bars: i - touchIdx, rr: plan.rr, netRr: netOf(-1), tradeCostPct, costR: Number(costR.toFixed(4)) };
+    if (hitTp) return { win: 1, ts: c.time, exit: plan.tp, bars: i - touchIdx, rr: plan.rr, netRr: netOf(plan.rr), tradeCostPct, costR: Number(costR.toFixed(4)) };
   }
-  return { win: undefined, ts: candles[candles.length - 1].time, exit: candles[candles.length - 1].close, bars: maxBars, undecided: true, rr: plan.rr };
+  return { win: undefined, ts: candles[candles.length - 1].time, exit: candles[candles.length - 1].close, bars: maxBars, undecided: true, rr: plan.rr, netRr: null, tradeCostPct, costR: Number(costR.toFixed(4)) };
 }
 
 /** باك تيست لزوج (رمز، فريم): لحظات كشف يومية → لمس → محاكاة — trades كامل مع الأدوات. */
-export async function runPairBacktest(db, { symbol, timeframe, calibration = {}, bars = 3000, capital = 10000, capitalF = 0.01, pWinFallback = 0.5, startTime, endTime, maxPages }) {
+export async function runPairBacktest(db, { symbol, timeframe, calibration = {}, bars = 3000, capital = 10000, capitalF = 0.01, pWinFallback = 0.5, startTime, endTime, maxPages, feePct = FEE_PCT_DEFAULT, slippagePct = SLIPPAGE_PCT_DEFAULT }) {
   const opts = { startTime, endTime };
   if (maxPages) opts.maxPages = maxPages;
   const raw = await loadKlinesPaginated(db, symbol, timeframe, bars, opts);
@@ -158,7 +176,7 @@ export async function runPairBacktest(db, { symbol, timeframe, calibration = {},
         zone.type === 'BSL' ? zone.price + 2 * risk0 : zone.price - 2 * risk0,
         ...(structural != null ? [structural] : [])
       ];
-      const sim = simulateZone(candles, touchIdx, zone, { protectedPrice, targets, bandPct: zone.bandPct ?? 0.0025, capital });
+      const sim = simulateZone(candles, touchIdx, zone, { protectedPrice, targets, bandPct: zone.bandPct ?? 0.0025, capital, feePct, slippagePct });
       if (!sim) continue;
       // أدوات المخاطر (إرشادية — العرض فقط): kelly + حجم مقترح
       const pWin = pWinFallback;
@@ -188,13 +206,41 @@ export async function runPairBacktest(db, { symbol, timeframe, calibration = {},
         bars: sim.bars,
         undecided: Boolean(sim.undecided),
         rr,
+        /**
+         * الصافي بعد الرسوم والانزلاق (إصلاح B8 الموسَّع): يُضاف لكل صفقة بجانب `rr`
+         * الخام. لا يُستخدم في التعلم ولا في أي بوابة — قياس وعرض فقط، لأن حكم
+         * الاستراتيجية يبقى على السعر (`win`).
+         */
+        netRr: sim.netRr ?? null,
+        tradeCostPct: sim.tradeCostPct ?? null,
         kelly: Number(kelly.toFixed(3)),
         fF: Number(fF.toFixed(4)),
         units: Number(units.toFixed(4))
       });
     }
   }
-  return { symbol, timeframe, trades };
+  return { symbol, timeframe, trades, netSummary: summarizeNet(trades) };
+}
+
+/**
+ * ملخص صافٍ لصفقات زوج: عدد المُحسَمة، ونسبة الرابح **صافياً**، ومتوسط R الصافي.
+ * الصفقات المعلَّقة (بلا حسم) مستبعدة صراحةً حتى لا يُخفّف رقم غير محسوم النسبة.
+ */
+export function summarizeNet(trades = []) {
+  const decided = trades.filter(t => t && (t.win === 0 || t.win === 1) && Number.isFinite(Number(t.netRr)));
+  if (!decided.length) return { trades: 0, wins: 0, winRate: null, netWinRate: null, avgNetRr: null, avgCostR: null };
+  const wins = decided.filter(t => t.win === 1).length;
+  const netWins = decided.filter(t => Number(t.netRr) > 0).length;
+  const netSum = decided.reduce((a, t) => a + Number(t.netRr), 0);
+  const costSum = decided.reduce((a, t) => a + (Number(t.costR) || 0), 0);
+  return {
+    trades: decided.length,
+    wins,
+    winRate: Number((wins / decided.length).toFixed(4)),
+    netWinRate: Number((netWins / decided.length).toFixed(4)),
+    avgNetRr: Number((netSum / decided.length).toFixed(3)),
+    avgCostR: Number((costSum / decided.length).toFixed(3))
+  };
 }
 
 /** باك تيست جمعي (رمز × فريم) — مجدول تدريجي حتى لا يُخنق API. */

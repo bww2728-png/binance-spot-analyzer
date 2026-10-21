@@ -21,7 +21,8 @@ export const SHADOW_FIXES = {
   'segments-decided-only': 'إحصاء الشرائح يُحدّث عند حسم الفرصة فقط',
   'scanhistory-swept-transition': 'تسجيل انتقال المنطقة إلى «مسحوبة» في فحص التاريخ',
   'fabio-expiry-and-hilo': 'انتهاء فرصة Fabio بعد 96 شمعة + النتيجة من أعلى/أدنى الشمعة',
-  'calibration-live-parity': 'تقرير فرق المعايرة عن الحي (قياس فقط)'
+  'calibration-live-parity': 'تقرير فرق المعايرة عن الحي (قياس فقط)',
+  'zone-id-candidate': 'معرّف مرشَّح من محتوى المنطقة: قياس الدوران لعدة شبكات (قياس فقط)'
 };
 
 export function createShadow({ dir = null, log = console } = {}) {

@@ -1,6 +1,7 @@
 /* الطبقة 3: دفتر الأوامر مبسط + خريطة التصفيات التقديرية
  * كل الدوال التحليلية حتمية وقابلة للاختبار بدون شبكة؛ نداءات الشبكة معزولة في النهاية.
  */
+import { gate, reportRateLimit, sleep, weightOf, RATE_WAIT_CAP_MS } from '../net/gate.mjs';
 
 /** عدم توازن الدفتر: مجموع الكميات ضمن ±0.5% من السعر الأوسط (bids/asks = [price, qty]) */
 export function bookImbalance(bids, asks, bandPct = 0.005) {
@@ -128,14 +129,34 @@ export function nearestLiqCluster(price, clusters, withinPct = 0.007) {
 /* ---- نداءات الشبكة (معزولة) ---- */
 const SPOT_HOSTS = ['https://data-api.binance.vision', 'https://api1.binance.com'];
 
+/**
+ * إصلاح B6 (الجزء الناقص): هذا المسار كان **الوحيد بلا أي تنظيم معدل** — كل نداء
+ * عمق/صفقات يذهب مباشرة، مع أن دفتر الأوامر أخفّ مسارات النظام تسامحاً مع الحجب
+ * (وزن المسار 5 و2 لكل نداء، ومحرك السيولة يطلبه لكل رمز في كل دورة). صار يمرّ
+ * بالمحدد الموحّد بأولوية «حي»، ويُبلّغ عند 429/418، ويُعيد المحاولة على **نفس
+ * المضيف** بعد انتظار محدود بدل تبديل المضيف الذي يكرّر المخالفة من العنوان نفسه.
+ */
 async function fetchSpotJson(path, timeoutMs = 10000) {
   let lastErr;
   for (const host of SPOT_HOSTS) {
-    try {
-      const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!res.ok) { lastErr = new Error(`HTTP ${res.status} from ${host}`); continue; }
-      return await res.json();
-    } catch (e) { lastErr = e; }
+    for (let attempt = 0; attempt <= 1; attempt += 1) {
+      await gate('live', weightOf(path));
+      try {
+        const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) {
+          lastErr = new Error(`HTTP ${res.status} from ${host}`);
+          if (res.status === 429 || res.status === 418) {
+            const retryAfter = Number(res.headers.get('retry-after'));
+            const declared = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
+            reportRateLimit(res.status, declared);
+            const waitMs = Math.min(declared || 20_000, RATE_WAIT_CAP_MS);
+            if (attempt === 0 && waitMs > 0) { await sleep(waitMs); continue; }
+          }
+          break; // خطأ غير متعلق بالمعدل، أو استُهلكت محاولة الإعادة: المضيف التالي
+        }
+        return await res.json();
+      } catch (e) { lastErr = e; break; }
+    }
   }
   throw lastErr ?? new Error('all spot hosts failed');
 }

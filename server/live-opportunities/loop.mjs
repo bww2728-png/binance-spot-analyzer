@@ -22,7 +22,7 @@ import {
 import {
   buildLongPlan, calibrateSweeps, compositeScore, confBand, flowScore, gates,
   longTargets, nextSslBelow, segmentLookupKeys, summarizeSegments, buildDecisionSnapshot,
-  rankBatch
+  rankBatch, sweepModeParity
 } from './scanner.mjs';
 import { toLifecycleRow, rehydrateState } from './lifecycle.mjs';
 import { buildSegmentShadowReport, countDecidedOnce } from '../services/segmentShadow.mjs';
@@ -64,8 +64,16 @@ const DEFAULT_CONFIG = {
     concurrency: 4,
     minDepthAtr: 0.15, maxDepthAtr: 3, maxRangePos: 0.8, minBuyRatioPct: 48,
     requireSessionPrime: false,
-    // تكاليف التداول للبحث الصادق (عقيدة §15): افتراضي 0 (قرارات حية بلا تغيير) — تُضبط في أبحاث OOS
-    feePct: 0, slippagePct: 0,
+    /**
+     * تكاليف التداول للبحث الصادق (عقيدة §15 + القرار المعتمد في خطة الإصلاح):
+     * 0.1% رسوم في كل اتجاه (0.2% للصفقة) + 0.05% انزلاق سعري.
+     * تُخصم من **النتيجة الصافية** (`netRr`) في المعايرة والباك تيست فقط، ولا تمس
+     * أي شرط دخول أو خروج أو هدف أو وقف: الفرصة المنشورة وشروطها تبقى كما هي حرفياً.
+     * كانت 0 افتراضياً، فكانت نسب النجاح المعروضة بلا أي تكلفة تنفيذ — وهو ما يجعل
+     * الرقم غير قابل للتحقق على الحساب الحقيقي. قابلة للتجاوز للبحث خارج العيّنة.
+     */
+    feePct: Number(process.env.TRADE_FEE_PCT ?? 0.001),
+    slippagePct: Number(process.env.TRADE_SLIPPAGE_PCT ?? 0.0005),
     // شبكة أهداف R:R: النسبة تعتمد جوهرياً على بُعد الهدف، والشرائح تختار الأنسب
     rrGrid: [1.0, 1.2, 1.5, 2, 2.5],
     // نافذة الاستعادة أوسع (12 شمعة): 6 شموع ترفض معظم السويبات فيقلّ حجم العيّنة كثيراً
@@ -689,6 +697,14 @@ export function createLiveOpportunityEngine(deps) {
     }
   }
 
+  /**
+   * ★5 — جامع قياس فرق المعايرة عن الحي: قياس فقط، لا يُكتب في أي فرصة ولا صف محفوظ
+   * ولا يُغيّر أي نشر. الغرض إظهار «نسب النجاح المعروضة تقيس غير ما يُنشر» بالأرقام.
+   * العدّاد يحمل اختلافاً واحداً لكل (رمز، فريم) في كل تشغيل معايرة، وبمعدّل ثابت
+   * لا عشوائي.
+   */
+  const parityCollector = { pairs: [], compared: 0, diffs: 0, runs: 0, frames: 0 };
+
   /** دورة واحدة كاملة */
   let lastTargets = null;
   async function runCycle() {
@@ -912,6 +928,62 @@ export function createLiveOpportunityEngine(deps) {
             });
             all.push(...trades);
             for (const [k, n] of Object.entries(rej)) rejectedTotals[k] = (rejectedTotals[k] ?? 0) + n;
+
+            /**
+             * ★5 — قياس فرق المعايرة عن الحي على نفس السويبات (قياس فقط).
+             *
+             * يُقيَّد بمعدّل ثابت (كل مهمة `parityStride`، افتراضياً 12) لا عشوائي:
+             * التكلفة إعادة محاكاة سويبات SSL لنفس البيانات، وهي محسوبة أصلاً في
+             * الذاكرة. النتيجة تذهب إلى `shadow` وحده: لا فرصة، ولا صف محفوظ، ولا
+             * شريحة معايرة، ولا قرار منشور يتغيّر بها.
+             */
+            calibration.parityIndex = (calibration.parityIndex ?? 0) + 1;
+            if (calibration.parityIndex % (cfg.calibration.parityStride ?? 12) === 0) {
+              try {
+                const parity = sweepModeParity({
+                  candles, zones, timeframe: tf, raw,
+                  bandPct: cfg.bandPct, maxBars: cfg.maxBars, minRR: cfg.minRR,
+                  maxStopAtr: cfg.maxStopAtr, minDepthAtr: cfg.calibration.minDepthAtr,
+                  maxDepthAtr: cfg.calibration.maxDepthAtr, maxRangePos: cfg.calibration.maxRangePos,
+                  minBuyRatioPct: cfg.calibration.minBuyRatioPct,
+                  sessionTierOf: (tsSec) => sessionFactor(Number(tsSec) * 1000).tier,
+                  requireSessionPrime: cfg.calibration.requireSessionPrime,
+                  published: {
+                    entryMode: 'retest',
+                    retestTolAtr: cfg.calibration.retestTolAtr,
+                    retestWindow: cfg.calibration.retestWindow,
+                    maxReclaimBars: cfg.calibration.maxReclaimBars
+                  },
+                  /**
+                   * الطرف الحي: نافذة الاستعادة الفعلية من إعدادات المحرك الحي
+                   * (`reclaimWindowBars`، افتراضياً 3) ودخول على الاستعادة — أي
+                   * المعاملات التي تُنتج الفرص المنشورة فعلاً.
+                   */
+                  live: {
+                    entryMode: 'close',
+                    retestTolAtr: cfg.calibration.retestTolAtr,
+                    retestWindow: cfg.reclaimWindowBars,
+                    maxReclaimBars: cfg.maxReclaimBars
+                  },
+                  limit: cfg.calibration.parityLimit ?? 40
+                });
+                parityCollector.runs += 1;
+                parityCollector.frames += 1;
+                parityCollector.compared += parity.compared;
+                parityCollector.diffs += parity.diffs;
+                parityCollector.pairs.push(...parity.pairs.slice(0, 6));
+                if (parityCollector.pairs.length > 60) parityCollector.pairs.splice(0, parityCollector.pairs.length - 60);
+                for (const row of parity.pairs.slice(0, 4)) {
+                  shadow?.compare(
+                    'calibration-live-parity',
+                    { outcome: row.published.outcome, win: row.published.win, netRr: row.published.netRr },
+                    { outcome: row.live.outcome, win: row.live.win, netRr: row.live.netRr },
+                    (a, b) => a?.outcome === b?.outcome && a?.win === b?.win,
+                    { symbol, timeframe: tf, sweepAt: row.sweepAt, publishedWindow: cfg.calibration.retestWindow, liveWindow: cfg.reclaimWindowBars }
+                  );
+                }
+              } catch { /* القياس لا يُسقط المعايرة أبداً */ }
+            }
           }
         } catch { /* زوج/فريم فاشل لا يوقف المعايرة */ }
         calibration.progress.done += 1;
@@ -1084,7 +1156,21 @@ export function createLiveOpportunityEngine(deps) {
     return {
       at: calibration.at, busy: calibration.busy, trades: calibration.trades,
       progress: calibration.progress, segments: calibration.segments,
-      targetWinRate: cfg.targetWinRate, minSegmentTrades: cfg.minSegmentTrades
+      targetWinRate: cfg.targetWinRate, minSegmentTrades: cfg.minSegmentTrades,
+      /**
+       * ★5: الفرق المقيس بين معاملات المعايرة ومعاملات المحرك الحي على نفس السويبات.
+       * عرض وقياس فقط — لا يُقرأ في أي قرار، ولا يغيّر أي شريحة أو نشر.
+       */
+      parity: {
+        compared: parityCollector.compared,
+        diffs: parityCollector.diffs,
+        diffRate: parityCollector.compared ? Number((parityCollector.diffs / parityCollector.compared).toFixed(4)) : null,
+        frames: parityCollector.frames,
+        runs: parityCollector.runs,
+        publishedWindow: cfg.calibration.retestWindow,
+        liveWindow: cfg.reclaimWindowBars,
+        samples: parityCollector.pairs.slice(-6)
+      }
     };
   }
 
