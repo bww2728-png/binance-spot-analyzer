@@ -24,23 +24,33 @@ const SAMPLER_MS = 5 * 60 * 1000;
  * نص ⇒ يُقصّ إلى 240 حرفاً؛ والكائنات تُعبر حتى عمق 4. البنية تبقى كما هي، فلا
  * ينكسر أي مستهلك يتوقّع مفتاحاً (`zones.live.count` مثلاً يبقى).
  */
-export function compactSample(input, { maxDepth = 4, maxString = 240, maxPrimArray = 20 } = {}) {
-  const walk = (v, depth) => {
+export function compactSample(input, { maxDepth = 4, maxString = 240, maxPrimArray = 20, maxObjectArray = 8 } = {}) {
+  const walk = (v, depth, inHead = false) => {
     if (v === null || v === undefined) return v;
     if (typeof v === 'string') return v.length > maxString ? `${v.slice(0, maxString)}…` : v;
     if (typeof v === 'number' || typeof v === 'boolean') return v;
     if (Array.isArray(v)) {
       const primitivesOnly = v.every(x => x === null || ['string', 'number', 'boolean'].includes(typeof x));
       if (primitivesOnly) return v.length > maxPrimArray ? { n: v.length, head: v.slice(0, maxPrimArray) } : v;
-      return { n: v.length };
+      /**
+       * مصفوفة كائنات: **لا تُسقط إلى عدّاد فقط**. كان ذلك يُخفي تشخيصاً أساسياً —
+       * اكشفته عيّنة إنتاجية حقيقية بعد النشر: `engines` (أهم قسم في العيّنة: دورات
+       * كل محرك وإخفاقاته وتوقفه) صار `{n:8}` أي 7 بايت بدل تفاصيل المحركات الثمانية.
+       * لذلك يُحفظ رأس محدود منها كاملاً (يكفي المحركات والأمثلة القليلة)، والقوائم
+       * الطويلة (مثل `liquidityV2.recent` بمئات المناطق) يُحفظ رأسها ويُذكر طولها.
+       * وداخل عناصر الرأس تُسقط المصفوفات إلى عدّاد (منع التفخيم المتداخل).
+       */
+      if (inHead) return { n: v.length };
+      const head = v.slice(0, maxObjectArray).map(x => walk(x, depth + 1, true));
+      return { n: v.length, head };
     }
     if (typeof v !== 'object') return String(v).slice(0, maxString);
     if (depth >= maxDepth) return { keys: Object.keys(v).slice(0, 12) };
     const out = {};
-    for (const [k, val] of Object.entries(v)) out[k] = walk(val, depth + 1);
+    for (const [k, val] of Object.entries(v)) out[k] = walk(val, depth + 1, inHead);
     return out;
   };
-  return walk(input, 0);
+  return walk(input, 0, false);
 }
 
 /**

@@ -46,6 +46,37 @@ test('O1: المصفوفات تُستبدل بعدّاد عند الحفظ (ال
   assert.equal(compacted.shadow.records.n, 60);
 });
 
+/**
+ * عيب اكتُشف في الإنتاج **بعد النشر**: الضغط كان يُسقط مصفوفة الكائنات إلى عدّاد
+ * وحده، فصار قسم `engines` (أهم قسم تشخيصي: دورات كل محرك وإخفاقاته وتوقفه) `{n:8}`
+ * أي 7 بايت بلا أي معلومة. القاعدة الصحيحة: رأس محدود يُحفظ كاملاً، والطول يُذكر.
+ */
+test('O1-أ: مصفوفة المحركات تُحفظ بتفاصيلها (لا {n} بلا معلومة)', () => {
+  const engines = [
+    { name: 'liquidity-zones', cycles: 14428, failures: 0, stalled: false, lastError: null },
+    { name: 'retention', cycles: 1, failures: 0, stalled: false, lastError: null }
+  ];
+  const compacted = compactSample({ engines });
+  assert.equal(Array.isArray(compacted.engines.head), true, 'رأس المصفوفة محفوظ');
+  assert.equal(compacted.engines.n, 2);
+  assert.equal(compacted.engines.head[0].name, 'liquidity-zones', 'اسم المحرك محفوظ');
+  assert.equal(compacted.engines.head[0].cycles, 14428, 'عدد الدورات محفوظ');
+});
+
+test('O1-ب: المصفوفة الطويلة تُقصّ في الرأس مع ذكر الطول الكامل', () => {
+  const zones = Array.from({ length: 200 }, (_, i) => ({ id: `z${i}`, state: 'confirmed' }));
+  const compacted = compactSample({ liquidityV2: { recent: zones } });
+  assert.equal(compacted.liquidityV2.recent.n, 200, 'الطول الكامل مذكور');
+  assert.equal(compacted.liquidityV2.recent.head.length, 8, 'رأس محدود فقط');
+  assert.equal(compacted.liquidityV2.recent.head[0].state, 'confirmed', 'وتفاصيله محفوظة');
+});
+
+test('O1-ج: المصفوفات المتداخلة داخل الرأس تُسقط إلى عدّاد (منع التفخيم)', () => {
+  const compacted = compactSample({ rows: [{ id: 'a', deep: [{ x: 1 }, { x: 2 }, { x: 3 }] }] });
+  assert.equal(compacted.rows.head[0].deep.n, 3, 'الطول محفوظ');
+  assert.equal(compacted.rows.head[0].deep.head, undefined, 'ولا تُوسَّع القائمة المتداخلة');
+});
+
 test('O1: الأرقام والبنية تبقى كما هي (لا ينكسر أي مستهلك يتوقّع مفتاحاً)', () => {
   const compacted = compactSample(makeSample());
   assert.equal(compacted.loop.p99Ms, 1229, 'المقياس الحاسم يُحفظ كما هو');

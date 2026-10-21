@@ -3660,7 +3660,13 @@ health.addSection('storage', () => {
       types: storageState.types,
       samples: storageState.samples ?? null,
       calibrationRows: storageState.historyRows,
-      sampleBytes: (() => { try { return health.snapshot()?.persist ?? null; } catch { return null; } })(),
+      /** حجم آخر عيّنة قبل الضغط وبعده — دليل مقيس لأثر التقليم على السعة */
+      sampleBytes: (() => {
+        try {
+          const p = health.snapshot()?.persist ?? {};
+          return { full: p.sampleBytesFull ?? null, saved: p.sampleBytesSaved ?? null };
+        } catch { return null; }
+      })(),
       lastRetention: r ? { at: r.at ?? null, ms: r.ms ?? null, deleted: r.extra?.deleted ?? null, errors: r.extra?.errors ?? null } : null,
       policy: {
         diagnosticDays: Number(process.env.RETENTION_DIAGNOSTIC_DAYS ?? 7),
