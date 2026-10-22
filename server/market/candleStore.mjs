@@ -106,7 +106,16 @@ export function createCandleStore({ capacity = 400, log = console } = {}) {
         curOpenTime: null,
         curIdx: -1,
         volInt: 0,
-        takerInt: 0
+        takerInt: 0,
+        /**
+         * إصدار المفتاح: يزيد مع كل كتابة (بذرة أو شمعة).
+         * الغرض: كاش تطبيع الشموع (`normalizeCandles`) يحتاج إبطالاً **دقيقاً**.
+         * الاعتماد على (الحجم + زمن آخر شمعة) لا يكفي لأن المخزن حلقة دائرية: عند
+         * الامتلاء يُكتب فوق الأقدم فيبقى الحجم ثابتاً وزمن آخر شمعة يتقدّم — لكن
+         * المقارنة من لقطة إلى أخرى تحتاج يقيناً بأن المحتوى لم يتغيّر. الإصدار يعطي
+         * هذا اليقين بلا أي احتمال قراءة محتوى قديم.
+         */
+        rev: 0
       };
       store.set(key, rec);
       const cut = key.indexOf('|');
@@ -134,6 +143,7 @@ export function createCandleStore({ capacity = 400, log = console } = {}) {
 
   /** إضافة شمعة جديدة في نهاية الحلقة (استبدال الأقدم عند الامتلاء) — تُعيد مؤشرها */
   function pushBar(rec, openTime, open, high, low, close, volume, taker, closeTime) {
+    rec.rev = (rec.rev + 1) % 1_000_000;
     let idx;
     if (rec.size < cap) {
       idx = rec.size;
@@ -191,6 +201,8 @@ export function createCandleStore({ capacity = 400, log = console } = {}) {
     rec.curIdx = -1;
     rec.volInt = 0;
     rec.takerInt = 0;
+    // إعادة البذر تُغيّر المحتوى كله ⇒ الكاش المبني على الشموع القديمة يُبطل
+    rec.rev = (rec.rev + 1) % 1_000_000;
 
     // استخراج الصفوف الصالحة أولاً ثم الاحتفاظ بأحدث capacity منها (بترتيب تصاعدي)
     const valid = [];
@@ -277,6 +289,8 @@ export function createCandleStore({ capacity = 400, log = console } = {}) {
         rec.takerInt += Math.round(tk * Q);
         d[s + F_VOLUME] = rec.volInt / Q;
         d[s + F_TAKER] = rec.takerInt / Q;
+        // تعديل الشمعة الجارية يغيّر المحتوى (سعر الإغلاق والحجم) ⇒ الكاش يُبطل
+        rec.rev = (rec.rev + 1) % 1_000_000;
         continue;
       }
 
@@ -365,6 +379,23 @@ export function createCandleStore({ capacity = 400, log = console } = {}) {
     return { data: rec.data, size: rec.size };
   }
 
+  /**
+   * إصدار محتوى المفتاح: يزيد مع كل كتابة (بذرة، شمعة جديدة، أو تحديث الشمعة الجارية).
+   *
+   * الغرض: كاش تطبيع الشموع في طبقة السيولة. القياس الإنتاجي أثبت الحاجة: GC يعمل
+   * **43 مرة في الثانية** و18% من زمن النواة الواحدة، لأن كل نداء كشف يبني ~800
+   * مصفوفة/كائن (401 مصفوفة صفوف من المخزن + 400 كائن تطبيع + مصفوفات ATR) — و6,006
+   * مفتاحاً في الدورة تعني ملايين التخصيصات. الإصدار يجعل الإبطال دقيقاً: الكاش يبقى
+   * صالحاً ما لم يتغيّر المحتوى فعلاً، فتُوفّر التخصيصات بلا أي احتمال محتوى قديم.
+   */
+  function rev(symbol, tf) {
+    const sym = normSymbol(symbol);
+    const frame = normTf(tf);
+    if (!sym || !frame) return -1;
+    const rec = store.get(`${sym}|${frame}`);
+    return rec ? rec.rev : -1;
+  }
+
   /** هل المفتاح مبذور؟ */
   function has(symbol, tf) {
     const sym = normSymbol(symbol);
@@ -423,5 +454,5 @@ export function createCandleStore({ capacity = 400, log = console } = {}) {
     };
   }
 
-  return { seed, apply1m, getRows, getCandles, buffer, has, size, lastOpen, deleteSymbol, stats };
+  return { seed, apply1m, getRows, getCandles, buffer, rev, has, size, lastOpen, deleteSymbol, stats };
 }

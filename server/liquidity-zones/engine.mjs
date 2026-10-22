@@ -17,6 +17,59 @@ const median = (xs) => {
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 };
 
+/**
+ * كاش الائتلاف البصري — الدالة `detectVisualZones` حتمية ونقية (نفس المدخلات ⇒ نفس
+ * المخرج بالضبط)، وهي **95% من كلفة الكشف** بالقياس: 9.71ms من 10.2ms لكل مفتاح على
+ * 400 شمعة. ودورة كاملة (6,006 مفتاحاً) تعني ~61 ثانية من المعالج، على نواة واحدة
+ * تشترك فيها الحلقة والعامل والـHTTP — وهذا هو مصدر تأخّر الحلقة وتجمّدات الجامع
+ * (43 دورة GC في الثانية، 18% من الزمن).
+ *
+ * الأمان: المفتاح هو **هوية مصفوفة الشموع نفسها** (`WeakMap`) + `end` + بصمة
+ * `biasPerKind`. ومصدّر الشموع في الخادم يعيد **نفس المصفوفة** ما لم يتغيّر محتوى
+ * المخزن (بإصدار دقيق)، فالمدخل عند الإصابة مطابق حرفياً وليس مشابهاً. وإن وصلت
+ * مصفوفة جديدة في كل نداء (مسار العامل مثلاً) فالكاش يُخفق بلا أي أثر آخر — أي أن
+ * الكاش لا يُغيّر نتيجة أبداً في كل الحالات، ويوفّر حين تتوفر الهوية.
+ *
+ * والقيمة المُعادة تُقرأ فقط (تُنسخ في كائنات المناطق) فلا تُعدَّل بعد التخزين.
+ * وسقف المدخلات محفوظ لأن المفتاح الخارجي `WeakMap` يُحرِّر مع المصفوفة نفسها.
+ */
+const visualCache = new WeakMap();
+const visualStats = { hits: 0, misses: 0, entries: 0 };
+
+function biasKeyOf(biasPerKind) {
+  if (!biasPerKind) return '-';
+  const b = biasPerKind;
+  return `${b.horizontal_bsl ?? 0}|${b.horizontal_ssl ?? 0}|${b.trendline_bsl ?? 0}|${b.trendline_ssl ?? 0}`;
+}
+
+function visualZonesCached(candles, end, biasPerKind) {
+  const biasKey = biasKeyOf(biasPerKind);
+  let byEnd = visualCache.get(candles);
+  if (!byEnd) { byEnd = new Map(); visualCache.set(candles, byEnd); }
+  let byBias = byEnd.get(end);
+  if (!byBias) { byBias = new Map(); byEnd.set(end, byBias); }
+  const hit = byBias.get(biasKey);
+  if (hit !== undefined) { visualStats.hits += 1; return hit; }
+  const window = candles.slice(0, end + 1);
+  const visual = detectVisualZones({ candles: window, closes: window.map(c => c.close), biasPerKind });
+  byBias.set(biasKey, visual);
+  visualStats.misses += 1;
+  visualStats.entries += 1;
+  // سقف داخلي: نافذة `end` واحدة فعلياً في المسار الحي (آخر شمعة)، وهذا يحمي أي مستدعٍ
+  // يمرّر `end` متعدداً بلا حد على نفس المصفوفة.
+  if (byEnd.size > 64) { const first = byEnd.keys().next().value; byEnd.delete(first); }
+  return visual;
+}
+
+/** إحصاء كاش البصري (يُقرأ في الصحة: نسبة الإصابة دليل التوفير) */
+export function visualCacheStats() {
+  const total = visualStats.hits + visualStats.misses;
+  return { ...visualStats, hitRate: total ? Number((100 * visualStats.hits / total).toFixed(1)) : 0 };
+}
+
+/** تصفير إحصاء الكاش (اختباري: لقياس نسبة الإصابة في نافذة محددة) */
+export function resetVisualCacheStats() { visualStats.hits = 0; visualStats.misses = 0; visualStats.entries = 0; }
+
 export function normalizeCandles(raw) {
   return (raw ?? []).map((k, i) => Array.isArray(k)
     ? { time: Number(k[0]) / 1000, open: Number(k[1]), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]), volume: Number(k[5] ?? 0), index: i }
@@ -248,10 +301,11 @@ export function detectLiquidityZones({ symbol, timeframe, candles: input, endInd
   const end = endIndex ?? candles.length - 1;
   if (candles.length < 40 || end < 20) return [];
   const cfg = adaptiveConfig(candles, end);
-  // ائتلاف الوسائط البصرية: رندر + CNN + GAF/MTF + تضمين + BOCPD — حتمي
+  // ائتلاف الوسائط البصرية: رندر + CNN + GAF/MTF + تضمين + BOCPD — حتمي، ومُكاش
+  // بهوية مصفوفة الشموع لأن الكلفة 95% من الكشف (القياس في `visualZonesCached`).
   let visual = null;
   try {
-    visual = detectVisualZones({ candles: candles.slice(0, end + 1), closes: candles.slice(0, end + 1).map(c => c.close), biasPerKind });
+    visual = visualZonesCached(candles, end, biasPerKind);
   } catch { /* الوسائط البصرية اختيارية — لا تكسر المحاكاة */ }
   const pivots = findPivots(candles, { endIndex: end });
   const tol = tolerancePct ?? cfg.tolerancePct;

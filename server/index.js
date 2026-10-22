@@ -19,7 +19,8 @@ import {
   detectLiquidityZones,
   scanHistory,
   feedbackToAdjustment,
-  adaptiveConfig
+  adaptiveConfig,
+  visualCacheStats
 } from './liquidity-zones/engine.mjs';
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
@@ -1166,6 +1167,51 @@ const LIQUIDITY_MIN_BARS = Math.max(1, Number(process.env.LIQUIDITY_MIN_BARS) ||
 const LIQUIDITY_FALLBACK_MS = Math.max(60_000, Number(process.env.LIQUIDITY_FALLBACK_MS) || 10 * 60_000);
 
 /**
+ * كاش تطبيع الشموع لكل (رمز، فريم) — يُبطل بإصدار المخزن لا بالزمن.
+ *
+ * السبب مُقاس من الإنتاج: جامع القمامة كان يعمل **43 مرة في الثانية** ويستهلك 18% من
+ * زمان النواة الواحدة (54.8 ثانية GC في 5 دقائق)، وهذا حشو تخصيص لا بطء حساب: كل نداء
+ * كشف ينتج ~800 مصفوفة/كائن — 401 مصفوفة صفوف من `getRows` + 400 كائن من
+ * `normalizeCandles` — و6,006 مفتاحاً في الدورة الرابعة تعني ملايين التخصيصات، على
+ * نواة واحدة تشترك فيها الحلقة والعامل والـHTTP.
+ *
+ * الأمان: الإبطال يعتمد على `candles.rev` الذي يزيد عند كل كتابة (بذرة، شمعة جديدة،
+ * أو تحديث الشمعة الجارية)، فالمصفوفة المُعادة **هي نفسها حرفياً** ما كان `normalizeCandles`
+ * سيبنيها من نفس المحتوى ⇒ صفر تغيير في أي نتيجة، وتوفير التخصيص فقط.
+ * والحجم محدود (سقف مدخلات) لأن قاعدة «لا رشد بلا سقف» تنطبق على الكاش نفسه.
+ */
+const CANDLE_CACHE_MAX = Math.max(200, Number(process.env.CANDLE_CACHE_MAX) || 9000);
+const candleCache = new Map();
+const candleCacheStats = { hits: 0, misses: 0, evictions: 0, size: 0 };
+
+function cachedCandles(symbol, timeframe, rows) {
+  const key = `${symbol}|${timeframe}`;
+  const rev = marketStreams.candles.rev(symbol, timeframe);
+  const hit = candleCache.get(key);
+  if (hit && hit.rev === rev && hit.rows === rows.length) {
+    candleCacheStats.hits += 1;
+    return hit.candles;
+  }
+  const candles = normalizeCandles(rows);
+  if (hit) candleCache.delete(key);          // إعادة الإدراج تُحدّث ترتيب الحداثة
+  candleCache.set(key, { rev, rows: rows.length, candles, at: Date.now() });
+  candleCacheStats.misses += 1;
+  if (candleCache.size > CANDLE_CACHE_MAX) {
+    // إزالة الأقدم (أول مُدرَج = الأقل حداثة في Map) مع إسقاط المُبطل أولاً
+    const now = Date.now();
+    for (const [k, v] of candleCache) {
+      if (now - v.at > 3_600_000 || candleCache.size > CANDLE_CACHE_MAX) {
+        candleCache.delete(k);
+        candleCacheStats.evictions += 1;
+        if (candleCache.size <= CANDLE_CACHE_MAX * 0.9) break;
+      }
+    }
+  }
+  candleCacheStats.size = candleCache.size;
+  return candles;
+}
+
+/**
  * كشف مناطق السيولة لمفتاح واحد (رمز، فريم) بنفس دالة الكشف ونفس المعاملات الحالية
  * تماماً (limits/timeframes/tolerance/bias). المصدر: المخزن المجمّع بلا REST.
  * تُعيد عدد المناطق المدمجة، أو null إن تعذّر الكشف (مفتاح ناقص/شموع غير كافية).
@@ -1173,7 +1219,7 @@ const LIQUIDITY_FALLBACK_MS = Math.max(60_000, Number(process.env.LIQUIDITY_FALL
 const detectLiveZonesForKey = (symbol, timeframe, { rotation, workOrder, measureShadow = true }) => {
   const rows = marketStreams.candles.getRows(symbol, timeframe);
   if (!rows || rows.length < LIQUIDITY_MIN_BARS) return null;
-  const candles = normalizeCandles(rows);
+  const candles = cachedCandles(symbol, timeframe, rows);
   const t0 = process.hrtime.bigint();
   const zones = detectLiquidityZones({
     symbol,
@@ -3449,6 +3495,38 @@ health.addSection('zoneIdentity', () => {
     return { ...current, candidate, note: candidate.note };
   } catch { return null; }
 });
+/**
+ * أداء كشف السيولة: كاش الائتلاف البصري (95% من الكلفة) وكاش تطبيع الشموع، وزمن
+ * الكشف مقابل زمن الظل. الأرقام هنا هي ما يحوّل «الحلقة بطيئة» إلى سبب محدَّد.
+ */
+health.addSection('liquidityPerf', () => {
+  try {
+    const vc = visualCacheStats();
+    const total = candleCacheStats.hits + candleCacheStats.misses;
+    return {
+      /** كاش الائتلاف البصري: 95% من كلفة الكشف، ونسبة الإصابة = التوفير الفعلي */
+      visual: { ...vc },
+      /** كاش تطبيع الشموع (إبطال بإصدار المخزن) */
+      candles: {
+        ...candleCacheStats,
+        hitRate: total ? Number((100 * candleCacheStats.hits / total).toFixed(1)) : 0
+      },
+      /**
+       * ملخص زمن الكشف مقابل الظل في حلقة السيولة: يفصل «عمل القرار» عن «عمل القياس»،
+       * فإذا ارتفع الظل يُخفَّف بلا أي مساس بالنتائج (والإسقاط محسوب في `shadowShed`).
+       */
+      loop: {
+        detectAvgMs: Number((liquidShadowTiming.detectMs / Math.max(liquidShadowTiming.keys, 1)).toFixed(2)),
+        detectMaxMs: Number(liquidShadowTiming.detectMaxMs.toFixed(1)),
+        shadowAvgMs: Number((liquidShadowTiming.shadowMs / Math.max(liquidShadowTiming.keys, 1)).toFixed(2)),
+        shadowMaxMs: Number(liquidShadowTiming.shadowMaxMs.toFixed(1)),
+        shadowShed: liquidShadowTiming.shed,
+        keys: liquidShadowTiming.keys
+      }
+    };
+  } catch { return null; }
+});
+
 /**
  * محرك السيولة v2 — قسم الصحة: أرقام حقيقية مقيسة على عيّنات من نفس الشموع التي قرأها
  * المحرك الأول في نفس اللحظة. تُجيب على سؤال واحد: «هل يُنتج الجديد نفس ما ينتجه القديم؟»
