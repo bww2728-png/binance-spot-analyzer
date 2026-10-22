@@ -19,11 +19,43 @@ export const DEFAULT_HISTORY_MAX_ZONES = 40_000;
 /** سقف المخزون الحي: عنده تُؤجَّل الدورة الجديدة، ولا يُحذف أي منطقة */
 export const DEFAULT_LIVE_MAX_ZONES = 40_000;
 
-/** نفس دلالات `mergeLiquidityResults` الأصلية: مفتاح (رمز|فريم|معرّف)، ترتيب بالثقة */
+/** نفس دلالات `mergeLiquidityResults` الأصلية: مفتاح (رمز|فريم|معرّف)، ترتيب بالثقة.
+ *  تحسين: بدل بناء Map على `rows` الضخمة وإعادة فرز الكل، نبني Map فقط على
+ *  `incoming` (صغير نسبياً)، ثم نندمج خطياً بين `rows` المرتبة والوارد المرتب،
+ *  مع تخطّي الصفوف المستبدلة. تعقيد الدمج: O(n + m log m) بدل O((n+m) log(n+m)).
+ */
 export function mergeZones(rows, incoming) {
-  const map = new Map(rows.map(r => [`${r.symbol}|${r.timeframe}|${r.id}`, r]));
-  for (const zone of incoming) map.set(`${zone.symbol}|${zone.timeframe}|${zone.id}`, zone);
-  return [...map.values()].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  const keyOf = (r) => `${r.symbol}|${r.timeframe}|${r.id}`;
+
+  // الوارد قد يحتوي تكراراً؛ Map يحفظ الأخير تماماً كالسلوك القديم.
+  const incomingMap = new Map();
+  for (const z of incoming) incomingMap.set(keyOf(z), z);
+  if (incomingMap.size === 0) return rows;
+
+  const incomingKeys = new Set(incomingMap.keys());
+  const sortedIncoming = [...incomingMap.values()].sort(
+    (a, b) => (b.confidence ?? 0) - (a.confidence ?? 0)
+  );
+
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < rows.length || j < sortedIncoming.length) {
+    if (i < rows.length && incomingKeys.has(keyOf(rows[i]))) {
+      i += 1;
+      continue;
+    }
+    if (i >= rows.length) {
+      out.push(sortedIncoming[j++]);
+    } else if (j >= sortedIncoming.length) {
+      out.push(rows[i++]);
+    } else if ((rows[i].confidence ?? 0) >= (sortedIncoming[j].confidence ?? 0)) {
+      out.push(rows[i++]);
+    } else {
+      out.push(sortedIncoming[j++]);
+    }
+  }
+  return out;
 }
 
 /**
