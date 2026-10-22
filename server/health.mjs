@@ -8,6 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { PerformanceObserver } from 'node:perf_hooks';
 import v8 from 'node:v8';
 
 const SAMPLER_MS = 5 * 60 * 1000;
@@ -147,6 +148,101 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
   const lag = monitorEventLoopDelay({ resolution: 20 });
   lag.enable();
 
+  /**
+   * قياس تجمّدات جامع القمامة (GC) — المرشَّح الأول لتجمّد ثوانٍ مع heap عند 87%.
+   *
+   * القياس الإنتاجي (البناء السابق): تأخّر الحلقة p50 = 52–82ms (سليم) بينما
+   * p99 = 3,093–3,681ms وmax حتى 6,891ms. أنبوب سليم بهذه الحدّة يعني **توقفات
+   * قليلة وطويلة** لا بطئاً منتشراً — وهذا التوقيع المميّز لتوقف V8 الكامل (major GC)
+   * أو لحلقة متزامنة طويلة. بلا هذا القياس يبقى الترجيح تخميناً وأي إصلاح بلا أساس.
+   *
+   * `kind`: 1 = scavenge صغير، 2 = mark-sweep-compact كامل، 4 = تزايدي، 8 = ضعيف.
+   * كل القياس في الذاكرة (حلقة محدودة) ولا يُضيف أي حمل على القاعدة.
+   */
+  const gcStats = { count: 0, totalMs: 0, maxMs: 0, majorCount: 0, majorMs: 0, majorMaxMs: 0, byKind: {}, worst: [] };
+  let gcObserver = null;
+  try {
+    gcObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const ms = Number(entry.duration) || 0;
+        const kind = Number(entry.detail?.kind ?? 0);
+        gcStats.count += 1;
+        gcStats.totalMs += ms;
+        if (ms > gcStats.maxMs) gcStats.maxMs = ms;
+        gcStats.byKind[kind] = gcStats.byKind[kind] ?? { count: 0, ms: 0 };
+        gcStats.byKind[kind].count += 1;
+        gcStats.byKind[kind].ms += ms;
+        if (kind === 2) {                       // mark-sweep-compact = التوقف الكامل
+          gcStats.majorCount += 1;
+          gcStats.majorMs += ms;
+          if (ms > gcStats.majorMaxMs) gcStats.majorMaxMs = ms;
+        }
+        if (ms >= 50) {                         // لا يُسجَّل إلا ما يستحق التفسير
+          gcStats.worst.push({ at: Date.now(), ms: Number(ms.toFixed(1)), kind });
+          if (gcStats.worst.length > 12) gcStats.worst.shift();
+        }
+      }
+    });
+    gcObserver.observe({ entryTypes: ['gc'] });
+  } catch { gcObserver = null; }
+
+  /** لقطة تجمّدات GC مع دقائق آخر توقف — تُصفَّر مع كل عيّنة مثل قياس التأخّر */
+  function gcSnapshot() {
+    const sinceMs = counters.lastPersistAt ? Date.now() - counters.lastPersistAt : null;
+    return {
+      enabled: gcObserver !== null,
+      windowMs: sinceMs,
+      count: gcStats.count,
+      totalMs: Number(gcStats.totalMs.toFixed(1)),
+      maxMs: Number(gcStats.maxMs.toFixed(1)),
+      major: { count: gcStats.majorCount, totalMs: Number(gcStats.majorMs.toFixed(1)), maxMs: Number(gcStats.majorMaxMs.toFixed(1)) },
+      byKind: gcStats.byKind,
+      worst: gcStats.worst.slice(-6)
+    };
+  }
+  function resetGc() {
+    gcStats.count = 0; gcStats.totalMs = 0; gcStats.maxMs = 0;
+    gcStats.majorCount = 0; gcStats.majorMs = 0; gcStats.majorMaxMs = 0;
+    gcStats.byKind = {}; gcStats.worst = [];
+  }
+
+  /**
+   * توزيع الـheap على مساحات V8 — يحدّد **مَن** يستهلك الذاكرة لا كم استُهلك فقط.
+   *
+   * السبب: `heapUsed` ثبت عند 81–89% من الحد (531–579MB من 652MB)، وهي المنطقة التي
+   * يبدأ فيها V8 بالتجميع الكامل المتكرر، والتجميع الكامل على 550MB يستغرق ثوانيَ
+   * ويوقف حلقة الأحداث — وهذا يفسّر p50 سليماً (52–82ms) مع p99 بالثواني (3,093–3,681ms).
+   * لكن «الضغط مرتفع» لا يقول **ما** يجب تصغيره. مساحات V8 تقول ذلك:
+   *  - `new` (الحضانة): كائنات قصيرة العمر ⇒ حمولة إنشاء عالية.
+   *  - `old`: كائنات معمَّرة ومصفوفات عادية ⇒ مخازن الحالة الطويلة (المناطق، الفرص).
+   *  - `large_object`: كائنات أكبر من ~500KB ⇒ **المصفوفات الضخمة** (مخزن الشموع).
+   *  - `code`/`read_only`: النصوص البرمجية ⇒ كبر الحزمة أو تكرار تحميل وحدات.
+   * والقراءة رخيصة (عدّادات V8 لا مسح ذاكرة) فلا تُثقل العيّنة.
+   */
+  function heapSpaces() {
+    try {
+      const spaces = v8.getHeapSpaceStatistics().map(s => ({
+        space: s.space_name,
+        usedMb: Number((s.space_used_size / 1048576).toFixed(1)),
+        totalMb: Number((s.space_size / 1048576).toFixed(1)),
+        pct: s.space_size ? Number((100 * s.space_used_size / s.space_size).toFixed(1)) : 0
+      })).sort((a, b) => b.usedMb - a.usedMb);
+      const st = v8.getHeapStatistics();
+      return {
+        spaces,
+        heapUsedMb: Number((st.used_heap_size / 1048576).toFixed(1)),
+        heapLimitMb: Number((st.heap_size_limit / 1048576).toFixed(1)),
+        /** نسبة الضغط الحقيقية على الحد: علامة التجميع المتكرر قبل القتل */
+        pressurePct: Number((100 * st.used_heap_size / Math.max(1, st.heap_size_limit)).toFixed(1)),
+        contexts: st.number_of_native_contexts,
+        physicalMb: Number((st.total_physical_size / 1048576).toFixed(1)),
+        mallocedMb: Number((st.malloced_memory / 1048576).toFixed(1))
+      };
+    } catch (e) {
+      return { error: String(e?.message ?? e).slice(0, 160) };
+    }
+  }
+
   const defaults = {
     /** ms بلا دورة تُعدّ إشارة تعليق للمحرك */
     defaultStallMs: 10 * 60 * 1000,
@@ -242,6 +338,13 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
         p99: Number((lag.percentile(99) / 1e6).toFixed(1)),
         max: Number((lag.max / 1e6).toFixed(1))
       },
+      /**
+       * تجمّدات GC: تفسّر بقيّة قياس التأخّر أعلاه. p50 سليم مع p99 بالثواني يعني
+       * توقفات قليلة وطويلة، والفرق بينهما هو ما يحدّد الإصلاح (GC مقابل حلقة متزامنة).
+       */
+      gc: gcSnapshot(),
+      /** توزيع الـheap: يحدّد أي مساحة تسبب الضغط الذي يوقف الحلقة */
+      heap: heapSpaces(),
       persist: { ...counters, sincePersistMs: counters.lastPersistAt ? now - counters.lastPersistAt : null },
       /**
        * قسم الشموع المجمّعة: يُقاس لحظياً في كل لقطة صحة. أي فشل في المزوّد لا يُسقط
@@ -286,6 +389,7 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
         counters.sampleBytesFull = JSON.stringify(full).length;
         counters.sampleBytesSaved = JSON.stringify(body.data).length;
         resetLag();
+        resetGc();
       } catch (e) {
         counters.persistFailures += 1;
         counters.lastPersistError = `health sample: ${e.message}`.slice(0, 300);
@@ -321,7 +425,7 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
   /** ربط مزوّد قسم الشموع المجمّعة (يُعرض في كل لقطة صحة) */
   function setCandlesProvider(fn) { candlesProvider = typeof fn === 'function' ? fn : null; }
 
-  return { register, snapshot, startSampler, notePersist, mark, resetLag, addSection, sections, setCandlesProvider };
+  return { register, snapshot, startSampler, notePersist, mark, resetLag, gcSnapshot, heapSpaces, addSection, sections, setCandlesProvider };
 }
 
 export default createHealth;
