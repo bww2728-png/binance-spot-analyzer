@@ -24,6 +24,7 @@ import {
 } from './liquidity-zones/engine.mjs';
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
+import { restoreBeforeStart } from './live-opportunities/lifecycle.mjs';
 import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams, createKeyQueue } from './market/streams.mjs';
 import { createHealth } from './health.mjs';
@@ -2420,21 +2421,22 @@ const liveOppEngine = createLiveOpportunityEngine({
   shadow
 });
 setTimeout(() => {
-  // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
-  void (async () => {
-    try {
+  // لا يبدأ المحرك قبل نجاح قراءة بيانات الاستعادة؛ فشل قاعدة البيانات ليس حالة فارغة.
+  void restoreBeforeStart({
+    loadRows: async () => {
       const day = 86_400_000;
       const [lc, ops] = await Promise.all([
-        db.events.liveLifecycle(Date.now() - day).catch(() => []),
-        db.events.liveOppEvents(Date.now() - 7 * day).catch(() => [])
+        // نغطي نافذة النضارة القصوى (6 شموع × يوم) مع هامش ضمن احتفاظ أحداث الدورة.
+        db.events.liveLifecycle(Date.now() - 7 * day),
+        db.events.liveOppEvents(Date.now() - 7 * day)
       ]);
-      liveOppEngine.rehydrate([...(lc || []), ...(ops || [])]);
-    } catch (e) {
-      console.error('[live-opp] rehydrate failed:', e.message);
-    } finally {
-      liveOppEngine.start();
-    }
-  })();
+      return [...(lc || []), ...(ops || [])];
+    },
+    rehydrate: (rows) => liveOppEngine.rehydrate(rows),
+    start: () => liveOppEngine.start(),
+    log: console,
+    retryMs: Number(process.env.LIVE_RESTORE_RETRY_MS) || 30_000
+  });
 }, 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
 
 // ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══

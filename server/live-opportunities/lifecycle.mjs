@@ -81,3 +81,46 @@ export function rehydrateState(events, { nowMs = Date.now(), freshnessBars = 6, 
   }
   return { trackers: [...trackers.values()], opportunities: [...opportunities.values()] };
 }
+
+
+/**
+ * لا يبدأ محرك الفرص قبل نجاح قراءة بيانات الاستعادة وإعادة بناء الحالة.
+ * عند فشل التخزين، يسجل السبب ويعيد المحاولة؛ لا يحوّل فشل القراءة إلى حالة فارغة.
+ * loadRows يجب أن يعيد جميع الصفوف المطلوبة للاستعادة، وrehydrate يجب أن يكون قابلاً
+ * لإعادة التنفيذ دون إنشاء نسخ مكررة (كما هو الحال في محرك الفرص الحالي).
+ */
+export async function restoreBeforeStart({
+  loadRows,
+  rehydrate,
+  start,
+  log = console,
+  retryMs = 30_000,
+  schedule = (fn, ms) => setTimeout(fn, ms)
+} = {}) {
+  let started = false;
+  let attemptPending = false;
+
+  const attempt = async () => {
+    if (started) return { ok: true, started: true, alreadyStarted: true };
+    if (attemptPending) return { ok: false, started: false, skipped: true };
+    attemptPending = true;
+    try {
+      const rows = await loadRows();
+      rehydrate(rows);
+      start();
+      started = true;
+      log.info?.('[live-opp] state restore succeeded; monitoring engine started');
+      return { ok: true, started: true, rows: rows.length };
+    } catch (error) {
+      const message = String(error?.message ?? error).slice(0, 300);
+      log.error?.(`[live-opp] state restore failed; engine start deferred; retrying in ${retryMs}ms: ${message}`);
+      const timer = schedule(() => { void attempt(); }, retryMs);
+      timer?.unref?.();
+      return { ok: false, started: false, error: message };
+    } finally {
+      attemptPending = false;
+    }
+  };
+
+  return attempt();
+}

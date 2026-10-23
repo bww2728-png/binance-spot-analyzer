@@ -54,3 +54,42 @@ test('قتل قسري مع 5 نشطة → عودة الخمس', () => {
   assert.equal(r.trackers.length, 5);
   assert.equal(r.opportunities.length, 5);
 });
+
+
+test('لا يبدأ المحرك عند فشل قراءة الاستعادة ويبدأ بعد نجاح إعادة المحاولة', async () => {
+  let reads = 0;
+  let starts = 0;
+  let restores = 0;
+  let scheduled = null;
+  const errors = [];
+  const { restoreBeforeStart } = await import('../live-opportunities/lifecycle.mjs');
+
+  const first = await restoreBeforeStart({
+    loadRows: async () => {
+      reads += 1;
+      if (reads === 1) throw new Error('database temporarily unavailable');
+      return [{ id: 'restored-row' }];
+    },
+    rehydrate: (rows) => {
+      restores += 1;
+      assert.equal(rows.length, 1);
+    },
+    start: () => { starts += 1; },
+    log: { info() {}, error(message) { errors.push(message); } },
+    retryMs: 1,
+    schedule(fn) { scheduled = fn; return { unref() {} }; }
+  });
+
+  assert.equal(first.ok, false);
+  assert.equal(first.started, false);
+  assert.equal(starts, 0);
+  assert.equal(restores, 0);
+  assert.match(errors[0], /engine start deferred/);
+  assert.equal(typeof scheduled, 'function');
+
+  scheduled();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2);
+  assert.equal(restores, 1);
+  assert.equal(starts, 1);
+});
