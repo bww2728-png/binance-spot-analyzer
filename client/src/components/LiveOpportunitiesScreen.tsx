@@ -8,6 +8,7 @@ import LiveDashboard from './LiveDashboard';
 import { TIMEFRAMES } from '../lib/types';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
+import PersistedOpportunityHistory from './PersistedOpportunityHistory';
 import { useScreenState } from '../lib/useScreenState';
 
 /**
@@ -224,7 +225,7 @@ export default function LiveOpportunitiesScreen() {
       <StaleDataBanner />
 
       {/* شريط التقدم الحي */}
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-2">
+      <div className="grid grid-cols-2 lg:grid-cols-7 gap-2">
         <div className="rounded-xl p-3" style={{ background: 'var(--surface-1)' }}>
           <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>الدورة</div>
           <div className="num font-bold">{feed?.cycle ?? 0}</div>
@@ -238,8 +239,12 @@ export default function LiveOpportunitiesScreen() {
           <div className="num font-bold">{feed?.zonesTracked ?? 0}</div>
         </div>
         <div className="rounded-xl p-3" style={{ background: 'var(--surface-1)' }}>
-          <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>فرص منشورة</div>
+          <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>فرص منشورة الآن</div>
           <div className="num font-bold" style={{ color: 'var(--up)' }}>{feed?.total ?? 0}</div>
+        </div>
+        <div className="rounded-xl p-3" style={{ background: 'var(--surface-1)' }}>
+          <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>قيد المتابعة خلف العرض</div>
+          <div className="num font-bold">{feed?.deferredTracking ?? 0}</div>
         </div>
         <div className="rounded-xl p-3" style={{ background: 'var(--surface-1)' }}>
           <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>النتائج الفعلية</div>
@@ -258,7 +263,13 @@ export default function LiveOpportunitiesScreen() {
       </div>
 
       {busyMsg && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>{busyMsg}</div>}
-      {error && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{error}</div>}
+      {error && <div className="rounded-lg px-3 py-2 text-[12px]" role="alert" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{error} <button className="underline" onClick={() => void load()}>إعادة المحاولة</button></div>}
+      {!opportunities.length && feed?.funnel && (
+        <div className="rounded-xl p-3 text-[11px] space-y-1" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
+          <div className="font-bold" style={{ color: 'var(--text-1)' }}>سبب عدم ظهور فرص حية — أرقام آخر دورة</div>
+          <div style={{ color: 'var(--text-2)' }}>مؤهلة للفحص: {feed.funnel.eligible} · فشل تدفق: {feed.funnel.flowFail} · فشل الخطة: {feed.funnel.planFail} · فشل البوابة: {feed.funnel.gateFail} · فشل المعايرة: {feed.funnel.calibFail} · منشورة: {feed.funnel.published}</div>
+        </div>
+      )}
 
       {/* الفلاتر */}
       <div className="flex flex-wrap items-center gap-2">
@@ -522,6 +533,8 @@ export default function LiveOpportunitiesScreen() {
           )}
         </>
       )}
+
+      <PersistedOpportunityHistory engine="live" />
 
       {(chartId || watchChart) && (
         <LiveChartModal

@@ -52,7 +52,7 @@ test('الحذف الزمني يستهدف الأنواع التشخيصية ف�
   const { db, calls } = fakeDb();
   const report = await runRetention({ db, now: () => now, log: { log: () => {}, warn: () => {} } });
   const types = calls.deleteBefore.map(c => c.type);
-  assert.deepEqual(types.sort(), ['live_lifecycle', 'live_opportunity_rejected'], 'النوعان التشخيصيان فقط');
+  assert.deepEqual(types.sort(), ['live_lifecycle', 'live_opportunity_rejected', 'strategy2_rejected'], 'الأنواع التشخيصية فقط');
   for (const c of calls.deleteBefore) {
     const ageDays = (now - c.beforeTs) / DAY;
     assert.equal(Math.round(ageDays), 7, 'الحد 7 أيام: القياس الإنتاجي أثبت أن 30 يوماً = 2.4GB');

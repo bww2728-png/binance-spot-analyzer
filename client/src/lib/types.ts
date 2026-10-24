@@ -578,6 +578,37 @@ export interface BuyHistoryResponse {
   generatedAt: number;
 }
 
+export interface PersistedOpportunityHistoryItem {
+  eventId: number;
+  engine: 'live' | 'strategy2';
+  id: string;
+  symbol: string;
+  timeframe: string;
+  model: number | null;
+  outcome: string | null;
+  publishedAt: number;
+  resolvedAt: number | null;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  rr: number | null;
+  tier: string | null;
+  reason: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface PersistedOpportunityHistoryPage {
+  items: PersistedOpportunityHistoryItem[];
+  total: number;
+  nextCursor: number | null;
+  generatedAt: number;
+}
+
+export interface PersistedRejectionReason {
+  reason: string;
+  count: number;
+}
+
 export interface BuyFeed {
   busy: boolean;
   cycle: number;
@@ -591,6 +622,7 @@ export interface BuyFeed {
   error: string | null;
   opportunities: BuyOpportunity[];
   total: number;
+  deferredTracking?: number;
   watching: BuyWatchRow[];
   watchingTotal: number;
   rejected: BuyRejectedRow[];

@@ -6,6 +6,7 @@ import OppDrawer, { oppLevels } from './OppDrawer';
 import type { BuyHistoryResponse, Strategy2DirectionsResponse, Strategy2DirectionRow, Strategy2Feed, Strategy2Opportunity } from '../lib/types';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
+import PersistedOpportunityHistory from './PersistedOpportunityHistory';
 
 /* ═══ الفرص الحية — استراتيجيتي (محرك SMC مستقل) ═══
  * تبويبات: الفرص (جدول + درج تفاصيل) · الاتجاهات · قيد التتبع · لوحة التحكم · المرفوضة.
@@ -805,6 +806,8 @@ export default function StrategyScreen() {
           </div>
         </div>
       )}
+
+      <PersistedOpportunityHistory engine="strategy2" />
 
       {/* درج تفاصيل الفرصة */}
       {drawerOpp && (

@@ -2462,32 +2462,24 @@ setTimeout(() => {
 // يشارك طبقة البيانات الحية (tenant مستقل) ويحترم محدد الطلبات الموحد.
 
 const readStrategy2Calibration = async () => {
-  try {
-    const row = await db.events.strategy2Calibration().catch(() => null);
-    if (!row) return null;
-    const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
-    const data = meta?.opportunity ?? meta ?? {};
-    return { at: Number(row.ts) || null, trades: data.trades ?? 0, segments: data.segments ?? [] };
-  } catch {
-    return null;
-  }
+  const row = await db.events.strategy2Calibration();
+  if (!row) return null;
+  const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
+  const data = meta?.opportunity ?? meta ?? {};
+  return { at: Number(row.ts) || null, trades: data.trades ?? 0, segments: data.segments ?? [] };
 };
 
 const readStrategy2PublishedEvents = async () => {
-  try {
-    const rows = await db.events.strategy2Events(0, 2000);
-    return rows.map(r => {
-      let meta = {};
-      try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
-      const o = meta.opportunity ?? {};
-      return {
-        kind: r.type === 'strategy2_published' ? 'published' : 'resolved',
-        id: o.id ?? null, ts: r.ts, ...o
-      };
-    }).filter(e => e.id);
-  } catch {
-    return [];
-  }
+  const rows = await db.events.strategy2Events(0, 50_000);
+  return rows.map(r => {
+    let meta = {};
+    try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
+    const o = meta.opportunity ?? {};
+    return {
+      kind: r.type === 'strategy2_published' ? 'published' : 'resolved',
+      id: o.id ?? null, ts: r.ts, ...o
+    };
+  }).filter(e => e.id);
 };
 
 const strategy2Engine = createStrategyEngine({
@@ -2511,21 +2503,16 @@ const strategy2Engine = createStrategyEngine({
   market: marketStreams,
   readCalibration: readStrategy2Calibration,
   readPublishedEvents: readStrategy2PublishedEvents,
-  readFeedbackEvents: () => db.events.strategy2FeedbackEvents(0, 2000).catch(() => []),
+  readFeedbackEvents: () => db.events.strategy2FeedbackEvents(0, 2000),
   readDirectionEvents: async () => {
-    try {
-      const rows = await db.events.strategy2DirectionEvents(0, 2000);
-      return rows.map(r => {
-        let meta = {};
-        try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
-        const o = meta.opportunity ?? {};
-        // `label` مُشتق (حُذف من الحمولة المخزَّنة لتقليلها) — يُعاد هنا فيبقى القارئ كما كان
-        const label = o.label ?? (o.stage ? `تغير المرحلة: ${o.stage}` : 'تغير مرحلة');
-        return { ...o, label, symbol: o.symbol || r.symbol, at: o.at ?? r.ts };
-      }).filter(e => e.symbol);
-    } catch {
-      return [];
-    }
+    const rows = await db.events.strategy2DirectionEvents(0, 2000);
+    return rows.map(r => {
+      let meta = {};
+      try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
+      const o = meta.opportunity ?? {};
+      const label = o.label ?? (o.stage ? `تغير المرحلة: ${o.stage}` : 'تغير مرحلة');
+      return { ...o, label, symbol: o.symbol || r.symbol, at: o.at ?? r.ts };
+    }).filter(e => e.symbol);
   },
   broadcast: (msg) => broadcast(msg),
   persist: (row) => {
@@ -2556,11 +2543,13 @@ const strategy2Engine = createStrategyEngine({
       );
     }
     return saveLiquidityEvent(
-      row?.closed ? 'strategy2_resolved' : row?.type === 'strategy2_calibration' ? 'strategy2_calibration' : 'strategy2_published',
+      row?.closed ? 'strategy2_resolved' : row?.type === 'strategy2_calibration' ? 'strategy2_calibration' : row?.type === 'strategy2_rejected' ? 'strategy2_rejected' : 'strategy2_published',
       { symbol: row?.symbol || 'GLOBAL' },
       row?.type === 'strategy2_calibration'
         ? `معايرة استراتيجيتي: ${row.segments?.length ?? 0} شريحة / ${row.trades ?? 0} صفقة`
-        : row?.closed
+        : row?.type === 'strategy2_rejected'
+          ? `رفض استراتيجيتي ${row.symbol} ${row.tf ?? ''}: ${row.reason}`
+          : row?.closed
           ? `نتيجة فرصة ${row.symbol} ${row.tf}: ${row.outcome === 'target' ? 'وصل الهدف' : row.outcome === 'target2' ? 'وصل الهدف الثاني' : row.outcome === 'invalidated' ? 'فشل نقطة الدخول' : row.outcome === 'legDead' ? 'موت المشوار — بلوغ العرض الخارجي' : 'ضرب الوقف'}`
           : `فرصة استراتيجيتي ${row.symbol} ${row.tf} — نموذج ${row.model} / R:R ${row.rr}`,
       { opportunity: row }
@@ -2639,7 +2628,7 @@ app.get('/api/strategy2/calibration', handle(async (_req, res) => {
 app.get('/api/strategy2/history', handle(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
   const sinceTs = Date.now() - days * 86_400_000;
-  const rows = await db.events.strategy2Events(sinceTs).catch(() => []);
+  const rows = await db.events.strategy2Events(sinceTs);
   const events = [];
   for (const r of rows) {
     let meta = {};
@@ -2759,6 +2748,49 @@ app.get('/api/live/opportunities', handle(async (_req, res) => {
     updatedAt: feed.updatedAt,
     error: feed.error
   });
+}));
+
+app.get('/api/opportunities/persisted-history', handle(async (req, res) => {
+  const engine = req.query.engine === 'strategy2' ? 'strategy2' : 'live';
+  const beforeId = req.query.beforeId == null ? null : Number(req.query.beforeId);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const page = await db.events.opportunityHistoryPage({ engine, beforeId, limit });
+  const parseMeta = (value) => {
+    if (value && typeof value === 'object') return value;
+    try { return JSON.parse(value ?? '{}'); } catch { return {}; }
+  };
+  const outcomesById = new Map();
+  for (const row of page.outcomes) {
+    const opportunity = parseMeta(row.meta).opportunity ?? {};
+    if (opportunity.id && !outcomesById.has(opportunity.id)) outcomesById.set(opportunity.id, { ...opportunity, ts: row.ts });
+  }
+  const items = page.published.map((row) => {
+    const opportunity = parseMeta(row.meta).opportunity ?? {};
+    const outcome = outcomesById.get(opportunity.id);
+    return {
+      eventId: Number(row.id), engine, id: String(opportunity.id ?? `event:${row.id}`),
+      symbol: String(opportunity.symbol ?? row.symbol ?? '—'),
+      timeframe: String(opportunity.timeframe ?? opportunity.tf ?? '—'),
+      model: opportunity.model == null ? null : Number(opportunity.model),
+      outcome: outcome?.outcome ?? null,
+      publishedAt: Number(opportunity.detectedAt ?? row.ts),
+      resolvedAt: outcome ? Number(outcome.outcomeAt ?? outcome.ts) : null,
+      entry: opportunity.entry == null ? null : Number(opportunity.entry),
+      stop: opportunity.stop == null ? null : Number(opportunity.stop),
+      target: opportunity.tp ?? opportunity.tp1 ?? null,
+      rr: opportunity.rr == null ? null : Number(opportunity.rr),
+      tier: opportunity.tier ?? null,
+      reason: null,
+      payload: opportunity
+    };
+  });
+  res.json({ items, total: page.total, nextCursor: page.nextCursor, generatedAt: Date.now() });
+}));
+
+app.get('/api/opportunities/rejected-summary', handle(async (req, res) => {
+  const engine = req.query.engine === 'strategy2' ? 'strategy2' : 'live';
+  const reasons = await db.events.rejectedSummary({ engine });
+  res.json({ engine, reasons, generatedAt: Date.now() });
 }));
 
 app.get('/api/live-opportunities/status', handle(async (_req, res) => {

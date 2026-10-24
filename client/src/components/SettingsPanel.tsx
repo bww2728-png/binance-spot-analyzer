@@ -5,11 +5,14 @@ import { factsForSymbol } from '../lib/shariah';
 import type { ShariahResearchStatus } from '../lib/types';
 import Toggle from './ui/Toggle';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
+import LoadErrorState from './ui/LoadErrorState';
 
 const QUOTES = ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH'];
 
 export default function SettingsPanel() {
   const settings = useStore(s => s.settings);
+  const settingsError = useStore(s => s.bootErrors.settings);
+  const retryBoot = useStore(s => s.retryBoot);
   const saveSettings = useStore(s => s.saveSettings);
   const analyses = useStore(s => s.analyses);
   const barcodeScans = useStore(s => s.barcodeScans);
@@ -58,6 +61,7 @@ export default function SettingsPanel() {
       <section>
         <h2 className="text-[15px] font-bold mb-1" style={{ color: 'var(--text-1)' }}>الإعدادات العامة</h2>
         <p className="text-xs mb-4" style={{ color: 'var(--text-3)' }}>الاقتباس، مهلة الإشعارات، والصوت — تُحفظ فوراً في قاعدة البيانات</p>
+        {settingsError && !settings && <LoadErrorState title="تعذر تحميل الإعدادات" detail={settingsError} onRetry={() => void retryBoot()} />}
         {settings && (
           <div className="card p-5 flex flex-wrap items-center gap-x-8 gap-y-4">
             <label className="flex items-center gap-2.5 text-[13px]" style={{ color: 'var(--text-2)' }}>

@@ -86,6 +86,8 @@ interface StoreState {
   analyses: Analysis[];
   prices: Record<string, number>;
   settings: Settings | null;
+  bootErrors: { analyses: string | null; settings: string | null; symbols: string | null };
+  bootReady: boolean;
   screen: Screen;
   chartModal: { symbol: string; tfLower: string | null; tfUpper: string | null; levels?: ChartLevel[] } | null;
   notifications: AppNotification[];
@@ -116,6 +118,7 @@ interface StoreState {
   strategy2Rows: Record<string, { price: number | null; plPct: number | null; toTp1Pct: number | null; rNow: number | null; mfeR: number; ageSec: number }>;
 
   init: () => Promise<void>;
+  retryBoot: () => Promise<void>;
   syncSymbols: () => Promise<void>;
   setScreen: (s: Screen) => void;
   openChart: (symbol: string, tfLower: string | null, tfUpper: string | null, levels?: ChartLevel[]) => void;
@@ -176,6 +179,8 @@ export const useStore = create<StoreState>((set, get) => ({
   analyses: [],
   prices: {},
   settings: null,
+  bootErrors: { analyses: null, settings: null, symbols: null },
+  bootReady: false,
   screen: ((): Screen => {
     // افتتاح مباشر على التبويب من الرابط (#/history مثلاً) — الافتراضي اللوحة
     const h = location.hash.replace('#/', '');
@@ -208,14 +213,30 @@ export const useStore = create<StoreState>((set, get) => ({
       streams = new BinanceStreams();
       set({ streams });
     }
-    const [barcodeScans, analyses, settings] = await Promise.all([
-      api.getBarcodeScans().catch(() => []),
+    const [barcodeResult, analysesResult, settingsResult] = await Promise.allSettled([
+      api.getBarcodeScans(),
       api.getAnalyses(),
       api.getSettings()
     ]);
+    const previous = get();
+    const bootErrors = { ...previous.bootErrors };
     const barcodeMap: Record<string, BarcodeScan> = {};
-    for (const scan of barcodeScans) barcodeMap[scan.symbol] = scan;
-    set({ barcodeScans: barcodeMap, analyses, settings: settings ?? null });
+    if (barcodeResult.status === 'fulfilled') {
+      for (const scan of barcodeResult.value) barcodeMap[scan.symbol] = scan;
+    }
+    if (analysesResult.status === 'fulfilled') bootErrors.analyses = null;
+    else bootErrors.analyses = String(analysesResult.reason);
+    if (settingsResult.status === 'fulfilled') bootErrors.settings = null;
+    else bootErrors.settings = String(settingsResult.reason);
+    set({
+      ...(barcodeResult.status === 'fulfilled' ? { barcodeScans: barcodeMap } : {}),
+      ...(analysesResult.status === 'fulfilled' ? { analyses: analysesResult.value } : {}),
+      ...(settingsResult.status === 'fulfilled' ? { settings: settingsResult.value ?? null } : {}),
+      bootErrors,
+      bootReady: true
+    });
+    const analyses = analysesResult.status === 'fulfilled' ? analysesResult.value : get().analyses;
+    const settings = settingsResult.status === 'fulfilled' ? settingsResult.value : get().settings;
     // شريعة: لا تُفشل init إذا تعذر الجدول
     try {
       const sh = await api.getShariah();
@@ -262,12 +283,13 @@ export const useStore = create<StoreState>((set, get) => ({
         fetchSpotSymbols(quote),
         fetch(`${API}/symbols/meta`).then(r => r.ok ? r.json() : { last_updated: 0 })
       ]);
-      set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? 0 });
+      set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? 0, bootErrors: { ...get().bootErrors, symbols: null } });
       // إن كانت القائمة فارغة: مزامنة تلقائية أولى
       if (syms.length === 0) {
         await get().syncSymbols();
       }
     } catch (e) {
+      set({ bootErrors: { ...get().bootErrors, symbols: String(e) } });
       get().pushToast(`تعذر جلب قائمة العملات المخزنة: ${String(e)}`, 'alert', undefined, { category: 'system', severity: 'error' });
     }
     // قناة التحديث الآني: بث WebSocket + احتياطي دوري (الثنائي يضمن الوصول دائماً)
@@ -301,6 +323,7 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ calibrationProgress: { done: msg.done ?? 0, total: msg.total ?? 0 } });
         } else if (msg.type === 'live_calibration_done') {
           set({ calibrationProgress: null });
+          get().pushToast('اكتملت معايرة الفرص الحية وحُفظت نتائجها', 'info', undefined, { category: 'liveOpps' });
         } else if (msg.type === 'strategy2_new' && msg.opportunity) {
           const o = msg.opportunity as unknown as { symbol: string; tf: string; model: number; entry: number; stop: number; tp1: number; rr: number; htfDirection: string };
           get().pushToast(`استراتيجيتي — ${o.symbol} (${o.tf}) نموذج ${o.model}: دخول ${o.entry} · وقف ${o.stop} · هدف ${o.tp1} · R:R ${o.rr} · اتجاه HTF ${o.htfDirection === 'up' ? 'صاعد' : o.htfDirection === 'down' ? 'هابط' : 'عرضي'}`, 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: 'alert' });
@@ -315,8 +338,11 @@ export const useStore = create<StoreState>((set, get) => ({
           const rows: Record<string, { price: number | null; plPct: number | null; toTp1Pct: number | null; rNow: number | null; mfeR: number; ageSec: number }> = {};
           for (const r of msg.opportunities ?? []) rows[r.id] = { price: r.price ?? null, plPct: r.plPct ?? null, toTp1Pct: (r as { toTp1Pct?: number | null }).toTp1Pct ?? null, rNow: r.rNow ?? null, mfeR: Number(r.mfeR ?? 0), ageSec: Number(r.ageSec ?? 0) };
           set({ strategy2Rows: rows, strategy2Pulse: { at: Date.now(), kind: 'strategy2_tick' } });
-        } else if (msg.type === 'strategy2_state' || msg.type === 'strategy2_calibration_progress' || msg.type === 'strategy2_calibration_done') {
+        } else if (msg.type === 'strategy2_state' || msg.type === 'strategy2_calibration_progress') {
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
+        } else if (msg.type === 'strategy2_calibration_done') {
+          set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
+          get().pushToast('اكتملت معايرة استراتيجيتي وحُفظت نتائجها', 'info', undefined, { category: 'liveOpps' });
         } else if (msg.type === 'strategy2_directions' && Array.isArray(msg.changed)) {
           // نبضة اتجاهات: تُحفّز إعادة الجلب الصامتة في تبويب الاتجاهات (debounce 1 ث)
           set({ strategy2Pulse: { at: Date.now(), kind: 'strategy2_directions' } });
@@ -334,6 +360,10 @@ export const useStore = create<StoreState>((set, get) => ({
     // اشتراك بأسعار كل العملات المحللة
     for (const a of analyses) get().subscribePrice(a.symbol);
     void get().refreshZoneCounts();
+  },
+
+  retryBoot: async () => {
+    await get().init();
   },
 
   /** عدّادات مناطق السيولة لكل عملة (تُحدَّث عند أي تغيير عبر البث) */
@@ -356,7 +386,7 @@ export const useStore = create<StoreState>((set, get) => ({
         fetch(`${API}/symbols/meta`).then(r => r.ok ? r.json() : { last_updated: 0 })
       ]);
       const newBases = [...new Set(syms.filter(s => !prevBases.has(s.base)).map(s => s.base))];
-      set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? 0 });
+      set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? 0, bootErrors: { ...get().bootErrors, symbols: null } });
       if (newBases.length > 0) {
         const shown = newBases.slice(0, 8).join('، ');
         get().pushToast(
@@ -381,9 +411,10 @@ export const useStore = create<StoreState>((set, get) => ({
         fetchSpotSymbols(quote),
         fetch(`${API}/symbols/meta`).then(x => x.ok ? x.json() : { last_updated: Date.now() })
       ]);
-      set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? Date.now() });
+      set({ symbols: syms, symbolsLoaded: true, lastSync: meta.last_updated ?? Date.now(), bootErrors: { ...get().bootErrors, symbols: null } });
       get().pushToast(`تم تحديث القائمة: ${r.saved}/${r.total} زوج`, 'info', undefined, { category: 'system' });
     } catch (e) {
+      set({ bootErrors: { ...get().bootErrors, symbols: String(e) } });
       get().pushToast(`فشل تحديث القائمة من بينانس: ${String(e)}`, 'alert', undefined, { category: 'system', severity: 'error' });
     } finally {
       set({ syncing: false });
@@ -432,7 +463,7 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ cases: rows, casesLoaded: true, casesError: null });
     } catch (e) {
       // فشل واضح بدل skeleton لا نهائي — لا يُفشل التنقل
-      set({ cases: [], casesLoaded: true, casesError: String(e) });
+      set({ casesLoaded: true, casesError: String(e) });
     }
   },
 

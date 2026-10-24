@@ -8,6 +8,7 @@ import SkeletonRow from './ui/Skeleton';
 import ZonesHistory from './ZonesHistory';
 import EventsLog from './EventsLog';
 import { useScreenState } from '../lib/useScreenState';
+import LoadErrorState from './ui/LoadErrorState';
 
 const ZONE_COLOR: Record<'BSL' | 'SSL', string> = { BSL: '#f23645', SSL: '#089981' };
 const NAV_TABS: { key: ArchiveSection; label: string; desc: string }[] = [
@@ -316,16 +317,17 @@ function CasesSection() {
         </div>
       </div>
 
-      {casesError && (
-        <div className="badge badge-warn flex items-center gap-2">
-          تعذر جلب القرارات: {casesError}
+      {casesError && cases.length === 0 && <LoadErrorState title="تعذر تحميل سجل القرارات" detail={casesError} onRetry={() => void refresh()} />}
+      {casesError && cases.length > 0 && (
+        <div className="badge badge-warn flex items-center gap-2" role="status">
+          تعذر تحديث السجل؛ المعروض آخر بيانات محمّلة: {casesError}
           <button className="underline cursor-pointer" onClick={() => void refresh()}>إعادة المحاولة</button>
         </div>
       )}
 
       {!casesLoaded ? (
         <SkeletonRow height={64} />
-      ) : selected ? (
+      ) : casesError && cases.length === 0 ? null : selected ? (
         <CaseDetail row={selected} onBack={() => setSelectedId(null)} />
       ) : (
         <>

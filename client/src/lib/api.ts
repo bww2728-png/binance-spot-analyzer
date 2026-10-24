@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse, LiquidityV2ZonesResponse, LiquidityV2StatusResponse, Candle } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, PersistedOpportunityHistoryPage, PersistedRejectionReason, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse, LiquidityV2ZonesResponse, LiquidityV2StatusResponse, Candle } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -500,6 +500,13 @@ const liveOpportunitiesApi = {
     fetch(`${BASE}/live-opportunities/history`, { signal }).then(j<{ opportunities: BuyOpportunity[]; total: number }>),
   getBuyHistoryEvents: (days: number, signal?: AbortSignal) =>
     fetch(`${BASE}/live-opportunities/history?days=${days}`, { signal }).then(j<BuyHistoryResponse>),
+  getPersistedOpportunityHistory: (engine: 'live' | 'strategy2', opts: { beforeId?: number | null; limit?: number } = {}, signal?: AbortSignal) => {
+    const q = new URLSearchParams({ engine, limit: String(opts.limit ?? 30) });
+    if (opts.beforeId != null) q.set('beforeId', String(opts.beforeId));
+    return fetch(`${BASE}/opportunities/persisted-history?${q}`, { signal }).then(j<PersistedOpportunityHistoryPage>);
+  },
+  getRejectedOpportunitySummary: (engine: 'live' | 'strategy2', signal?: AbortSignal) =>
+    fetch(`${BASE}/opportunities/rejected-summary?engine=${engine}`, { signal }).then(j<{ engine: string; reasons: PersistedRejectionReason[]; generatedAt: number }>),
   runBuyScan: () =>
     fetch(`${BASE}/live-opportunities/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
   runBuyCalibration: (body?: { symbols?: string[]; timeframes?: string[] }) =>

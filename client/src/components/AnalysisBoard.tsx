@@ -4,6 +4,7 @@ import { sortAnalyses, GROUP_LABELS, GROUP_ORDER } from '../lib/sorting';
 import AddCoinBar from './AddCoinBar';
 import AnalysisRow from './AnalysisRow';
 import Skeleton from './ui/Skeleton';
+import LoadErrorState from './ui/LoadErrorState';
 
 const COLS = [92, 92, 84, 92, 84, 100, 96, 104, 100, 100, 110, 110, 64, 64, 88, 196, 132, 40];
 const HEADERS = [
@@ -23,9 +24,11 @@ const GROUP_COLORS: Record<string, string> = {
 export default function AnalysisBoard() {
   const analyses = useStore(s => s.analyses);
   const prices = useStore(s => s.prices);
-  const settings = useStore(s => s.settings);
   const symbolsLoaded = useStore(s => s.symbolsLoaded);
-  const loading = !settings || !symbolsLoaded;
+  const bootReady = useStore(s => s.bootReady);
+  const bootErrors = useStore(s => s.bootErrors);
+  const retryBoot = useStore(s => s.retryBoot);
+  const loading = !bootReady || (!symbolsLoaded && !bootErrors.symbols);
 
   // محددات Zustand يجب أن تُرجع مرجعاً مستقراً — النتيجة تُحسب هنا بـ useMemo
   const rows = useMemo(
@@ -36,6 +39,13 @@ export default function AnalysisBoard() {
   return (
     <div>
       <AddCoinBar />
+      {(bootErrors.analyses || bootErrors.settings || bootErrors.symbols) && (
+        <LoadErrorState
+          title="تعذر تحميل بعض بيانات لوحة التحليل"
+          detail={[bootErrors.analyses && `التحليلات: ${bootErrors.analyses}`, bootErrors.settings && `الإعدادات: ${bootErrors.settings}`, bootErrors.symbols && `قائمة الأزواج: ${bootErrors.symbols}`].filter(Boolean).join(' · ')}
+          onRetry={() => void retryBoot()}
+        />
+      )}
 
       {loading ? (
         /* هيكل تحميل بحجم الصفوف المتوقع */

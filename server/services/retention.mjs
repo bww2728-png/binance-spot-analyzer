@@ -23,7 +23,7 @@
  *  - الفرص ونتائجها، والقرارات، والمعايرات، والتحليلات، والتصنيفات الشرعية،
  *    وسجل الاتجاهات، وتغذية التعلم الراجعة. هذه هي ذاكرة النظام وقيمته.
  */
-const DIAGNOSTIC_TYPES_30D = ['live_lifecycle', 'live_opportunity_rejected'];
+const DIAGNOSTIC_TYPES_30D = ['live_lifecycle', 'live_opportunity_rejected', 'strategy2_rejected'];
 const SNAPSHOT_TYPE = 'auto_zones_snapshot';
 const SNAPSHOTS_KEPT_PER_SYMBOL = 10;
 const SAMPLE_TYPE = 'health_samples';

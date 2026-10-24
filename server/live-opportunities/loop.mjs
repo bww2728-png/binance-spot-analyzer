@@ -1199,6 +1199,7 @@ export function createLiveOpportunityEngine(deps) {
       error: status.error,
       opportunities: ops.slice(0, cfg.publishLimit),
       total: ops.length,
+      deferredTracking: deferredTracking.size,
       watching: watch.slice(0, cfg.watchLimit),
       watchingTotal: watch.length,
       rejected: rejected.slice(-30).reverse(),

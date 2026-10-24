@@ -641,7 +641,44 @@ const db = {
       });
       return ids.length;
     },
-    /** سجل أحداث الفرص الحية (نشر + حسم) — التاريخ الدائم للوحة التحكم */
+    opportunityHistoryPage: async ({ engine = 'live', beforeId = null, limit = 50 } = {}) => {
+      const strategy2 = engine === 'strategy2';
+      const publishedType = strategy2 ? 'strategy2_published' : 'live_opportunity';
+      const closedType = strategy2 ? 'strategy2_resolved' : 'live_opportunity_closed';
+      const pageLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+      const q = new URLSearchParams({ select: 'id,type,symbol,meta,ts' });
+      q.set('type', `eq.${publishedType}`);
+      if (beforeId != null && Number.isFinite(Number(beforeId))) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(pageLimit));
+      const [published, total] = await Promise.all([
+        rest(`/events_log?${q}`),
+        db.events.countByType(publishedType)
+      ]);
+      const ids = new Set((published ?? []).map(row => {
+        try { return JSON.parse(row.meta ?? '{}')?.opportunity?.id; } catch { return null; }
+      }).filter(Boolean));
+      const outcomeCount = await db.events.countByType(closedType);
+      const outcomes = outcomeCount
+        ? await db.events.listByType(closedType, { select: 'id,type,symbol,meta,ts', limit: Math.min(outcomeCount, 50000) })
+        : [];
+      const matchingOutcomes = (outcomes ?? []).filter(row => {
+        try { return ids.has(JSON.parse(row.meta ?? '{}')?.opportunity?.id); } catch { return false; }
+      });
+      return { published: published ?? [], outcomes: matchingOutcomes, total, nextCursor: published?.length === pageLimit ? published[published.length - 1].id : null, outcomesTruncated: outcomeCount > 50000 };
+    },
+    rejectedSummary: async ({ engine = 'live', limit = 10000 } = {}) => {
+      const type = engine === 'strategy2' ? 'strategy2_rejected' : 'live_opportunity_rejected';
+      const rows = await db.events.listByType(type, { select: 'message,meta,ts', limit });
+      const counts = new Map();
+      for (const row of rows ?? []) {
+        let meta = {};
+        try { meta = JSON.parse(row.meta ?? '{}'); } catch { /* صف تالف لا يعطل الملخص */ }
+        const reason = String(meta.reason ?? row.message ?? 'غير مصنف').slice(0, 240);
+        counts.set(reason, (counts.get(reason) ?? 0) + 1);
+      }
+      return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([reason, count]) => ({ reason, count }));
+    },
     liveOppEvents: (sinceTs, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });
       q.set('type', 'in.(live_opportunity,live_opportunity_closed)');
@@ -665,12 +702,12 @@ const db = {
       return rest(`/events_log?${q}`).then(rows => rows.reverse());
     },
     /** أحداث «الفرص الحية — استراتيجيتي» (نشر + حسم) — استمرارية دائمة بلا DDL */
-    strategy2Events: (sinceTs, limit = 2000) => {
+    strategy2Events: (sinceTs, limit = 50000) => {
       const q = new URLSearchParams({ select: '*' });
       q.set('type', 'in.(strategy2_published,strategy2_resolved)');
       q.set('ts', `gte.${Number(sinceTs) || 0}`);
       q.set('order', 'ts.desc,id.desc');
-      q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      q.set('limit', String(Math.min(Number(limit) || 50000, 50000)));
       return rest(`/events_log?${q}`);
     },
     /** آخر معايرة محفوظة للمحرك الثاني */

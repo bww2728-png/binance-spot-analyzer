@@ -5,6 +5,7 @@ import type { AutoHistoryRow, AutoZoneScreenshot } from '../lib/types';
 import Skeleton from './ui/Skeleton';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import { useScreenState } from '../lib/useScreenState';
+import LoadErrorState from './ui/LoadErrorState';
 
 const TYPE_BADGE = {
   BSL: { cls: 'badge-up', label: 'BSL سيولة شرائية' },
@@ -148,8 +149,12 @@ export default function AutoHistory() {
           </div>
         </div>
 
-        {error && (
-          <div className="badge badge-warn mb-3">تعذر جلب السجل: {error}</div>
+        {error && rows.length === 0 && <LoadErrorState title="تعذر تحميل سجل المناطق" detail={error} onRetry={() => void load()} />}
+        {error && rows.length > 0 && (
+          <div className="badge badge-warn mb-3" role="status">
+            تعذر تحديث السجل؛ المعروض آخر بيانات محمّلة: {error}{' '}
+            <button className="underline" onClick={() => void load()}>إعادة المحاولة</button>
+          </div>
         )}
 
         {/* الجدول */}
@@ -158,7 +163,7 @@ export default function AutoHistory() {
             <div className="p-4 space-y-2">
               {Array.from({ length: 5 }, (_, i) => <Skeleton key={i} height={32} />)}
             </div>
-          ) : (
+          ) : error && rows.length === 0 ? null : (
             <table className="w-full text-xs">
               <thead className="sticky top-0" style={{ background: 'var(--surface-2)' }}>
                 <tr>

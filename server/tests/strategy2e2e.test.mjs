@@ -180,3 +180,43 @@ test('E2E-J/K: بلا إشارة — شرح لا صمت، وبلا معايرة 
     h.engine.stop();
   }
 });
+
+test('إخفاق قراءة الاستعادة يوقف المسح والمعايرة حتى الإيقاف', async () => {
+  let targetReads = 0;
+  let eventReads = 0;
+  const engine = createStrategyEngine({
+    resolveTargets: async () => { targetReads += 1; return ['E2EUSDT']; },
+    fetchRawKlines: async () => [],
+    fetchPrices: async () => ({}),
+    readCalibration: async () => null,
+    readPublishedEvents: async () => { eventReads += 1; throw new Error('temporary database failure'); },
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+    config: { cycleMs: 60_000, tickMs: 60_000, calibrationMs: 60_000 }
+  });
+  engine.start();
+  try {
+    for (let attempt = 0; attempt < 20 && engine.getStatus().recovery.state !== 'failed'; attempt += 1) await sleep(0);
+    assert.equal(engine.getStatus().recovery.state, 'failed');
+    assert.match(engine.getStatus().recovery.error, /temporary database failure/);
+    assert.deepEqual(await engine.runCycle(), { skipped: true, recovery: 'failed' });
+    assert.deepEqual(await engine.runCalibration(), { skipped: true, recovery: 'failed' });
+    assert.equal(targetReads, 0);
+  } finally {
+    engine.stop();
+  }
+  await sleep(10);
+  assert.equal(eventReads, 1, 'الإيقاف يمنع إعادة محاولة الاستعادة');
+});
+
+test('تجاوز حد استعادة أحداث Strategy2 لا يُعامل كاستعادة كاملة', async () => {
+  const events = Array.from({ length: 50_000 }, () => ({ kind: 'resolved', id: 'resolved-only' }));
+  const engine = createStrategyEngine({
+    resolveTargets: async () => [],
+    fetchRawKlines: async () => [],
+    readPublishedEvents: async () => events,
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  await assert.rejects(engine.restoreFromEvents(), /تجاوزت استعادة أحداث الاستراتيجية حد 50000 صف/);
+  assert.equal(engine.getStatus().recovery.truncated, true);
+  engine.stop();
+});
