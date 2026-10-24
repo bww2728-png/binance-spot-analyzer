@@ -3643,7 +3643,16 @@ setInterval(() => {
           bookCalls: st.bookCalls ?? null,
           updatedAt: st.updatedAt ?? null,
           /** ★3: فرق العدّ المنشور عن العدّ عند الحسم فقط */
-          segmentsShadow: st.segmentsShadow ?? null
+          segmentsShadow: st.segmentsShadow ?? null,
+          /** §7.5: نتيجة آخر حفظ — يثبت الاستمرارية (persistWrites>0) أو يكشف فشله */
+          persist: st.persist ?? null,
+          /** §12: حالة الاستعادة عند الإقلاع — سليمة/جزئية/فاشلة ومتى جرت */
+          rehydrated: st.rehydrated ?? null,
+          rehydrateMeta: st.rehydrateMeta ?? null,
+          /** §7.2: فصل العرض عن المتابعة — الفائض يُتابَع ولا يُقتل */
+          deferredTracking: st.deferredTracking ?? null,
+          evictedFromFeed: st.evictedFromFeed ?? null,
+          evictedTracked: st.evictedTracked ?? null
         }
       });
       /**
