@@ -129,18 +129,20 @@ export function simulateZone(candles, touchIdx, zone, { protectedPrice, targets 
   const riskPct = Math.abs(entry - plan.stop) / Math.max(Math.abs(entry), 1e-12);
   const costR = riskPct > 0 ? tradeCostPct / riskPct : 0;
   const netOf = (gross) => Number((gross - costR).toFixed(3));
-  for (let i = touchIdx + 1; i < Math.min(touchIdx + maxBars, candles.length); i += 1) {
+  const lastSimulatedIndex = Math.min(touchIdx + maxBars, candles.length - 1);
+  const simulatedBars = lastSimulatedIndex - touchIdx;
+  for (let i = touchIdx + 1; i <= lastSimulatedIndex; i += 1) {
     const c = candles[i];
     const hitStop = long ? c.low <= plan.stop : c.high >= plan.stop;
     const hitTp = long ? c.high >= plan.tp : c.low <= plan.tp;
     if (hitStop && hitTp) {
-      // الشمعة أمسكت الاثنين — الافتتاح يحدد الجانب القريب (المعيار المتحفظ)
+      // عند لمس الهدف والوقف في الشمعة نفسها، يُحتسب الوقف لتجنب التفاؤل غير المبرر.
       return { win: 0, ts: c.time, exit: plan.stop, bars: i - touchIdx, rr: plan.rr, netRr: netOf(-1), tradeCostPct, costR: Number(costR.toFixed(4)) };
     }
     if (hitStop) return { win: 0, ts: c.time, exit: plan.stop, bars: i - touchIdx, rr: plan.rr, netRr: netOf(-1), tradeCostPct, costR: Number(costR.toFixed(4)) };
     if (hitTp) return { win: 1, ts: c.time, exit: plan.tp, bars: i - touchIdx, rr: plan.rr, netRr: netOf(plan.rr), tradeCostPct, costR: Number(costR.toFixed(4)) };
   }
-  return { win: undefined, ts: candles[candles.length - 1].time, exit: candles[candles.length - 1].close, bars: maxBars, undecided: true, rr: plan.rr, netRr: null, tradeCostPct, costR: Number(costR.toFixed(4)) };
+  return { win: undefined, ts: candles[lastSimulatedIndex].time, exit: candles[lastSimulatedIndex].close, bars: simulatedBars, undecided: true, rr: plan.rr, netRr: null, tradeCostPct, costR: Number(costR.toFixed(4)) };
 }
 
 /** باك تيست لزوج (رمز، فريم): لحظات كشف يومية → لمس → محاكاة — trades كامل مع الأدوات. */
@@ -197,6 +199,7 @@ export async function runPairBacktest(db, { symbol, timeframe, calibration = {},
         swept: Boolean(zone.swept),
         bandPct: zone.bandPct ?? 0.0025,
         ts: touchIdx < candles.length ? candles[touchIdx].time : null,
+        outcomeTime: sim.ts,
         detectUpto: upto,
         detectTime: candles[upto].time,
         entry: candles[touchIdx].close,
@@ -267,7 +270,15 @@ export function learnOnTrades(all, { trainRatio = 0.7, targetWinRate = 0.7 } = {
   if (trades.length < 12) {
     return { enough: false, message: 'trades غير كافية للتعلم (أقل من 12)' };
   }
-  const { train, validation } = walkForwardSplit(trades, trainRatio);
+  const { train: splitTrain, validation } = walkForwardSplit(trades, trainRatio);
+  const validationStart = validation[0]?.ts;
+  const train = splitTrain.filter(t => (t.win === 0 || t.win === 1)
+    && typeof t.outcomeTime === 'number'
+    && Number.isFinite(t.outcomeTime)
+    && t.outcomeTime < validationStart);
+  if (train.length < 12) {
+    return { enough: false, message: 'trades المحسومة وغير المتداخلة غير كافية للتعلم (أقل من 12)' };
+  }
   // معالم التدريب: لوجستي عصبي-رمزي من الصفر
   const samples = train.map(t => ({
     x: featurize({ score: t.score, reasons: t.reasons, clusterCount: t.clusterCount }),

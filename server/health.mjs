@@ -26,6 +26,25 @@ const SAMPLER_MS = 5 * 60 * 1000;
  * البنية تبقى كما هي، فلا ينكسر أي مستهلك يتوقّع مفتاحاً (`zones.live.count` يبقى).
  */
 export function compactSample(input, { maxDepth = 4, maxString = 240, maxPrimArray = 20, maxObjectArray = 16 } = {}) {
+  const compactRecovery = (recovery) => {
+    if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) return recovery ?? null;
+    const result = {};
+    for (const key of ['state', 'attemptedAt', 'readyAt', 'at', 'eventsRead', 'truncated']) {
+      if (Object.hasOwn(recovery, key)) result[key] = recovery[key];
+    }
+    if (recovery.metadata && typeof recovery.metadata === 'object' && !Array.isArray(recovery.metadata)) {
+      result.metadata = {};
+      for (const section of ['lifecycle', 'opportunities', 'calibration']) {
+        const value = recovery.metadata[section];
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+        result.metadata[section] = {};
+        for (const key of ['ok', 'count', 'pages', 'truncated', 'invalidRows']) {
+          if (Object.hasOwn(value, key)) result.metadata[section][key] = value[key];
+        }
+      }
+    }
+    return result;
+  };
   const walk = (v, depth, inHead = false) => {
     if (v === null || v === undefined) return v;
     if (typeof v === 'string') return v.length > maxString ? `${v.slice(0, maxString)}…` : v;
@@ -52,9 +71,15 @@ export function compactSample(input, { maxDepth = 4, maxString = 240, maxPrimArr
       return { n: v.length, head };
     }
     if (typeof v !== 'object') return String(v).slice(0, maxString);
-    if (depth >= maxDepth) return { keys: Object.keys(v).slice(0, 12) };
+    if (depth >= maxDepth) {
+      const out = { keys: Object.keys(v).slice(0, 12) };
+      if (Object.hasOwn(v, 'recovery')) out.recovery = compactRecovery(v.recovery);
+      return out;
+    }
     const out = {};
-    for (const [k, val] of Object.entries(v)) out[k] = walk(val, depth + 1, inHead);
+    for (const [k, val] of Object.entries(v)) {
+      out[k] = k === 'recovery' ? compactRecovery(val) : walk(val, depth + 1, inHead);
+    }
     return out;
   };
   return walk(input, 0, false);

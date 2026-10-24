@@ -51,6 +51,47 @@ test('قائمة محركات كبيرة جداً تُقصّ في الرأس م�
   assert.equal(compacted.engines.head[0].name, 'engine-0');
 });
 
+test('ضغط عيّنة الصحة يحفظ حالة الاستعادة والاكتمال دون نص الخطأ', () => {
+  const compacted = compactSample({
+    engines: [{
+      name: 'live-opportunities',
+      extra: {
+        recovery: {
+          state: 'ready', attemptedAt: 1_700_000_000_000, readyAt: 1_700_000_000_100,
+          error: 'تفاصيل داخلية لا يجب حفظها',
+          metadata: {
+            lifecycle: { ok: true, count: 12, pages: 2, truncated: false, error: 'secret-like detail' },
+            opportunities: { ok: true, count: 8, pages: 1, truncated: false },
+            calibration: { ok: true }
+          }
+        }
+      }
+    }]
+  });
+  const recovery = compacted.engines.head[0].extra.recovery;
+  assert.equal(recovery.state, 'ready');
+  assert.equal(recovery.readyAt, 1_700_000_000_100);
+  assert.equal(recovery.metadata.lifecycle.count, 12);
+  assert.equal(recovery.metadata.lifecycle.pages, 2);
+  assert.equal(recovery.metadata.lifecycle.truncated, false);
+  assert.equal(recovery.metadata.opportunities.ok, true);
+  assert.equal(Object.hasOwn(recovery, 'error'), false);
+  assert.equal(JSON.stringify(compacted).includes('secret-like detail'), false);
+});
+
+test('فشل الاستعادة يبقى ظاهراً في العينة دون كشف تفاصيل الخطأ', () => {
+  const compacted = compactSample({
+    engines: [{
+      name: 'live-opportunities',
+      extra: { recovery: { state: 'failed', attemptedAt: 100, error: 'database credential detail', truncated: true } }
+    }]
+  });
+  const recovery = compacted.engines.head[0].extra.recovery;
+  assert.equal(recovery.state, 'failed');
+  assert.equal(recovery.truncated, true);
+  assert.equal(JSON.stringify(compacted).includes('database credential detail'), false);
+});
+
 test('ضغط عيّنة كاملة يحفظ كل الأقسام التشخيصية الأساسية', () => {
   const sample = {
     now: 1, uptimeSec: 600, lagMs: { p50: 60, p99: 384 },

@@ -6,7 +6,7 @@ import assert from 'node:assert';
 import { kellyF, fractionalKelly, positionUnits, buildPlan, checkPlan } from '../backtest/risk.mjs';
 import { zScore, betaSpread, cointegrationCheck, regimeGate, inventoryBiasSimple } from '../backtest/regime.mjs';
 import { fitLogistic, featurize, learnedScore, synthFilters, walkForwardSplit, evaluateStrategy, activeDecision, stratifiedLift } from '../backtest/learn.mjs';
-import { loadKlinesPaginated, simulateZone, summarizeNet } from '../backtest/engine.mjs';
+import { loadKlinesPaginated, simulateZone, summarizeNet, learnOnTrades } from '../backtest/engine.mjs';
 import { applyLearnedRules, discoverLiveOpportunities } from '../backtest/live.mjs';
 import { adaptiveConfig, detectLiquidityZones, findPivots, feedbackToAdjustment, scanHistory } from '../liquidity-zones/engine.mjs';
 import { renderChart, gafEncode, mtfEncode, ts2vecEmbed, bocpd, detectVisualZones } from '../liquidity-zones/visual.mjs';
@@ -694,4 +694,48 @@ test('التكاليف: ملخص الصافي يستبعد المعلَّق وي
 test('التكاليف: بلا صفقات مُحسَمة لا أرقام مُفبركة', () => {
   const s = summarizeNet([{ win: undefined, netRr: null }]);
   assert.deepEqual(s, { trades: 0, wins: 0, winRate: null, netWinRate: null, avgNetRr: null, avgCostR: null });
+});
+
+test('محاكاة الباك تست تفحص شمعة الأفق الأخيرة ولا تبالغ في أفق البيانات القصير', () => {
+  const zone = { id: 'z', type: 'BSL', price: 100, bandPct: 0.0025 };
+  const fullHorizon = Array.from({ length: 97 }, (_, i) => ({
+    time: i * 60_000, open: 100, high: i === 96 ? 106 : 100.2, low: 100, close: 100, volume: 1
+  }));
+  const finalBarHit = simulateZone(fullHorizon, 0, zone, {
+    protectedPrice: 100, targets: [105], maxBars: 96, feePct: 0, slippagePct: 0
+  });
+  assert.equal(finalBarHit.win, 1);
+  assert.equal(finalBarHit.bars, 96);
+  assert.equal(finalBarHit.ts, 96 * 60_000);
+
+  const ambiguousBar = [
+    { time: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 },
+    { time: 60_000, open: 100, high: 106, low: 99, close: 105, volume: 1 }
+  ];
+  const ambiguous = simulateZone(ambiguousBar, 0, zone, {
+    protectedPrice: 100, targets: [105], maxBars: 96, feePct: 0, slippagePct: 0
+  });
+  assert.equal(ambiguous.win, 0, 'الترتيب المجهول يُحتسب وقفاً بصورة محافظة');
+
+  const shortData = fullHorizon.slice(0, 5);
+  const unresolved = simulateZone(shortData, 0, zone, {
+    protectedPrice: 100, targets: [105], maxBars: 96, feePct: 0, slippagePct: 0
+  });
+  assert.equal(unresolved.undecided, true);
+  assert.equal(unresolved.bars, 4);
+  assert.equal(unresolved.ts, 4 * 60_000);
+});
+
+test('التعلّم الزمني يستبعد غير المحسومة والصفقات التي حُسمت بعد بداية التحقق', () => {
+  const trades = Array.from({ length: 40 }, (_, i) => ({
+    ts: i * 1000,
+    outcomeTime: i < 20 ? i * 1000 + 500 : i < 24 ? 30_000 : i < 28 ? undefined : i * 1000 + 500,
+    win: i < 20 ? i % 2 : i < 24 ? i % 2 : i < 28 ? undefined : i % 2,
+    score: i % 2 ? 80 : 40,
+    reasons: [], clusterCount: i % 2 ? 2 : 0, swept: false, rr: 2
+  }));
+  const learned = learnOnTrades([{ trades }]);
+  assert.equal(learned.enough, true);
+  assert.equal(learned.trainCount, 20, 'التدريب يحتوي فقط على حسم مؤكد قبل نافذة التحقق');
+  assert.equal(learned.validationCount, 12);
 });
