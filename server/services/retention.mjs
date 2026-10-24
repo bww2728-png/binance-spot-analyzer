@@ -38,14 +38,12 @@ const SAMPLE_MAX_ROWS_DEFAULT = 10_000;
  * تكرار 2.6 لاحظه القياس (نفس الرمز والفريم والاتجاه والمرحلة). وهو **سجل ذاكرة
  * النظام** فلا يُحذف بالزمن كالتشخيص، لكنه بلا سقف يملأ القاعدة.
  *
- * والسقف مُشتق من القارئ لا من التقدير: أكبر قراءة في النظام كله هي
- * `db.events.strategy2DirectionEvents` وهي مقيّدة بـ2,000 صف (`Math.min(limit, 2000)`).
- * لذلك إبقاء 20,000 صف = **عشرة أضعاف أكبر قراءة ممكنة** (≈11 ميغابايت) يضمن ألا
- * ينقص أي شيء يقرأه النظام أصلاً، مع سدّ النمو الأبدي. الضبط من البيئة، والتقليم
- * مُعلن في `storage.lastRetention` بالصفوف المحذوفة وحدّها.
+ * والسقف يمنع تراكم سجل الاتجاهات بلا حد. يُحتفظ بأحدث 20,000 صفاً (نحو 11 ميغابايت وفق القياس)،
+ * فيما تستعيد الخدمة السجل عبر صفحات حتى 50,000 صف ثم تتوقف بأمان عند الاقتطاع. الضبط من
+ * البيئة، والتقليم مُعلن في `storage.lastRetention` بالصفوف المحذوفة وحدّها.
  */
 const ROW_CAPPED_TYPES = {
-  strategy2_direction: Number(process.env.RETENTION_DIRECTION_MAX_ROWS ?? 0) || 20_000
+  strategy2_direction: positiveNumber(process.env.RETENTION_DIRECTION_MAX_ROWS, 20_000, true)
 };
 const IMAGE_TYPES_90D = [
   'liquidity_zone', 'liquidity_zone_reviewed',
@@ -70,6 +68,12 @@ export const PROTECTED_TYPES = new Set([
 
 const DAY = 86_400_000;
 
+function positiveNumber(value, fallback, integer = false) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return integer ? Math.max(1, Math.floor(parsed)) : parsed;
+}
+
 /** الأنواع المرشحة للحذف بعد المدة (لا يشمل المحمي) */
 export function agedDiagnosticTypes(days = 30) {
   return DIAGNOSTIC_TYPES_30D.filter(t => !PROTECTED_TYPES.has(t));
@@ -87,12 +91,11 @@ export async function runRetention({ db, now = () => Date.now(), log = console, 
    * تقصيرها عند ضيق السعة أو إطالتها عند التحقيق في حادث. الافتراضيات مبنية على
    * القياس أعلاه: 7 أيام للتشخيص، 30 للعيّنات، 90 للصور.
    */
-  const diagDays = Number(diagnosticDays ?? process.env.RETENTION_DIAGNOSTIC_DAYS ?? 7) || 7;
-  const imgDays = Number(imageDays ?? process.env.RETENTION_IMAGE_DAYS ?? 90) || 90;
-  // عيّنات الصحة سياسة صريحة الآن (كانت محمية حماية مطلقة فينمو الجدول أبداً)
-  const sampleDays = Number(process.env.RETENTION_SAMPLE_DAYS ?? SAMPLE_DAYS_DEFAULT) || SAMPLE_DAYS_DEFAULT;
-  const sampleMaxRows = Number(process.env.RETENTION_SAMPLE_MAX_ROWS ?? SAMPLE_MAX_ROWS_DEFAULT) || SAMPLE_MAX_ROWS_DEFAULT;
-  const snapshotsKept = Number(process.env.RETENTION_SNAPSHOTS_PER_SYMBOL ?? SNAPSHOTS_KEPT_PER_SYMBOL) || SNAPSHOTS_KEPT_PER_SYMBOL;
+  const diagDays = positiveNumber(diagnosticDays ?? process.env.RETENTION_DIAGNOSTIC_DAYS, 7);
+  const imgDays = positiveNumber(imageDays ?? process.env.RETENTION_IMAGE_DAYS, 90);
+  const sampleDays = positiveNumber(process.env.RETENTION_SAMPLE_DAYS, SAMPLE_DAYS_DEFAULT);
+  const sampleMaxRows = positiveNumber(process.env.RETENTION_SAMPLE_MAX_ROWS, SAMPLE_MAX_ROWS_DEFAULT, true);
+  const snapshotsKept = positiveNumber(process.env.RETENTION_SNAPSHOTS_PER_SYMBOL, SNAPSHOTS_KEPT_PER_SYMBOL, true);
 
   // 1) الأنواع التشخيصية بعد المدة المحددة
   for (const type of agedDiagnosticTypes(diagDays)) {

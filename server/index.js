@@ -24,6 +24,8 @@ import {
 } from './liquidity-zones/engine.mjs';
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
+import { createLiveOpportunityRecovery } from './live-opportunities/recovery.mjs';
+import { readAllPages } from './services/readAllPages.mjs';
 import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams, createKeyQueue } from './market/streams.mjs';
 import { createHealth } from './health.mjs';
@@ -2350,15 +2352,11 @@ runtime.dataFresh = () => {
 // والترتيب من الفريم الأدق (1m) صعوداً — عرض أولاً بأول. البوابة الأخيرة: شريحة معايرة ≥ 60%.
 
 const readLiveCalibration = async () => {
-  try {
-    const rows = await db.events.list({ type: 'live_calibration', limit: 1 });
-    const row = rows?.[0];
-    if (!row) return null;
-    const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
-    return { at: Number(row.ts) || null, trades: meta?.trades ?? 0, segments: meta?.segments ?? [] };
-  } catch {
-    return null;
-  }
+  const rows = await db.events.list({ type: 'live_calibration', limit: 1 });
+  const row = rows?.[0];
+  if (!row) return null;
+  const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
+  return { at: Number(row.ts) || null, trades: meta?.trades ?? 0, segments: meta?.segments ?? [] };
 };
 
 const liveOppEngine = createLiveOpportunityEngine({
@@ -2404,6 +2402,7 @@ const liveOppEngine = createLiveOpportunityEngine({
   log: console,
   notePersist: (r) => health.notePersist(r),
   config: {
+    recoveryRequired: true,
     maxKlineSubs: Number(process.env.LIVE_MAX_KLINE_SUBS) || 600,
     maxFlowSubs: Number(process.env.LIVE_MAX_FLOW_SUBS) || 60,
     calibration: {
@@ -2422,40 +2421,20 @@ const liveOppEngine = createLiveOpportunityEngine({
   workers: workerPool,
   shadow
 });
-setTimeout(() => {
-  // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
-  void (async () => {
-    const day = 86_400_000;
-    // سقوف مطابقة لسقوف db.js: التجاوز يعني أن أحداثًا أقدم لم تُقرأ — يُعلَن لا يُخفى
-    const LC_LIMIT = 5000;
-    const OPS_LIMIT = 2000;
-    const [lcResult, opsResult] = await Promise.allSettled([
-      db.events.liveLifecycle(Date.now() - day, LC_LIMIT),
-      db.events.liveOppEvents(Date.now() - 7 * day, OPS_LIMIT)
-    ]);
-    const lc = lcResult.status === 'fulfilled' ? (lcResult.value || []) : null;
-    const ops = opsResult.status === 'fulfilled' ? (opsResult.value || []) : null;
-    const recoveryMeta = {
-      lifecycle: {
-        ok: lc !== null, count: lc?.length ?? 0, error: lcResult.reason?.message ?? null,
-        truncated: lc !== null && lc.length >= LC_LIMIT
-      },
-      opportunities: {
-        ok: ops !== null, count: ops?.length ?? 0, error: opsResult.reason?.message ?? null,
-        truncated: ops !== null && ops.length >= OPS_LIMIT
-      }
-    };
-    if (!recoveryMeta.lifecycle.ok || !recoveryMeta.opportunities.ok) {
-      console.error('[live-opp] recovery query failed:', recoveryMeta);
-    }
-    if (recoveryMeta.lifecycle.truncated || recoveryMeta.opportunities.truncated) {
-      console.warn('[live-opp] recovery hit row limit — أقدم الأحداث لم تُقرأ:', recoveryMeta);
-    }
-    // نستعيد ما توفر: إذا فشل استعلام واحد نستمر بالآخر، لكن لا ندَّعي اكتمال الاستعادة.
-    liveOppEngine.rehydrate([...(lc || []), ...(ops || [])], recoveryMeta);
-    liveOppEngine.start();
-  })();
-}, 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
+const LIVE_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const liveOpportunityRecovery = createLiveOpportunityRecovery({
+  engine: liveOppEngine,
+  readLifecycle: () => readAllPages(
+    ({ beforeId, limit }) => db.events.liveLifecyclePage(Date.now() - LIVE_RECOVERY_WINDOW_MS, beforeId, limit),
+    { pageSize: 1000, maxRows: 50_000 }
+  ),
+  readOpportunities: () => readAllPages(
+    ({ beforeId, limit }) => db.events.liveOppEventsPage(0, beforeId, limit),
+    { pageSize: 1000, maxRows: 50_000 }
+  ),
+  log: console
+});
+liveOpportunityRecovery.start(75_000);
 
 // ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══
 // هيكل خارجي/داخلي · بريميوم/ديسكاونت · choch up · نموذجا دخول · نقاط فشل موثقة.
@@ -2470,16 +2449,25 @@ const readStrategy2Calibration = async () => {
 };
 
 const readStrategy2PublishedEvents = async () => {
-  const rows = await db.events.strategy2Events(0, 50_000);
-  return rows.map(r => {
-    let meta = {};
-    try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
-    const o = meta.opportunity ?? {};
-    return {
-      kind: r.type === 'strategy2_published' ? 'published' : 'resolved',
-      id: o.id ?? null, ts: r.ts, ...o
-    };
-  }).filter(e => e.id);
+  const scan = await readAllPages(
+    ({ beforeId, limit }) => db.events.strategy2EventsPage(0, beforeId, limit),
+    { pageSize: 1000, maxRows: 50_000 }
+  );
+  if (scan.truncated) throw new Error('تجاوزت استعادة أحداث الاستراتيجية حد 50000 صف؛ أُوقفت الدورة لتجنب استعادة جزئية');
+  return {
+    ...scan,
+    rows: scan.rows.map(r => {
+      let meta;
+      try { meta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? {}); }
+      catch { throw new Error(`تعذر تفسير بيانات حدث الاستراتيجية المحفوظ (id=${r.id})`); }
+      const opportunity = meta?.opportunity;
+      if (!opportunity?.id) throw new Error(`حدث استراتيجية محفوظ بلا هوية فرصة (id=${r.id})`);
+      return {
+        kind: r.type === 'strategy2_published' ? 'published' : 'resolved',
+        id: opportunity.id, ts: r.ts, ...opportunity
+      };
+    })
+  };
 };
 
 const strategy2Engine = createStrategyEngine({
@@ -2503,16 +2491,35 @@ const strategy2Engine = createStrategyEngine({
   market: marketStreams,
   readCalibration: readStrategy2Calibration,
   readPublishedEvents: readStrategy2PublishedEvents,
-  readFeedbackEvents: () => db.events.strategy2FeedbackEvents(0, 2000),
+  readFeedbackEvents: async () => {
+    const scan = await readAllPages(
+      ({ beforeId, limit }) => db.events.strategy2FeedbackEventsPage(0, beforeId, limit),
+      { pageSize: 1000, maxRows: 50_000 }
+    );
+    if (scan.truncated) throw new Error('تجاوزت استعادة تصحيحات Strategy2 حد 50000 صف');
+    return scan.rows.map(r => {
+      let feedback;
+      try { feedback = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? {}); }
+      catch { throw new Error(`تعذر تفسير تصحيح Strategy2 المحفوظ (id=${r.id})`); }
+      if (!feedback?.id || !feedback?.elementId) throw new Error(`تصحيح Strategy2 محفوظ بلا هوية (id=${r.id})`);
+      return feedback;
+    });
+  },
   readDirectionEvents: async () => {
-    const rows = await db.events.strategy2DirectionEvents(0, 2000);
-    return rows.map(r => {
-      let meta = {};
-      try { meta = JSON.parse(r.meta ?? '{}'); } catch { /* meta تالفة تُتجاهل */ }
-      const o = meta.opportunity ?? {};
-      const label = o.label ?? (o.stage ? `تغير المرحلة: ${o.stage}` : 'تغير مرحلة');
-      return { ...o, label, symbol: o.symbol || r.symbol, at: o.at ?? r.ts };
-    }).filter(e => e.symbol);
+    const scan = await readAllPages(
+      ({ beforeId, limit }) => db.events.strategy2DirectionEventsPage(0, beforeId, limit),
+      { pageSize: 1000, maxRows: 50_000 }
+    );
+    if (scan.truncated) throw new Error('تجاوزت استعادة اتجاهات Strategy2 حد 50000 صف');
+    return scan.rows.reverse().map(r => {
+      let meta;
+      try { meta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? {}); }
+      catch { throw new Error(`تعذر تفسير حدث اتجاه Strategy2 المحفوظ (id=${r.id})`); }
+      const opportunity = meta.opportunity;
+      if (!opportunity?.symbol || !opportunity?.tf) throw new Error(`حدث اتجاه Strategy2 محفوظ بلا رمز أو إطار زمني (id=${r.id})`);
+      const label = opportunity.label ?? (opportunity.stage ? `تغير المرحلة: ${opportunity.stage}` : 'تغير مرحلة');
+      return { ...opportunity, label, symbol: opportunity.symbol || r.symbol, at: opportunity.at ?? r.ts };
+    });
   },
   broadcast: (msg) => broadcast(msg),
   persist: (row) => {
@@ -2557,6 +2564,7 @@ const strategy2Engine = createStrategyEngine({
   },
   log: console,
   config: {
+    recoveryRequired: true,
     /**
      * السقف صفر يعني **كل العملات الحلال** (472) — وهو المطلوب: كان 180 سقفاً
      * صامتاً يترك 62% من العملات بلا تحليل.
@@ -3680,6 +3688,7 @@ setInterval(() => {
           persist: st.persist ?? null,
           /** §12: حالة الاستعادة عند الإقلاع — سليمة/جزئية/فاشلة ومتى جرت */
           rehydrated: st.rehydrated ?? null,
+          recovery: st.recovery ?? null,
           rehydrateMeta: st.rehydrateMeta ?? null,
           /** §7.2: فصل العرض عن المتابعة — الفائض يُتابَع ولا يُقتل */
           deferredTracking: st.deferredTracking ?? null,

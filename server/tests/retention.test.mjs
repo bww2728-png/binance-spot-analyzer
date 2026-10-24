@@ -214,6 +214,14 @@ test('المدد قابلة للضبط: تغييرها يغيّر حدّ الح�
   assert.equal(deleted[0]?.before, nowMs - 7 * DAY, 'حدّ الحذف اتبع 7 أيام');
 });
 
+test('مدد الاحتفاظ السالبة لا تؤدي إلى حذف كل السجل', async () => {
+  const now = 2_000_000_000_000;
+  const { db, calls } = fakeDb();
+  await runRetention({ db, now: () => now, diagnosticDays: -7, imageDays: -90, log: { log: () => {}, warn: () => {} } });
+  assert.equal(calls.deleteBefore[0].beforeTs, now - 7 * DAY);
+  assert.equal(calls.clearImages[0].beforeTs, now - 90 * DAY);
+});
+
 test('قيم المدد غير الصالحة تعود للافتراضي (لا حذف بلا حد)', async () => {
   const deleted = [];
   const db = {

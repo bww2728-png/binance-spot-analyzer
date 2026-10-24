@@ -53,6 +53,28 @@ test('persist: فشل الحفظ لا يُخفى — notePersist يتلقى ال
   assert.ok(status().persist.failures >= 1);
 });
 
+test('persist: قيمة false لا تُسجل نجاحاً مؤكداً للحفظ', async () => {
+  const notes = [];
+  let price = 101;
+  const engine = createLiveOpportunityEngine({
+    persist: async () => false,
+    notePersist: value => notes.push(value),
+    zoneSource: () => [{ symbol: 'BTCUSDT', timeframe: '5m', id: 'z1', kind: 'ssl', liquidityLevel: 98, referenceLevel: 100, atr: 1 }],
+    resolveTargets: async () => ['BTCUSDT'],
+    fetchPrices: async () => ({ BTCUSDT: price }),
+    fetchBookSignals: async () => ({}),
+    fetchRawKlines: async () => [],
+    readCalibration: async () => null,
+    log: { warn() {}, error() {}, log() {} }
+  });
+  engine.rehydrate([], { lifecycle: { ok: true, count: 0 }, opportunities: { ok: true, count: 0 } });
+  price = 97.5;
+  await engine.runCycle();
+  assert.equal(engine.getStatus().persist.writes, 0);
+  assert.ok(engine.getStatus().persist.failures >= 1);
+  assert.ok(notes.some(note => !note.ok));
+});
+
 test('persist: النتيجة تُحفظ فور حسمها لا بعد مؤقت العرض', async () => {
   const { engine, persistCalls, setPrice } = makeEngine({ persistResult: 'ok' });
   const op = {
@@ -69,6 +91,29 @@ test('persist: النتيجة تُحفظ فور حسمها لا بعد مؤقت 
   await engine.runCycle();
   const outcomeSaves = persistCalls.filter(r => r.closed === true);
   assert.ok(outcomeSaves.length >= 1, 'يجب حفظ النتيجة فور حسمها');
+});
+
+test('calibration: إشعار الاكتمال لا يؤكد الحفظ دون نتيجة تخزين صريحة ويُرسل مرة', async () => {
+  const broadcasts = [];
+  const engine = createLiveOpportunityEngine({
+    now: () => 2_000_000,
+    persist: async () => false,
+    broadcast: message => broadcasts.push(message),
+    resolveTargets: async () => [],
+    fetchPrices: async () => ({}),
+    fetchBookSignals: async () => ({}),
+    fetchRawKlines: async () => [],
+    zoneSource: () => [],
+    readCalibration: async () => null,
+    log: { log() {}, warn() {}, error() {} }
+  });
+  const result = await engine.runCalibration();
+  const done = broadcasts.filter(message => message.type === 'live_calibration_done');
+  assert.equal(result.persisted, false);
+  assert.equal(done.length, 1);
+  assert.equal(done[0].at, 2_000_000);
+  assert.equal(done[0].persisted, false);
+  engine.stop();
 });
 
 test('rehydrate: البيانات الوصفية تُحفظ في الحالة وتظهر حالة الاستعلامات', () => {
@@ -95,4 +140,60 @@ test('rehydrate: الأحداث المكررة لا تُنشئ فرصًا مكر
   ];
   engine.rehydrate(rows, { lifecycle: { ok: true, count: 0 }, opportunities: { ok: true, count: 2 } });
   assert.ok(status().rehydrated.opportunities <= 1, `توقع فرصة واحدة لكن استُعيد ${status().rehydrated.opportunities}`);
+});
+
+test('recoveryRequired: يمنع المسح والمعايرة حتى الاستعادة الكاملة، ويقبل السجل الفارغ الحقيقي', async () => {
+  let targetReads = 0;
+  const engine = createLiveOpportunityEngine({
+    persist: async () => ({ ok: true }),
+    resolveTargets: async () => { targetReads += 1; return []; },
+    fetchPrices: async () => ({}),
+    fetchBookSignals: async () => ({}),
+    fetchRawKlines: async () => [],
+    zoneSource: () => [],
+    readCalibration: async () => null,
+    config: { recoveryRequired: true, cycleMs: 60_000, tickMs: 60_000, calibrationMs: 60_000 },
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  assert.equal(engine.getStatus().recovery.state, 'pending');
+  assert.deepEqual(await engine.runCycle(), { skipped: true, recovery: 'pending' });
+  assert.deepEqual(await engine.runCalibration(), { skipped: true, recovery: 'pending' });
+  assert.deepEqual(engine.start(), { skipped: true, recovery: 'pending' });
+  assert.equal(targetReads, 0);
+  const failed = engine.rehydrate([], { lifecycle: { ok: false, error: 'read failed' }, opportunities: { ok: true, count: 0 } });
+  assert.equal(failed.skipped, true);
+  assert.equal(engine.getStatus().recovery.state, 'failed');
+  assert.deepEqual(await engine.runCycle(), { skipped: true, recovery: 'failed' });
+  const recovered = engine.rehydrate([], { lifecycle: { ok: true, count: 0 }, opportunities: { ok: true, count: 0 } });
+  assert.equal(recovered.inputRows, 0);
+  assert.equal(engine.getStatus().recovery.state, 'ready');
+  engine.start();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    await engine.runCycle();
+  } finally {
+    engine.stop();
+  }
+  assert.equal(targetReads, 2);
+});
+
+test('recoveryRequired: صفوف الفرص التالفة تمنع الاستعادة الجزئية', () => {
+  const engine = createLiveOpportunityEngine({
+    persist: async () => ({ ok: true }),
+    resolveTargets: async () => [],
+    fetchPrices: async () => ({}),
+    fetchBookSignals: async () => ({}),
+    fetchRawKlines: async () => [],
+    zoneSource: () => [],
+    config: { recoveryRequired: true },
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  const result = engine.rehydrate([
+    { type: 'live_opportunity', symbol: 'BTCUSDT', ts: 1, meta: '{malformed' }
+  ], { lifecycle: { ok: true, count: 0 }, opportunities: { ok: true, count: 1 } });
+  assert.equal(result.skipped, true);
+  assert.equal(result.invalidRows, 1);
+  assert.equal(engine.getStatus().recovery.state, 'failed');
+  assert.deepEqual(engine.start(), { skipped: true, recovery: 'failed' });
+  engine.stop();
 });

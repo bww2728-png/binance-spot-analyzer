@@ -46,6 +46,18 @@ export interface AppNotification {
 const NOTIF_STORAGE_KEY = 'app_notifications_v1';
 const NOTIF_CAP = 500;
 let toastId = 0;
+const calibrationNotificationIds = { live: new Set<string>(), strategy2: new Set<string>() };
+
+function shouldNotifyCalibration(engine: 'live' | 'strategy2', at: unknown): boolean {
+  const timestamp = Number(at);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return true;
+  const seen = calibrationNotificationIds[engine];
+  const id = String(timestamp);
+  if (seen.has(id)) return false;
+  seen.add(id);
+  if (seen.size > 100) seen.delete(seen.values().next().value!);
+  return true;
+}
 
 function loadStoredNotifications(): AppNotification[] {
   try {
@@ -323,7 +335,10 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ calibrationProgress: { done: msg.done ?? 0, total: msg.total ?? 0 } });
         } else if (msg.type === 'live_calibration_done') {
           set({ calibrationProgress: null });
-          get().pushToast('اكتملت معايرة الفرص الحية وحُفظت نتائجها', 'info', undefined, { category: 'liveOpps' });
+          if (shouldNotifyCalibration('live', msg.at)) {
+            const persisted = msg.persisted === true;
+            get().pushToast(persisted ? 'اكتملت معايرة الفرص الحية وحُفظت نتائجها' : 'اكتملت معايرة الفرص الحية، لكن لم يُؤكد حفظ نتائجها', persisted ? 'info' : 'alert', undefined, { category: 'liveOpps', severity: persisted ? 'info' : 'error' });
+          }
         } else if (msg.type === 'strategy2_new' && msg.opportunity) {
           const o = msg.opportunity as unknown as { symbol: string; tf: string; model: number; entry: number; stop: number; tp1: number; rr: number; htfDirection: string };
           get().pushToast(`استراتيجيتي — ${o.symbol} (${o.tf}) نموذج ${o.model}: دخول ${o.entry} · وقف ${o.stop} · هدف ${o.tp1} · R:R ${o.rr} · اتجاه HTF ${o.htfDirection === 'up' ? 'صاعد' : o.htfDirection === 'down' ? 'هابط' : 'عرضي'}`, 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: 'alert' });
@@ -342,7 +357,10 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
         } else if (msg.type === 'strategy2_calibration_done') {
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
-          get().pushToast('اكتملت معايرة استراتيجيتي وحُفظت نتائجها', 'info', undefined, { category: 'liveOpps' });
+          if (shouldNotifyCalibration('strategy2', msg.at)) {
+            const persisted = msg.persisted === true;
+            get().pushToast(persisted ? 'اكتملت معايرة استراتيجيتي وحُفظت نتائجها' : 'اكتملت معايرة استراتيجيتي، لكن لم يُؤكد حفظ نتائجها', persisted ? 'info' : 'alert', undefined, { category: 'liveOpps', severity: persisted ? 'info' : 'error' });
+          }
         } else if (msg.type === 'strategy2_directions' && Array.isArray(msg.changed)) {
           // نبضة اتجاهات: تُحفّز إعادة الجلب الصامتة في تبويب الاتجاهات (debounce 1 ث)
           set({ strategy2Pulse: { at: Date.now(), kind: 'strategy2_directions' } });

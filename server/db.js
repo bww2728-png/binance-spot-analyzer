@@ -1,6 +1,7 @@
 import { applyFeedback } from './liquidity/engine.mjs';
 import { gate, reportRateLimit, sleep, RATE_WAIT_CAP_MS } from './net/gate.mjs';
 import { compactSnapshot, expandSnapshotMeta } from './services/snapshotCodec.mjs';
+import { readAllPages } from './services/readAllPages.mjs';
 
 /**
  * المحدد الموحّد يُحقن من الخادم (أو من الاختبارات) عبر `setRateLimiter`.
@@ -655,25 +656,57 @@ const db = {
         rest(`/events_log?${q}`),
         db.events.countByType(publishedType)
       ]);
-      const ids = new Set((published ?? []).map(row => {
-        try { return JSON.parse(row.meta ?? '{}')?.opportunity?.id; } catch { return null; }
-      }).filter(Boolean));
-      const outcomeCount = await db.events.countByType(closedType);
-      const outcomes = outcomeCount
-        ? await db.events.listByType(closedType, { select: 'id,type,symbol,meta,ts', limit: Math.min(outcomeCount, 50000) })
-        : [];
-      const matchingOutcomes = (outcomes ?? []).filter(row => {
-        try { return ids.has(JSON.parse(row.meta ?? '{}')?.opportunity?.id); } catch { return false; }
-      });
-      return { published: published ?? [], outcomes: matchingOutcomes, total, nextCursor: published?.length === pageLimit ? published[published.length - 1].id : null, outcomesTruncated: outcomeCount > 50000 };
+      const parseEventMeta = (row, label) => {
+        try { return typeof row.meta === 'string' ? JSON.parse(row.meta || '{}') : (row.meta ?? {}); }
+        catch { throw new Error(`تعذر تفسير بيانات ${label} المحفوظة (id=${row.id})`); }
+      };
+      const publishedMeta = (published ?? []).map(row => parseEventMeta(row, 'نشر الفرصة')?.opportunity ?? null);
+      if (publishedMeta.some(opportunity => !opportunity?.id)) throw new Error(`تعذر تفسير سجل النشر المحفوظ لمحرك ${engine}`);
+      const ids = new Set(publishedMeta.map(opportunity => opportunity.id));
+      const publishedTimes = (published ?? []).map(row => Number(row.ts));
+      if (publishedTimes.some(ts => !Number.isFinite(ts))) throw new Error(`يوجد توقيت نشر غير صالح في سجل ${engine}`);
+      const minPublishedTs = publishedTimes.length ? Math.min(...publishedTimes) : null;
+      const outcomePage = published?.length
+        ? await readAllPages(({ beforeId: outcomeBeforeId, limit: outcomeLimit }) =>
+          db.events.opportunityOutcomeEventsPage(closedType, minPublishedTs, outcomeBeforeId, outcomeLimit),
+        { pageSize: 1000, maxRows: 50_000 })
+        : { rows: [], truncated: false };
+      if (outcomePage.truncated) throw new Error(`تعذر إكمال سجل نتائج ${engine}: تجاوز حد الصفوف الآمن`);
+      const matchingOutcomes = [];
+      for (const row of outcomePage.rows ?? []) {
+        const opportunityId = parseEventMeta(row, 'نتيجة الفرصة')?.opportunity?.id;
+        if (!opportunityId) throw new Error(`نتيجة محفوظة بلا هوية فرصة (id=${row.id})`);
+        if (ids.has(opportunityId)) matchingOutcomes.push(row);
+      }
+      return { published: published ?? [], outcomes: matchingOutcomes, total, nextCursor: published?.length === pageLimit ? published[published.length - 1].id : null };
     },
-    rejectedSummary: async ({ engine = 'live', limit = 10000 } = {}) => {
+    opportunityOutcomeEventsPage: (type, sinceTs, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: 'id,type,symbol,meta,ts' });
+      q.set('type', `eq.${type}`);
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
+      return rest(`/events_log?${q}`);
+    },
+    rejectedEventsPage: (type, sinceTs, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: 'id,message,meta,ts' });
+      q.set('type', `eq.${type}`);
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
+      return rest(`/events_log?${q}`);
+    },
+    rejectedSummary: async ({ engine = 'live', sinceTs = Date.now() - 7 * 86_400_000, maxRows = 50_000 } = {}) => {
       const type = engine === 'strategy2' ? 'strategy2_rejected' : 'live_opportunity_rejected';
-      const rows = await db.events.listByType(type, { select: 'message,meta,ts', limit });
+      const scan = await readAllPages(({ beforeId, limit }) =>
+        db.events.rejectedEventsPage(type, sinceTs, beforeId, limit), { pageSize: 1000, maxRows });
+      if (scan.truncated) throw new Error(`تجاوز سجل رفض ${engine} حد الصفحة الآمن خلال الفترة المطلوبة`);
       const counts = new Map();
-      for (const row of rows ?? []) {
+      for (const row of scan.rows) {
         let meta = {};
-        try { meta = JSON.parse(row.meta ?? '{}'); } catch { /* صف تالف لا يعطل الملخص */ }
+        try { meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : (row.meta ?? {}); } catch { /* صف تالف لا يعطل الملخص */ }
         const reason = String(meta.reason ?? row.message ?? 'غير مصنف').slice(0, 240);
         counts.set(reason, (counts.get(reason) ?? 0) + 1);
       }
@@ -685,6 +718,15 @@ const db = {
       q.set('ts', `gte.${Number(sinceTs) || 0}`);
       q.set('order', 'ts.desc,id.desc');
       q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      return rest(`/events_log?${q}`);
+    },
+    liveOppEventsPage: (sinceTs, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'in.(live_opportunity,live_opportunity_closed)');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
       return rest(`/events_log?${q}`);
     },
     /**
@@ -701,6 +743,15 @@ const db = {
       q.set('limit', String(Math.min(Number(limit) || 2000, 5000)));
       return rest(`/events_log?${q}`).then(rows => rows.reverse());
     },
+    liveLifecyclePage: (sinceTs, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'eq.live_lifecycle');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
+      return rest(`/events_log?${q}`);
+    },
     /** أحداث «الفرص الحية — استراتيجيتي» (نشر + حسم) — استمرارية دائمة بلا DDL */
     strategy2Events: (sinceTs, limit = 50000) => {
       const q = new URLSearchParams({ select: '*' });
@@ -710,8 +761,21 @@ const db = {
       q.set('limit', String(Math.min(Number(limit) || 50000, 50000)));
       return rest(`/events_log?${q}`);
     },
+    strategy2EventsPage: (sinceTs = 0, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'in.(strategy2_published,strategy2_resolved)');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
+      return rest(`/events_log?${q}`);
+    },
     /** آخر معايرة محفوظة للمحرك الثاني */
-    strategy2Calibration: () => rest('/events_log?type=eq.strategy2_calibration&select=*&order=ts.desc&limit=1'),
+    strategy2Calibration: async () => {
+      const rows = await rest('/events_log?type=eq.strategy2_calibration&select=*&order=ts.desc,id.desc&limit=1');
+      if (!Array.isArray(rows)) throw new Error('مصدر معايرة الاستراتيجية أعاد استجابة غير صالحة');
+      return rows[0] ?? null;
+    },
     /** التصحيح البشري لعناصر strategy2 — تعليق مُصدَر قابل للعكس (لا يمس القواعد) */
     strategy2FeedbackSave: (fb) => rest('/events_log?select=*', {
       method: 'POST',
@@ -739,13 +803,30 @@ const db = {
         try { return JSON.parse(r.meta ?? '{}'); } catch { return null; }
       }).filter(Boolean));
     },
-    /** أحداث تغيّر الاتجاهات (انقلاب/مرحلة/موت مشوار) — التاريخ الدائم للاتجاهات */
+    strategy2FeedbackEventsPage: (sinceTs = 0, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'eq.strategy2_feedback');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
+      return rest(`/events_log?${q}`);
+    },
     strategy2DirectionEvents: (sinceTs = 0, limit = 2000) => {
       const q = new URLSearchParams({ select: '*' });
       q.set('type', 'eq.strategy2_direction');
       q.set('ts', `gte.${Number(sinceTs) || 0}`);
       q.set('order', 'ts.desc,id.desc');
       q.set('limit', String(Math.min(Number(limit) || 2000, 2000)));
+      return rest(`/events_log?${q}`);
+    },
+    strategy2DirectionEventsPage: (sinceTs = 0, beforeId = null, limit = 1000) => {
+      const q = new URLSearchParams({ select: '*' });
+      q.set('type', 'eq.strategy2_direction');
+      q.set('ts', `gte.${Number(sinceTs) || 0}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+      q.set('order', 'id.desc');
+      q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
       return rest(`/events_log?${q}`);
     }
   }

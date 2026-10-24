@@ -181,6 +181,43 @@ test('E2E-J/K: بلا إشارة — شرح لا صمت، وبلا معايرة 
   }
 });
 
+test('معايرة Strategy2 لا تُعلن الحفظ عند فشل الكتابة وتربط الإشعار بزمن التشغيل', async () => {
+  const broadcasts = [];
+  const engine = createStrategyEngine({
+    resolveTargets: async () => [],
+    fetchRawKlines: async () => [],
+    persist: async () => ({ ok: false, error: new Error('db down') }),
+    broadcast: message => broadcasts.push(message),
+    now: () => 1_700_000_123_456,
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  const result = await engine.runCalibration({ symbols: [] });
+  const done = broadcasts.filter(message => message.type === 'strategy2_calibration_done');
+  assert.equal(result.persisted, false);
+  assert.equal(engine.getStatus().calibration.error, 'لم يؤكد التخزين الدائم نجاح المعايرة');
+  assert.equal(done.length, 1);
+  assert.equal(done[0].at, 1_700_000_123_456);
+  assert.equal(done[0].persisted, false);
+  engine.stop();
+});
+
+test('recoveryRequired: يمنع دورة المسح والمعايرة حتى قبل بدء المحرك', async () => {
+  let targetReads = 0;
+  const engine = createStrategyEngine({
+    resolveTargets: async () => { targetReads += 1; return ['PENDINGUSDT']; },
+    fetchRawKlines: async () => [],
+    readCalibration: async () => null,
+    readPublishedEvents: async () => [],
+    config: { recoveryRequired: true },
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  assert.equal(engine.getFeed().recovery.state, 'pending');
+  assert.deepEqual(await engine.runCycle(), { skipped: true, recovery: 'pending' });
+  assert.deepEqual(await engine.runCalibration(), { skipped: true, recovery: 'pending' });
+  assert.equal(targetReads, 0);
+  engine.stop();
+});
+
 test('إخفاق قراءة الاستعادة يوقف المسح والمعايرة حتى الإيقاف', async () => {
   let targetReads = 0;
   let eventReads = 0;
@@ -219,4 +256,63 @@ test('تجاوز حد استعادة أحداث Strategy2 لا يُعامل كا
   await assert.rejects(engine.restoreFromEvents(), /تجاوزت استعادة أحداث الاستراتيجية حد 50000 صف/);
   assert.equal(engine.getStatus().recovery.truncated, true);
   engine.stop();
+});
+
+test('اكتمال استعادة صفحات Strategy2 يميّز 50000 صف كاملة عن الاقتطاع', async () => {
+  const events = Array.from({ length: 50_000 }, (_, index) => ({ kind: 'resolved', id: `resolved-${index}` }));
+  const engine = createStrategyEngine({
+    resolveTargets: async () => [],
+    fetchRawKlines: async () => [],
+    readPublishedEvents: async () => ({ rows: events, truncated: false, pages: 50 }),
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  await engine.restoreFromEvents();
+  assert.equal(engine.getStatus().recovery.eventsRead, 50_000);
+  assert.equal(engine.getStatus().recovery.truncated, false);
+  engine.stop();
+});
+
+test('سجل فرصة منشورة ناقص يوقف الاستعادة دون استرجاع جزئي', async () => {
+  const engine = createStrategyEngine({
+    resolveTargets: async () => [],
+    fetchRawKlines: async () => [],
+    readPublishedEvents: async () => [
+      { kind: 'published', id: 'good', symbol: 'GOODUSDT', tf: '5m', detectedAt: 1_700_000_000_000, entry: 100, stop: 98, tp1: 104 },
+      { kind: 'published', id: 'bad', symbol: 'BADUSDT', tf: '5m', detectedAt: 1_700_000_000_000, entry: 100, stop: 98 }
+    ],
+    log: { log: () => {}, warn: () => {}, error: () => {} }
+  });
+  await assert.rejects(engine.restoreFromEvents(), /فرصة Strategy2 غير مكتملة/);
+  assert.equal(engine.getFeed().total, 0);
+  engine.stop();
+});
+
+test('إعادة تشغيل Strategy2 أثناء قراءة معلقة لا تكرر أو تخلط الاستعادة', async () => {
+  let eventReads = 0;
+  let resolveFirstRead;
+  const firstRead = new Promise(resolve => { resolveFirstRead = resolve; });
+  const engine = createStrategyEngine({
+    resolveTargets: async () => [],
+    fetchRawKlines: async () => [],
+    readCalibration: async () => null,
+    readPublishedEvents: async () => {
+      eventReads += 1;
+      return eventReads === 1 ? firstRead : [];
+    },
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+    config: { cycleMs: 60_000, tickMs: 60_000, calibrationMs: 60_000 }
+  });
+  try {
+    engine.start();
+    for (let attempt = 0; attempt < 20 && eventReads === 0; attempt += 1) await sleep(0);
+    assert.equal(eventReads, 1);
+    engine.stop();
+    engine.start();
+    resolveFirstRead([]);
+    for (let attempt = 0; attempt < 20 && engine.getStatus().recovery.state !== 'ready'; attempt += 1) await sleep(0);
+    assert.equal(eventReads, 2);
+    assert.equal(engine.getStatus().recovery.state, 'ready');
+  } finally {
+    engine.stop();
+  }
 });

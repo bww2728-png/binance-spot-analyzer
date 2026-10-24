@@ -612,6 +612,7 @@ export interface PersistedRejectionReason {
 export interface BuyFeed {
   busy: boolean;
   cycle: number;
+  recovery?: { state: 'pending' | 'loading' | 'ready' | 'failed'; error: string | null; attemptedAt: number | null; readyAt: number | null };
   scope: string;
   pairsTotal: number;
   zonesTracked: number;
@@ -760,6 +761,7 @@ export interface Strategy2Feed {
   waitingPhases: Record<string, number>;
   updatedAt: number | null;
   error: string | null;
+  recovery?: { state: 'pending' | 'idle' | 'loading' | 'ready' | 'failed'; error: string | null; eventsRead: number; truncated: boolean; at: number | null };
   opportunities: Strategy2Opportunity[];
   total: number;
   filtered?: boolean;

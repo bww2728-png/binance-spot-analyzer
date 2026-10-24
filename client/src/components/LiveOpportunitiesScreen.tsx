@@ -223,6 +223,14 @@ export default function LiveOpportunitiesScreen() {
         * قديمة للسوق. الشرط من الخادم نفسه (عمر آخر سعر) لا من انطباع الواجهة.
         */}
       <StaleDataBanner />
+      {feed?.recovery && feed.recovery.state !== 'ready' && (
+        <div className="rounded-lg px-3 py-2 text-[12px] space-y-1" role="status" style={{ background: 'var(--warn-soft)', color: 'var(--warn)', border: '1px solid var(--warn)' }}>
+          <div className="font-bold">
+            {feed.recovery.state === 'failed' ? 'استعادة الفرص المحفوظة متعثرة؛ المحرك متوقف بأمان وستُعاد المحاولة تلقائياً.' : 'جارٍ استعادة الفرص المحفوظة قبل تشغيل المحرك.'}
+          </div>
+          {feed.recovery.error && <div dir="ltr" className="text-[10px] break-all">{feed.recovery.error}</div>}
+        </div>
+      )}
 
       {/* شريط التقدم الحي */}
       <div className="grid grid-cols-2 lg:grid-cols-7 gap-2">

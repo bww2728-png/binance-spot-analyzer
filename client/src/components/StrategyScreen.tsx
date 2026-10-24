@@ -339,6 +339,7 @@ export default function StrategyScreen() {
   }, []);
 
   const cal = feed?.calibration;
+  const recoveryReady = feed?.recovery?.state === 'ready';
   const qualifiedSegs = (cal?.segments ?? []).filter(s => s.tier === 'qualified').length;
   const probationarySegs = (cal?.segments ?? []).filter(s => s.tier === 'probationary').length;
   const drawerIdx = drawerId != null ? opps.findIndex(o => o.id === drawerId) : -1;
@@ -347,6 +348,14 @@ export default function StrategyScreen() {
   return (
     <div className="space-y-4">
       <StaleDataBanner />
+      {feed?.recovery && !recoveryReady && (
+        <div className="rounded-lg px-3 py-2 text-[12px] space-y-1" role="status" style={{ background: 'var(--warn-soft)', color: 'var(--warn)', border: '1px solid var(--warn)' }}>
+          <div className="font-bold">
+            {feed.recovery.state === 'failed' ? 'تعذرت استعادة بيانات الفرص والاتجاهات؛ المحرك متوقف بأمان وسيعيد المحاولة.' : 'جارٍ استعادة البيانات المحفوظة قبل بدء المحرك.'}
+          </div>
+          {feed.recovery.error && <div dir="ltr" className="text-[10px] break-all">{feed.recovery.error}</div>}
+        </div>
+      )}
       {/* الترويسة */}
       <div className="card p-4">
         <div className="flex flex-wrap items-center gap-3 justify-between">
@@ -364,11 +373,11 @@ export default function StrategyScreen() {
             </span>
             <button
               onClick={() => void api.runStrategy2Calibration().then(() => load(true))}
-              disabled={cal?.busy}
+              disabled={!recoveryReady || cal?.busy}
               className="btn text-[12px]"
-              title={!cal?.at && !cal?.busy ? 'المعايرة لم تشتغل بعد — الإشارات حالياً بلا تصفية إحصائية' : 'إعادة تشغيل المعايرة الإحصائية'}
+              title={!recoveryReady ? 'انتظر اكتمال استعادة البيانات المحفوظة قبل المعايرة' : !cal?.at && !cal?.busy ? 'المعايرة لم تشتغل بعد — الإشارات حالياً بلا تصفية إحصائية' : 'إعادة تشغيل المعايرة الإحصائية'}
               style={{
-                opacity: cal?.busy ? 0.5 : 1,
+                opacity: !recoveryReady || cal?.busy ? 0.5 : 1,
                 ...(!cal?.at && !cal?.busy
                   ? { border: '2px solid var(--warn)', fontWeight: 800 }
                   : {})
@@ -417,7 +426,7 @@ export default function StrategyScreen() {
         ) : null}
 
         {/* المعايرة — تحذير بارز قبل أول معايرة: النشر مفتوح بلا تصفية إحصائية */}
-        {!cal?.at && !cal?.busy ? (
+        {recoveryReady && !cal?.at && !cal?.busy ? (
           <div className="mt-3 p-2.5 rounded-lg text-[12px] font-bold" style={{ background: 'var(--surface-1)', border: '2px solid var(--warn)', color: 'var(--text-1)' }}>
             ⚠ المعايرة لم تشتغل بعد — أي فرصة منشورة حالياً بلا تصفية إحصائية (tier فارغ). شغّل «تشغيل المعايرة» أولاً قبل الاعتماد على الإشارات.
           </div>
@@ -428,7 +437,7 @@ export default function StrategyScreen() {
               ? `جارٍ ${cal.progress?.done ?? 0}/${cal.progress?.total ?? 0}`
               : cal?.at ? `${cal.trades} صفقة · ${qualifiedSegs} مؤهلة · ${probationarySegs} تجريبية (${ago(cal.at)})` : 'لم تشتغل بعد'}
           </span>
-          <span>بوابة النشر: {qualifiedSegs + probationarySegs > 0 ? 'شرائح مؤهلة/تجريبية معايَرة' : 'شريحة غير معايَرة → نشر مفتوح حتى اكتمال المعايرة الأولى'}</span>
+          <span>بوابة النشر: {recoveryReady ? qualifiedSegs + probationarySegs > 0 ? 'شرائح مؤهلة/تجريبية معايَرة' : 'شريحة غير معايَرة → نشر مفتوح حتى اكتمال المعايرة الأولى' : 'متوقفة حتى اكتمال استعادة الحالة'}</span>
         </div>
       </div>
 
@@ -533,17 +542,23 @@ export default function StrategyScreen() {
             {opps.length === 0 && !loading && (
               <div className="py-8 px-4">
                 <div className="text-center text-[13px] font-bold mb-3" style={{ color: 'var(--text-1)' }}>
-                  {feed && feed.stats.published > 0
-                    ? 'لا فرص نشطة الآن — كل المنشورة حُسمت، والمحرك يراقب باستمرار.'
-                    : 'لا فرص منشورة بعد — المحرك يراقب ويرصد تكوّن القمم/القيعان المحمية لحظياً.'}
+                  {!recoveryReady
+                    ? feed?.recovery?.state === 'failed'
+                      ? 'تعذرت استعادة سجل الفرص؛ لا يمكن تأكيد غياب الفرص أو استمرار مراقبتها.'
+                      : 'جارٍ استعادة السجل المحفوظ؛ لا يمكن الحكم على وجود الفرص قبل اكتمالها.'
+                    : feed && feed.stats.published > 0
+                      ? 'لا فرص نشطة الآن — كل المنشورة حُسمت، والمحرك يراقب باستمرار.'
+                      : 'لا فرص منشورة بعد — المحرك يراقب ويرصد تكوّن القمم/القيعان المحمية لحظياً.'}
                 </div>
                 {/* لوحة تفسير الفراغ الكاملة: أسباب الرفض + الموت + الانتظار */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[12px]">
                   <div className="rounded-lg p-3" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
-                    <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>لماذا لا توجد فرص؟ ({rejectedGroups.length} أسباب)</div>
-                    {rejectedGroups.length === 0
-                      ? <span style={{ color: 'var(--text-3)' }}>لا رفض مسجل — الشروط لم تكتمل بعد.</span>
-                      : rejectedGroups.slice(0, 4).map(([reason, n]) => (
+                    <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>{recoveryReady ? `لماذا لا توجد فرص؟ (${rejectedGroups.length} أسباب)` : 'أسباب الرفض'}</div>
+                    {!recoveryReady
+                      ? <span style={{ color: 'var(--text-3)' }}>غير متاحة حتى اكتمال استعادة سجل الأحداث.</span>
+                      : rejectedGroups.length === 0
+                        ? <span style={{ color: 'var(--text-3)' }}>لا رفض مسجل — الشروط لم تكتمل بعد.</span>
+                        : rejectedGroups.slice(0, 4).map(([reason, n]) => (
                         <div key={reason} className="flex justify-between gap-2 py-0.5" style={{ color: 'var(--text-2)' }}>
                           <span className="truncate" title={reason}>{reason}</span>
                           <b className="num" style={{ color: 'var(--accent)' }}>{n}</b>
@@ -553,16 +568,20 @@ export default function StrategyScreen() {
                   <div className="rounded-lg p-3" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
                     <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>الحماية النشطة</div>
                     <div style={{ color: 'var(--text-2)' }}>
-                      {deadRejected > 0
-                        ? <>أُسقطت <b className="num" style={{ color: 'var(--warn)' }}>{deadRejected}</b> إشارة لموت المشوار (بلوغ العرض الخارجي) — حماية لا غياب إشارات.</>
-                        : 'لا إسقاط بموت المشوار حالياً.'}
+                      {!recoveryReady
+                        ? 'بانتظار استعادة الحالات المحفوظة.'
+                        : deadRejected > 0
+                          ? <>أُسقطت <b className="num" style={{ color: 'var(--warn)' }}>{deadRejected}</b> إشارة لموت المشوار (بلوغ العرض الخارجي) — حماية لا غياب إشارات.</>
+                          : 'لا إسقاط بموت المشوار حالياً.'}
                     </div>
                   </div>
                   <div className="rounded-lg p-3" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
                     <div className="font-bold mb-1.5" style={{ color: 'var(--text-1)' }}>ماذا ينتظر المحرك؟</div>
-                    {waitingTop.length === 0
-                      ? <span style={{ color: 'var(--text-3)' }}>بانتظار أول دورة مسح.</span>
-                      : waitingTop.slice(0, 3).map(([phase, count]) => (
+                    {!recoveryReady
+                      ? <span style={{ color: 'var(--text-3)' }}>لا تبدأ دورة الفحص قبل استعادة البيانات.</span>
+                      : waitingTop.length === 0
+                        ? <span style={{ color: 'var(--text-3)' }}>بانتظار أول دورة مسح.</span>
+                        : waitingTop.slice(0, 3).map(([phase, count]) => (
                         <div key={phase} className="flex justify-between gap-2 py-0.5" style={{ color: 'var(--text-2)' }}>
                           <span className="truncate" title={phase}>{phase}</span>
                           <b className="num" style={{ color: 'var(--accent)' }}>{count}</b>

@@ -306,6 +306,7 @@ export interface SymbolsUpdateMsg {
   price?: number;
   timeframe?: string;
   at?: number;
+  persisted?: boolean;
   opportunity?: { id: string; symbol: string; timeframe: string; entry: number; stop: number; tp: number; rr: number; composite: number; outcome?: string };
   /* تحديث لحظي للفرص الحية (لقطات كاملة كل ثانية) */
   opportunities?: LiveOppTickRow[];

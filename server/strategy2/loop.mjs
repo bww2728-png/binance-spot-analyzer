@@ -39,6 +39,7 @@ const DEFAULT_CONFIG = {
   targetWinRate: 0.6,
   minSegmentTrades: 8,
   calibrationMs: 6 * 60 * 60 * 1000,
+  recoveryRequired: false,
   calibration: { symbols: 96, bars: 3000, concurrency: 3, stridePatternOnly: true },
   maxFailuresKept: 300
 };
@@ -144,7 +145,7 @@ export function createStrategyEngine(deps) {
     analyzing: 0, published: 0, resolved: 0, wins: 0, losses: 0,
     waitingPhases: {}, lastPublishAt: null, updatedAt: null, error: null,
     restored: 0, reconciled: 0,
-    recovery: { state: 'idle', error: null, eventsRead: 0, truncated: false, at: null }
+    recovery: { state: cfg.recoveryRequired ? 'pending' : 'idle', error: null, eventsRead: 0, truncated: false, at: null }
   };
   const calibration = { at: null, busy: false, trades: 0, progress: null, segments: [], error: null };
   let resolvedSinceCalib = 0; // نتائج محسومة منذ آخر معايرة — تُشغّل المعايرة الذاتية عند العتبة
@@ -158,6 +159,7 @@ export function createStrategyEngine(deps) {
   let dirBusy = false;
 
   let cycleTimer = null, tickTimer = null, calibTimer = null, dirPriceTimer = null, unsubClose = null, recoveryTimer = null;
+  let recoveryPromise = null, recoveryGeneration = 0;
   /** مؤقّتات تُشغَّل مرة واحدة (تسخين المعايرة) — تُلغى في stop مع بقية المؤقّتات */
   const oneShotTimers = new Set();
   let running = false;
@@ -610,7 +612,7 @@ export function createStrategyEngine(deps) {
 
   /* ---- دورة: فحص إغلاق الشموع عبر المخزن الحي + احتياطي REST ---- */
   async function runCycle() {
-    if (running && status.recovery.state !== 'ready') return { skipped: true, recovery: status.recovery.state };
+    if ((running || cfg.recoveryRequired) && status.recovery.state !== 'ready') return { skipped: true, recovery: status.recovery.state };
     if (status.busy) return { skipped: true };
     status.busy = true;
     const t0 = now();
@@ -739,7 +741,7 @@ export function createStrategyEngine(deps) {
 
   /* ---- نبضة لحظية للواجهة ---- */
   function tickFeed() {
-    if (running && status.recovery.state !== 'ready') return;
+    if ((running || cfg.recoveryRequired) && status.recovery.state !== 'ready') return;
     if (running) trackOutcomes();
     const t = now();
     const rows = [];
@@ -759,7 +761,7 @@ export function createStrategyEngine(deps) {
 
   /* ---- معايرة walk-forward: نفس النواة على التاريخ ---- */
   async function runCalibration({ symbols = null } = {}) {
-    if (running && status.recovery.state !== 'ready') {
+    if ((running || cfg.recoveryRequired) && status.recovery.state !== 'ready') {
       return { skipped: true, recovery: status.recovery.state };
     }
     if (calibration.busy) return { skipped: true };
@@ -848,14 +850,24 @@ export function createStrategyEngine(deps) {
       resolvedSinceCalib = 0;
       calibration.samplePairs = all.length;
       calibration.version = CALIB_VERSION;
-      broadcast({ type: 'strategy2_calibration_done', segments: rows.length, trades: calibration.trades });
-      void persist({
-        type: 'strategy2_calibration', at: calibration.at, trades: calibration.trades,
-        segments: rows, version: CALIB_VERSION, bars: cfg.calibration.bars,
-        entryTfs: cfg.entryTfs, samplePairs: all.length
-      }).catch(() => undefined);
+      let persistResult = null;
+      let persistError = null;
+      try {
+        persistResult = await persist({
+          type: 'strategy2_calibration', at: calibration.at, trades: calibration.trades,
+          segments: rows, version: CALIB_VERSION, bars: cfg.calibration.bars,
+          entryTfs: cfg.entryTfs, samplePairs: all.length
+        });
+        if (persistResult?.ok !== true) persistError = persistResult?.error ?? new Error('لم يؤكد التخزين الدائم نجاح الحفظ');
+      } catch (error) {
+        persistError = error;
+      }
+      const persisted = persistError === null;
+      calibration.error = persisted ? null : 'لم يؤكد التخزين الدائم نجاح المعايرة';
+      if (!persisted) log.error?.('[strategy2] calibration persistence was not confirmed:', persistError?.message ?? persistError);
+      broadcast({ type: 'strategy2_calibration_done', at: calibration.at, segments: rows.length, trades: calibration.trades, persisted });
       log.log?.(`[strategy2] calibration: ${rows.length} segments / ${calibration.trades} trades`);
-      return { ok: true, segments: rows.length, trades: calibration.trades };
+      return { ok: true, segments: rows.length, trades: calibration.trades, persisted };
     } catch (e) {
       calibration.error = e.message;
       calibration.progress = null;
@@ -878,10 +890,11 @@ export function createStrategyEngine(deps) {
   /* ---- الاستمرارية: استعادة + تسوية فجوة ---- */
 
   /** استرجاع حالات الاتجاه من الأحداث الدائمة عند الإقلاع (آخر حالة لكل رمز) */
-  async function restoreDirections() {
+  async function restoreDirections({ isCurrent = () => true } = {}) {
     try {
       if (typeof readDirectionEvents !== 'function') return;
       const rows = await readDirectionEvents();
+      if (!isCurrent()) return;
       if (!Array.isArray(rows)) throw new Error('مصدر أحداث الاتجاه أعاد استجابة غير صالحة');
       if (!rows.length) return;
       const latest = new Map(); // "SYM|tf" → آخر حدث (الأحدث أولاً)
@@ -922,14 +935,27 @@ export function createStrategyEngine(deps) {
     }
   }
 
-  async function restoreFromEvents() {
-    const events = await readPublishedEvents();
+  async function restoreFromEvents({ isCurrent = () => true } = {}) {
+    const result = await readPublishedEvents();
+    if (!isCurrent()) return { skipped: true };
+    const pagedResult = !Array.isArray(result);
+    const events = Array.isArray(result) ? result : result?.rows;
     if (!Array.isArray(events)) throw new Error('مصدر أحداث الاستراتيجية أعاد استجابة غير صالحة');
     status.recovery.eventsRead = events.length;
-    status.recovery.truncated = events.length >= 50_000;
+    status.recovery.truncated = pagedResult ? result.truncated === true : events.length >= 50_000;
     if (status.recovery.truncated) throw new Error('تجاوزت استعادة أحداث الاستراتيجية حد 50000 صف؛ أُوقفت الدورة لتجنب استعادة جزئية');
     const resolvedIds = new Set(events.filter(e => e.kind === 'resolved').map(e => e.id));
     const published = events.filter(e => e.kind === 'published' && e.id && !resolvedIds.has(e.id));
+    const invalid = published.find(e => {
+      const timeframe = e.timeframe ?? e.tf;
+      const detectedAt = Number(e.detectedAt ?? e.ts);
+      return !e.id || !e.symbol || !timeframe
+        || !Number.isFinite(detectedAt) || detectedAt <= 0
+        || !Number.isFinite(Number(e.entry)) || Number(e.entry) <= 0
+        || !Number.isFinite(Number(e.stop)) || Number(e.stop) <= 0
+        || !Number.isFinite(Number(e.tp1 ?? e.tp)) || Number(e.tp1 ?? e.tp) <= 0;
+    });
+    if (invalid) throw new Error(`تعذر استعادة فرصة Strategy2 غير مكتملة (id=${invalid.id ?? 'unknown'})`);
     for (const e of published) {
       if (opportunities.has(e.id)) continue;
       const op = {
@@ -952,11 +978,13 @@ export function createStrategyEngine(deps) {
   }
 
   /** تسوية الفجوة: شموع فترة التوقف تحسم TP/SL أثناء الغياب */
-  async function reconcileGap() {
+  async function reconcileGap({ isCurrent = () => true } = {}) {
     for (const op of [...opportunities.values()]) {
+      if (!isCurrent()) return;
       if (op.outcome) continue;
       try {
         const raw = await fetchRawKlines(op.symbol, op.tf, 300, op.detectedAt - 60_000).catch(() => null);
+        if (!isCurrent()) return;
         if (!raw || !raw.length) continue;
         const candles = raw.map(k => ({
           time: Math.floor(Number(k[0]) / 1000), timeMs: Number(k[0]),
@@ -989,8 +1017,9 @@ export function createStrategyEngine(deps) {
     }
   }
 
-  async function loadCalibration() {
+  async function loadCalibration({ isCurrent = () => true } = {}) {
     const saved = await readCalibration();
+    if (!isCurrent()) return;
     if (saved?.segments?.length) {
       segments.clear();
       for (const r of saved.segments) segments.set(r.key, r);
@@ -1115,9 +1144,10 @@ export function createStrategyEngine(deps) {
     return out.sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).slice(0, Math.min(Number(limit) || 200, 500));
   }
 
-  async function loadFeedback() {
+  async function loadFeedback({ isCurrent = () => true } = {}) {
     if (typeof readFeedbackEvents !== 'function') return;
     const rows = await readFeedbackEvents();
+    if (!isCurrent()) return;
     if (!Array.isArray(rows)) throw new Error('مصدر تغذية الاستراتيجية أعاد استجابة غير صالحة');
     for (const r of rows) {
       if (!r || r.revoked) continue;
@@ -1135,7 +1165,7 @@ export function createStrategyEngine(deps) {
 
   /* ---- إغلاق شمعة → معالجة فورية ---- */
   function onCandleClosed(symbol, tf) {
-    if (running && status.recovery.state !== 'ready') return;
+    if ((running || cfg.recoveryRequired) && status.recovery.state !== 'ready') return;
     // شموع الدقيقة → طابور إعادة حساب الاتجاه (التتبع المستمر بلا انقطاع)
     if (tf === '1m') {
       if (directions.has(`${symbol}|1m`) || directionQueue.size < 1200) directionQueue.add(symbol);
@@ -1158,31 +1188,49 @@ export function createStrategyEngine(deps) {
   function start() {
     if (running) return;
     running = true;
+    const generation = ++recoveryGeneration;
     status.recovery = { state: 'loading', error: null, eventsRead: 0, truncated: false, at: null };
     if (market?.onCandleClose) unsubClose = market.onCandleClose(onCandleClosed);
     const recover = async () => {
-      if (!running) return;
+      if (!running || generation !== recoveryGeneration) return;
       try {
-        await loadCalibration();
-        await loadFeedback();
-        await restoreFromEvents();
-        await restoreDirections();
-        await reconcileGap();
-        if (!running) return;
+        const isCurrent = () => running && generation === recoveryGeneration;
+        await loadCalibration({ isCurrent });
+        if (!isCurrent()) return;
+        await loadFeedback({ isCurrent });
+        if (!isCurrent()) return;
+        const restored = await restoreFromEvents({ isCurrent });
+        if (restored?.skipped || !isCurrent()) return;
+        await restoreDirections({ isCurrent });
+        if (!isCurrent()) return;
+        await reconcileGap({ isCurrent });
+        if (!isCurrent()) return;
         status.recovery = { ...status.recovery, state: 'ready', error: null, at: now() };
         status.error = null;
         void runCycle();
       } catch (error) {
-        if (!running) return;
+        if (!running || generation !== recoveryGeneration) return;
         const message = String(error?.message ?? error).slice(0, 240);
         status.recovery = { ...status.recovery, state: 'failed', error: message, at: now() };
         status.error = `فشلت استعادة الفرص المحفوظة: ${message}`;
         log.error?.('[strategy2] recovery failed; scan remains paused:', message);
-        recoveryTimer = setTimeout(() => { recoveryTimer = null; void recover(); }, 30_000);
+        recoveryTimer = setTimeout(() => { recoveryTimer = null; launchRecovery(); }, 30_000);
         recoveryTimer.unref?.();
       }
     };
-    void recover();
+    const launchRecovery = () => {
+      if (!running || generation !== recoveryGeneration) return;
+      if (recoveryPromise) {
+        recoveryPromise.then(() => launchRecovery(), () => launchRecovery());
+        return;
+      }
+      const current = recover();
+      recoveryPromise = current;
+      void current.finally(() => {
+        if (recoveryPromise === current) recoveryPromise = null;
+      });
+    };
+    launchRecovery();
     cycleTimer = setInterval(() => { void runCycle(); }, cfg.cycleMs);
     tickTimer = setInterval(tickFeed, cfg.tickMs);
     dirPriceTimer = setInterval(refreshDirectionPrices, 5_000);
@@ -1193,7 +1241,7 @@ export function createStrategyEngine(deps) {
     if (calibTimer.unref) calibTimer.unref();
     const warmupTimer = setTimeout(() => {
       oneShotTimers.delete(warmupTimer);
-      if (status.recovery.state !== 'ready' || calibration.at || calibration.busy) return;
+      if (!running || generation !== recoveryGeneration || status.recovery.state !== 'ready' || calibration.at || calibration.busy) return;
       log.log?.('[strategy2] تسخين أول معايرة (لا معايرة محفوظة)');
       void runCalibration();
     }, Number(process.env.STRATEGY2_WARMUP_MS || 10 * 60 * 1000));
@@ -1203,6 +1251,7 @@ export function createStrategyEngine(deps) {
 
   function stop() {
     running = false;
+    recoveryGeneration += 1;
     if (recoveryTimer) clearTimeout(recoveryTimer);
     recoveryTimer = null;
     if (cycleTimer) clearInterval(cycleTimer);
@@ -1210,7 +1259,6 @@ export function createStrategyEngine(deps) {
     if (calibTimer) clearInterval(calibTimer);
     if (dirPriceTimer) clearInterval(dirPriceTimer);
     if (unsubClose) { unsubClose(); unsubClose = null; }
-    // مؤقّتات التسخين تُلغى أيضاً: تركها يعني معايرة تُطلق بعد الإيقاف
     for (const t of oneShotTimers) clearTimeout(t);
     oneShotTimers.clear();
     cycleTimer = tickTimer = calibTimer = dirPriceTimer = null;

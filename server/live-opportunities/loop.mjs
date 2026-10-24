@@ -98,7 +98,8 @@ const DEFAULT_CONFIG = {
    * تقرأ أحدث صف لكل مفتاح فلا تفقد شيئاً. تخفيض التقليم هنا يقصّ أكبر كاتب في القاعدة
    * إلى أقل من عُشر حجمه بلا فقدان دليل.
    */
-  lifecycleDedupeMs: Number(process.env.LIFECYCLE_DEDUPE_MS) || 15 * 60 * 1000
+  lifecycleDedupeMs: Number(process.env.LIFECYCLE_DEDUPE_MS) || 15 * 60 * 1000,
+  recoveryRequired: false
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -140,6 +141,7 @@ export function createLiveOpportunityEngine(deps) {
   const persistWithResult = async (key, op) => {
     try {
       const result = await Promise.resolve(op());
+      if (result === false || result?.ok === false) throw new Error(result?.error ?? 'persist rejected without a confirmed write');
       status.persist.lastOk = { key, at: now() };
       status.persist.writes += 1;
       if (typeof notePersist === 'function') {
@@ -206,11 +208,25 @@ export function createLiveOpportunityEngine(deps) {
     lastPublishAt: null,
     updatedAt: null,
     error: null,
+    recovery: { state: cfg.recoveryRequired ? 'pending' : 'ready', error: null, attemptedAt: null, readyAt: null, metadata: null },
     /** نتائج الحفظ الأخيرة: آخر نجاح، آخر فشل، عدد المحاولات، وعدد الفشل */
     persist: { lastOk: null, lastError: null, lastErrorAt: null, writes: 0, failures: 0 },
     /** مراقبة الإخلاء التشغيلي (عقيدة §7.2): خروج من العرض ≠ نهاية متابعة */
     evictedFromFeed: 0,
     evictedTracked: 0
+  };
+
+  const setRecoveryState = (state, { error = null, metadata = status.recovery.metadata } = {}) => {
+    status.recovery = {
+      ...status.recovery,
+      state,
+      error: error ? String(error).slice(0, 240) : null,
+      attemptedAt: now(),
+      readyAt: state === 'ready' ? now() : null,
+      metadata
+    };
+    status.error = status.recovery.error;
+    return { ...status.recovery };
   };
 
   const calibration = {
@@ -690,6 +706,7 @@ export function createLiveOpportunityEngine(deps) {
 
   /** تحديث دوري لحظي (كل ثانية) للصفقات المنشورة والمناطق قيد المراقبة — بث deltas للواجهة */
   function tickPublished() {
+    if (cfg.recoveryRequired && status.recovery.state !== 'ready') return;
     const t = now();
     const src = market?.connected?.() ? null : lastPrices;
     const pxOf = (symbol) => {
@@ -743,6 +760,7 @@ export function createLiveOpportunityEngine(deps) {
 
   /** كشف حدث-مدفوع: إغلاق شمعة متتبعة → دورة فورية (كل شيء في الذاكرة — بلا شبكة) */
   function onCandleClosed(symbol, tf, closePrice) {
+    if (cfg.recoveryRequired && status.recovery.state !== 'ready') return;
     // إبطال مبكر: شمعة أُغلقت تحت قاع السويب المحمي لفرصة منشورة (علامة خروج)
     for (const op of opportunities.values()) {
       if (op.outcome || op.earlyExit) continue;
@@ -821,6 +839,7 @@ export function createLiveOpportunityEngine(deps) {
   /** دورة واحدة كاملة */
   let lastTargets = null;
   async function runCycle() {
+    if (cfg.recoveryRequired && status.recovery.state !== 'ready') return { skipped: true, recovery: status.recovery.state };
     if (status.busy) return { skipped: true, reason: 'دورة قيد التنفيذ' };
     status.busy = true;
     const started = now();
@@ -997,6 +1016,9 @@ export function createLiveOpportunityEngine(deps) {
 
   /** معايرة walk-forward: مناطق SSL التاريخية المسحوبة → محاكاة → شرائح (فريم × فئة الثقة) */
   async function runCalibration({ symbols = null, timeframes = null } = {}) {
+    if (cfg.recoveryRequired && status.recovery.state !== 'ready') {
+      return { skipped: true, recovery: status.recovery.state };
+    }
     if (calibration.busy) return { skipped: true, reason: 'المعايرة قيد التنفيذ' };
     calibration.busy = true;
     calibration.error = null;
@@ -1118,10 +1140,11 @@ export function createLiveOpportunityEngine(deps) {
       calibration.samplePairs = targets.length;
       calibration.segments = rows;
       calibration.progress = null;
-      broadcast({ type: 'live_calibration_done', segments: rows.length, trades: calibration.trades });
-      void persistWithResult('live_calibration', () => persist({ type: 'live_calibration', at: calibration.at, trades: calibration.trades, segments: rows }));
+      const saved = await persistWithResult('live_calibration', () => persist({ type: 'live_calibration', at: calibration.at, trades: calibration.trades, segments: rows }));
+      if (!saved.ok) calibration.error = 'لم يؤكد التخزين الدائم نجاح المعايرة';
+      broadcast({ type: 'live_calibration_done', at: calibration.at, segments: rows.length, trades: calibration.trades, persisted: saved.ok });
       log.log?.(`[live-opp] calibration: ${rows.length} segments / ${calibration.trades} trades`);
-      return { ok: true, segments: rows.length, trades: calibration.trades };
+      return { ok: true, segments: rows.length, trades: calibration.trades, persisted: saved.ok };
     } catch (e) {
       calibration.error = e.message;
       calibration.progress = null;
@@ -1134,16 +1157,14 @@ export function createLiveOpportunityEngine(deps) {
 
   /** استرجاع آخر معايرة محفوظة (عند الإقلاع) */
   async function loadCalibration() {
-    try {
-      const saved = await readCalibration();
-      if (saved?.segments?.length) {
-        segments.clear();
-        for (const r of saved.segments) segments.set(r.key, r);
-        calibration.at = saved.at ?? null;
-        calibration.trades = saved.trades ?? 0;
-        calibration.segments = saved.segments;
-      }
-    } catch { /* بلا معايرة محفوظة */ }
+    const saved = await readCalibration();
+    if (saved?.segments?.length) {
+      segments.clear();
+      for (const r of saved.segments) segments.set(r.key, r);
+      calibration.at = saved.at ?? null;
+      calibration.trades = saved.trades ?? 0;
+      calibration.segments = saved.segments;
+    }
   }
 
   /** القائمة الحية للواجهة */
@@ -1189,6 +1210,7 @@ export function createLiveOpportunityEngine(deps) {
     return {
       busy: status.busy,
       cycle: status.cycle,
+      recovery: { ...status.recovery },
       scope: status.scope,
       pairsTotal: status.pairsTotal,
       zonesTracked: status.zonesTracked,
@@ -1232,6 +1254,7 @@ export function createLiveOpportunityEngine(deps) {
       scope: status.scope,
       rehydrated: status.rehydrated ?? null,
       rehydratedAt: status.rehydratedAt ?? null,
+      recovery: { ...status.recovery },
       rehydrateMeta: status.rehydrateMeta ?? null,
       pairsTotal: status.pairsTotal,
       deferredTracking: deferredTracking.size,
@@ -1313,11 +1336,29 @@ export function createLiveOpportunityEngine(deps) {
    *       تُمرَّر من المستدعي لتمييز: سجل فارغ حقيقي / فشل قراءة / استعادة جزئية.
    */
   function rehydrate(rows, meta = {}) {
+    if (cfg.recoveryRequired) {
+      const complete = Array.isArray(rows)
+        && meta.lifecycle?.ok === true && meta.opportunities?.ok === true
+        && !meta.lifecycle?.truncated && !meta.opportunities?.truncated;
+      if (!complete) {
+        status.rehydrateMeta = meta;
+        const error = 'استعادة الفرص الحية غير مكتملة أو تجاوزت حد الصفوف';
+        setRecoveryState('failed', { error, metadata: meta });
+        return { trackers: 0, opportunities: 0, inputRows: 0, skipped: true };
+      }
+      setRecoveryState('loading', { metadata: meta });
+    }
     status.rehydrateMeta = meta;
     const live = [];
+    let invalidRows = 0;
     for (const r of rows ?? []) {
       let parsedMeta = null;
-      try { parsedMeta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? null); } catch { parsedMeta = null; }
+      let parseFailed = false;
+      try { parsedMeta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? null); } catch { parseFailed = true; }
+      if (parseFailed && (r.type === 'live_lifecycle' || r.type === 'live_opportunity' || r.type === 'live_opportunity_closed')) {
+        invalidRows += 1;
+        continue;
+      }
       if (r.type === 'live_lifecycle') {
         live.push({
           kind: parsedMeta?.kind ?? r.kind, symbol: r.symbol, timeframe: parsedMeta?.timeframe ?? null,
@@ -1326,7 +1367,10 @@ export function createLiveOpportunityEngine(deps) {
         });
       } else if (r.type === 'live_opportunity' || r.type === 'live_opportunity_closed') {
         const op = parsedMeta?.opportunity ?? null;
-        if (!op) continue;
+        if (!op) {
+          invalidRows += 1;
+          continue;
+        }
         live.push({
           kind: r.type === 'live_opportunity_closed' ? 'closed' : 'published',
           symbol: op.symbol, timeframe: op.timeframe, zoneId: op.zoneId,
@@ -1334,6 +1378,13 @@ export function createLiveOpportunityEngine(deps) {
           at: Number(r.ts), payload: { opportunity: op }
         });
       }
+    }
+    if (cfg.recoveryRequired && invalidRows > 0) {
+      const metadata = { ...meta, invalidRows };
+      status.rehydrateMeta = metadata;
+      const error = `تعذر تفسير ${invalidRows} من أحداث الفرص المحفوظة`;
+      setRecoveryState('failed', { error, metadata });
+      return { trackers: 0, opportunities: 0, inputRows: rows?.length ?? 0, invalidRows, skipped: true };
     }
     const { trackers: ts, opportunities: ops } = rehydrateState(live, {
       nowMs: now(), freshnessBars: cfg.freshnessBars, tfSecondsOf: (tf) => tfSeconds(tf)
@@ -1353,18 +1404,25 @@ export function createLiveOpportunityEngine(deps) {
     enforceFeedBounds();
     status.rehydratedAt = now();
     status.rehydrated = { trackers: restoredTrackers, opportunities: restoredOpps, inputRows: rows?.length ?? 0 };
+    if (cfg.recoveryRequired) setRecoveryState('ready', { metadata: meta });
     log.log?.(`[live-opp] rehydrated ${restoredTrackers} trackers / ${restoredOpps} opportunities (rows=${rows?.length ?? 0})`);
     return status.rehydrated;
   }
 
   function start() {
     if (running) return;
+    if (cfg.recoveryRequired && status.recovery.state !== 'ready') {
+      return { skipped: true, recovery: status.recovery.state };
+    }
     running = true;
     // كشف حدث-مدفوع: إغلاق شمعة متتبعة → دورة فورية + إبطال مبكر للفرص المنشورة
     if (market?.onCandleClose) unsubCandleClose = market.onCandleClose(onCandleClosed);
-    void loadCalibration().then(() => {
-      void runCalibration().catch(() => undefined);
-    });
+    if (!cfg.recoveryRequired) {
+      void loadCalibration().then(() => runCalibration().catch(() => undefined)).catch(error => {
+        status.error = `فشل تحميل المعايرة: ${error?.message ?? error}`;
+        log.error?.('[live-opp] calibration restore failed:', status.error);
+      });
+    }
     cycleTimer = setInterval(() => { void runCycle(); }, cfg.cycleMs);
     tickTimer = setInterval(tickPublished, cfg.tickMs);
     calibTimer = setInterval(() => { void runCalibration(); }, cfg.calibrationMs);
@@ -1386,7 +1444,7 @@ export function createLiveOpportunityEngine(deps) {
   }
 
   return {
-    start, stop, runCycle, runCalibration, loadCalibration, rehydrate,
+    start, stop, runCycle, runCalibration, loadCalibration, rehydrate, setRecoveryState,
     getFeed, getStatus, getHistory, getCalibration, findOpportunity, getTracker,
     _internals: { trackers, opportunities, history, segments, rejected, status, calibration, cfg }
   };
