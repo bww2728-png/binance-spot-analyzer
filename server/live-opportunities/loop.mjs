@@ -56,6 +56,13 @@ const DEFAULT_CONFIG = {
   bandPct: 0.0025,
   watchLimit: 40,
   publishLimit: 150,
+  /**
+   * السعة التشغيلية الصلبة لمتابعة الفرص التي خرجت من بطاقات العرض (P0 عقيدة §7.2):
+   * تجاوز publishLimit لا يُنهي متابعة فرصة نشطة ولا يُسجّل لها نتيجة اصطناعية —
+   * تُنقل إلى مجموعة المتابعة المؤجلة حتى حسمها الحقيقي. هذا السقف فقط يُنهي
+   * المتابعة عند بلوغه، وبسبب تشغيلي مُعلَن ومُعدّاد، لا بسبب عرض.
+   */
+  trackOverflowLimit: 300,
   historyLimit: 300,
   maxBars: 96,
   maxReclaimBars: 6,
@@ -112,6 +119,7 @@ export function createLiveOpportunityEngine(deps) {
     now = () => Date.now(),
     log = console,
     config = {},
+    notePersist = null,
     /**
      * مُجمّع عمال لتنفيذ فحص السيولة خارج حلقة الأحداث.
      * بدونه يبقى scanHistory متزامناً ويُجمّد البث (العيب المقيس: 59% من زمن CPU).
@@ -125,10 +133,40 @@ export function createLiveOpportunityEngine(deps) {
     shadow = null
   } = deps;
 
+  /**
+   * مساعد موثوق لإعلام الصحة بنتيجة الحفظ بغض النظر عن ما إذا كانت `persist` وعودة
+   * أم غير متزامنة. هذا هو التوصيل المفقود الذي جعل `persistWrites` صفراً دائماً.
+   */
+  const persistWithResult = async (key, op) => {
+    try {
+      const result = await Promise.resolve(op());
+      status.persist.lastOk = { key, at: now() };
+      status.persist.writes += 1;
+      if (typeof notePersist === 'function') {
+        try { notePersist({ ok: true, key, at: now() }); } catch {}
+      }
+      return { ok: true, result, key };
+    } catch (err) {
+      status.persist.lastError = err?.message || String(err);
+      status.persist.lastErrorAt = now();
+      status.persist.failures += 1;
+      if (typeof notePersist === 'function') {
+        try { notePersist({ ok: false, key, error: err?.message || String(err), at: now() }); } catch {}
+      }
+      return { ok: false, error: err, key };
+    }
+  };
+
   const cfg = { ...DEFAULT_CONFIG, ...config, calibration: { ...DEFAULT_CONFIG.calibration, ...(config.calibration ?? {}) } };
 
   const trackers = new Map();          // key → حالة
-  const opportunities = new Map();     // publishKey → فرصة منشورة
+  const opportunities = new Map();     // publishKey → فرصة منشورة (مجموعة العرض: بطاقات البث)
+  /**
+   * مجموعة المتابعة المؤجلة (P0 عقيدة §7.2): فرص خرجت من بطاقات العرض بسبب
+   * publishLimit لكنها **نشطة** وتُتابَع حتى حسمها الحقيقي. الإخلاء من العرض
+   * ليس نتيجة تداول، ولا يُسجَّل لها `expired` إلا عند بلوغ trackOverflowLimit.
+   */
+  const deferredTracking = new Map();  // id → فرصة نشطة خارج العرض
   const liveStats = new Map();         // مفتاح شريحة → {trades, wins} من النتائج الحية (ترقية champion-challenger)
   /**
    * ★3 قياس فقط: العدّ الحالي لشريحة الفرصة يزيد في **كل نداء متابعة** (~كل 5 ثوان)
@@ -167,7 +205,12 @@ export function createLiveOpportunityEngine(deps) {
     bookCalls: 0,
     lastPublishAt: null,
     updatedAt: null,
-    error: null
+    error: null,
+    /** نتائج الحفظ الأخيرة: آخر نجاح، آخر فشل، عدد المحاولات، وعدد الفشل */
+    persist: { lastOk: null, lastError: null, lastErrorAt: null, writes: 0, failures: 0 },
+    /** مراقبة الإخلاء التشغيلي (عقيدة §7.2): خروج من العرض ≠ نهاية متابعة */
+    evictedFromFeed: 0,
+    evictedTracked: 0
   };
 
   const calibration = {
@@ -212,7 +255,7 @@ export function createLiveOpportunityEngine(deps) {
         if (rejectionSeen.size <= 3000) break;
       }
     }
-    void persist({ type: 'live_rejected', ...row }).catch(() => undefined);
+    void persistWithResult('live_rejected', () => persist({ type: 'live_rejected', ...row }));
   }
 
   /**
@@ -234,7 +277,7 @@ export function createLiveOpportunityEngine(deps) {
         if (lifecycleSeen.size <= 6000) break;
       }
     }
-    void persist(row).catch(() => undefined);
+    void persistWithResult('live_lifecycle', () => persist(row));
   }
 
   function createLimiter(n) {
@@ -516,85 +559,125 @@ export function createLiveOpportunityEngine(deps) {
       }
     }
     if (opportunities.size > cfg.publishLimit) {
-      /**
-       * إصلاح B5 (جزء الأشباح): كان الأقدم يُحذف من الذاكرة فقط بلا حفظ، فيُستعاد
-       * عند إعادة التشغيل كفرصة مفتوحة لم تُحسم — «فرصة شبح» تُظهر منشوراً لم يعد
-       * له متابعة ولا نتيجة. الآن يُحفظ كمنتهٍ بسبب صريح قبل إخلائه.
-       * لا يغيّر هذا أي شرط استراتيجية: الفرصة كانت مُخلاة أصلاً، والفرق فقط أن
-       * إخلاءها صار مسجَّلاً.
-       */
-      const oldest = [...opportunities.values()].sort((a, b) => a.detectedAt - b.detectedAt)[0];
-      if (oldest) {
-        const closed = {
-          ...oldest, closed: true, outcome: oldest.outcome ?? 'expired',
-          exitReason: oldest.exitReason ?? 'evicted-limit',
-          closedAt: now()
-        };
-        opportunities.delete(oldest.id);
-        void persist(closed).catch(() => undefined);
-      }
+      enforceFeedBounds();
     }
     status.published += 1;
     status.funnel.published += 1;
     status.lastPublishAt = opportunity.detectedAt;
     broadcast({ type: 'live_opportunity_new', opportunity });
-    void persist(opportunity).catch(() => undefined);
+    void persistWithResult('live_opportunity', () => persist(opportunity));
     return opportunity;
+  }
+
+  /**
+   * حدود المجموعتين (P0 عقيدة §7.2):
+   * - العرض (opportunities) سقفه publishLimit: الزائد يُنقل إلى المتابعة المؤجلة
+   *   **بلا نتيجة اصطناعية** — يظل متابَطاً حتى هدف/وقف حقيقي.
+   * - المتابعة المؤجلة (deferredTracking) سقفها التشغيلي trackOverflowLimit:
+   *   بلوغه يعني ضغط سعة فعلي، فيُغلق الأقدم بسبب تشغيلي صريح `evicted-track-limit`
+   *   ويُحفظ، مع عدّاد مراقب. هذا سياسة تشغيلية معلنة لا قاعدة تداول.
+   */
+  function enforceFeedBounds() {
+    while (opportunities.size > cfg.publishLimit) {
+      const oldest = [...opportunities.values()].sort((a, b) => a.detectedAt - b.detectedAt)[0];
+      if (!oldest) break;
+      opportunities.delete(oldest.id);
+      deferredTracking.set(oldest.id, oldest);
+      status.evictedFromFeed += 1;
+    }
+    while (deferredTracking.size > cfg.trackOverflowLimit) {
+      const oldest = [...deferredTracking.values()].sort((a, b) => a.detectedAt - b.detectedAt)[0];
+      if (!oldest) break;
+      deferredTracking.delete(oldest.id);
+      const closed = {
+        ...oldest, closed: true, outcome: oldest.outcome ?? 'expired',
+        exitReason: oldest.exitReason ?? 'evicted-track-limit',
+        closedAt: now()
+      };
+      status.evictedTracked += 1;
+      void persistWithResult('live_opportunity', () => persist(closed));
+    }
   }
 
   /** متابعة الفرص المنشورة: هدف / وقف من الأسعار الحية (بلا نداءات إضافية) */
   function trackOutcomes(prices) {
-    for (const op of [...opportunities.values()]) {
-      if (op.outcome) continue;
-      const px = Number(prices?.[op.symbol]);
-      if (!Number.isFinite(px)) continue;
-      // أفضل/أسوأ إزاحة منذ النشر (R multiples) — مقياس جودة الدخول
-      const excursionR = (px - op.entry) / Math.max(op.entry - op.stop, 1e-12);
-      op.mfeR = Math.max(Number(op.mfeR ?? 0), excursionR);
-      op.maeR = Math.min(Number(op.maeR ?? 0), excursionR);
-      if (px <= op.stop) {
-        op.outcome = 'stop';
-        op.outcomeAt = now();
-        op.outcomePrice = px;
-      } else if (px >= op.tp) {
-        op.outcome = 'target';
-        op.outcomeAt = now();
-        op.outcomePrice = px;
+    for (const op of [...opportunities.values(), ...deferredTracking.values()]) {
+      /**
+       * `wasOpen` يحدد هل هذه الدورة هي لحظة الحسم. كتل الإحصاء والظل تعمل مرة
+       * واحدة عند الحسم فقط (كما كانت)، لكن فرع حفظ النتيجة يبقى متاحاً كل دورة
+       * حتى ينجح الحفظ — هذا هو مسار إعادة المحاولة (§7.5) بعد فشل الكتابة.
+       */
+      const wasOpen = !op.outcome;
+      if (!wasOpen) {
+        // محسومة سابقاً: لا فحص سعر ولا إحصاء — فقط إعادة محاولة الحفظ أدناه إن فشلت
+      } else {
+        const px = Number(prices?.[op.symbol]);
+        if (Number.isFinite(px)) {
+          // أفضل/أسوأ إزاحة منذ النشر (R multiples) — مقياس جودة الدخول
+          const excursionR = (px - op.entry) / Math.max(op.entry - op.stop, 1e-12);
+          op.mfeR = Math.max(Number(op.mfeR ?? 0), excursionR);
+          op.maeR = Math.min(Number(op.maeR ?? 0), excursionR);
+          if (px <= op.stop) {
+            op.outcome = 'stop';
+            op.outcomeAt = now();
+            op.outcomePrice = px;
+          } else if (px >= op.tp) {
+            op.outcome = 'target';
+            op.outcomeAt = now();
+            op.outcomePrice = px;
+          }
+        }
       }
       /**
        * ★3 قياس فقط: تسجيل الفرصة مرة واحدة عند لحظة حسمها (القاعدة الصحيحة).
        * لا يُقرأ هذا العدّ في أي قرار — يُقارَن فقط بالعدّ المنشور في التقرير.
        */
-      if (op.outcome && op.segmentKey) {
+      if (wasOpen && op.outcome && op.segmentKey) {
         countDecidedOnce(shadowCountedOps, shadowDecided, op.id, op.outcome, op.segmentKey);
+      }
+      /**
+       * حفظ النتيجة فور حسمها — لا ينبغي أن يعتمد حفظ النتيجة الدائم على مؤقت
+       * العرض الباقي (3 دقائق). هذا يمنع ضياع النتيجة إذا توقف الخادم قبل الترحيل.
+       * عند الفشل: يُعاد فتح الحفظ لتحاوله الدورة التالية (§7.5) — الفشل لا يُخفى
+       * ولا يُسوّى بصمت، والعدادات في status.persist تُظهره. علم `outcomeSaving`
+       * يمنع حفظاً متزامناً مزدوجاً قبل حلول وعد المحاولة الجارية.
+       */
+      if (op.outcome && !op.outcomeSaved && !op.outcomeSaving) {
+        op.outcomeSaving = true;
+        void persistWithResult('live_opportunity', () => persist({ ...op, closed: true }))
+          .then(saved => {
+            if (saved.ok) op.outcomeSaved = true;
+            else op.outcomeSaving = false;
+          });
       }
       /**
        * ★5 قياس: نُسجّل الحكم المنشور (من السعر اللحظي) لنقارنه لاحقاً بالحكم المعلَّق
        * من أعلى/أدنى الشموع. لا يُقرأ هذا في أي قرار.
        */
-      if (op.outcome && shadow) {
+      if (wasOpen && op.outcome && shadow) {
         const st = outcomeShadowState.get(op.id);
         if (st && !st.published) st.published = op.outcome;
       }
       // تغذية راجعة حية لشريحة الفرصة (champion-challenger) — تُستخدم في الترقية التلقائية
-      if (op.segmentKey) {
+      if (wasOpen && op.segmentKey) {
         const st2 = liveStats.get(op.segmentKey) ?? { trades: 0, wins: 0 };
         st2.trades += 1;
         if (op.outcome === 'target') st2.wins += 1;
         liveStats.set(op.segmentKey, st2);
       }
     }
-    // ترحيل المحسوم إلى السجل
-    for (const [key, op] of [...opportunities]) {
+    // ترحيل المحسوم إلى السجل (من العرض ومن المتابعة المؤجلة على حد سواء)
+    for (const [key, op] of [...opportunities, ...deferredTracking]) {
       if (!op.outcome) continue;
       const age = now() - (op.outcomeAt ?? op.detectedAt);
       if (age < 3 * 60_000) continue; // يبقى ظاهراً في البث قليلاً ثم يُرحَّل
       history.unshift(op);
       opportunities.delete(key);
+      deferredTracking.delete(key);
       status.resolved += 1;
       if (op.outcome === 'target') status.wins += 1; else status.losses += 1;
       broadcast({ type: 'live_opportunity_closed', opportunity: op });
-      void persist({ ...op, closed: true }).catch(() => undefined);
+      // النتيجة تُحفظ فور حسمها أعلاه؛ هنا لا حاجة لمحاولة إضافية تُخفي الفشل.
     }
     while (history.length > cfg.historyLimit) history.pop();
   }
@@ -1036,7 +1119,7 @@ export function createLiveOpportunityEngine(deps) {
       calibration.segments = rows;
       calibration.progress = null;
       broadcast({ type: 'live_calibration_done', segments: rows.length, trades: calibration.trades });
-      void persist({ type: 'live_calibration', at: calibration.at, trades: calibration.trades, segments: rows }).catch(() => undefined);
+      void persistWithResult('live_calibration', () => persist({ type: 'live_calibration', at: calibration.at, trades: calibration.trades, segments: rows }));
       log.log?.(`[live-opp] calibration: ${rows.length} segments / ${calibration.trades} trades`);
       return { ok: true, segments: rows.length, trades: calibration.trades };
     } catch (e) {
@@ -1120,6 +1203,8 @@ export function createLiveOpportunityEngine(deps) {
       watchingTotal: watch.length,
       rejected: rejected.slice(-30).reverse(),
       stats: {
+        /** نطاق العدادات: جلسة التشغيل الحالية — التاريخي يُشتق من events_log عبر /history?days=N */
+        scope: 'session',
         published: status.published,
         resolved: status.resolved,
         wins: status.wins,
@@ -1146,13 +1231,18 @@ export function createLiveOpportunityEngine(deps) {
       scope: status.scope,
       rehydrated: status.rehydrated ?? null,
       rehydratedAt: status.rehydratedAt ?? null,
+      rehydrateMeta: status.rehydrateMeta ?? null,
       pairsTotal: status.pairsTotal,
+      deferredTracking: deferredTracking.size,
+      evictedFromFeed: status.evictedFromFeed,
+      evictedTracked: status.evictedTracked,
       zonesTracked: status.zonesTracked,
       phases: status.phases,
       deepScans: status.deepScans,
       bookCalls: status.bookCalls,
       updatedAt: status.updatedAt,
       error: status.error,
+      persist: status.persist,
       market: market?.stats?.() ?? null,
       calibration: {
         at: calibration.at, busy: calibration.busy, trades: calibration.trades,
@@ -1217,20 +1307,24 @@ export function createLiveOpportunityEngine(deps) {
    * استعادة الحالات النشطة بعد إعادة التشغيل (عقيدة §12):
    * rows = أحداث live_lifecycle + فرص live_opportunity/live_opportunity_closed المحفوظة.
    * تُسقط السويبات الميتة زمنيا — لا إحياء للموتى.
+   *
+   * meta: { lifecycle: { ok, count?, error? }, opportunities: { ok, count?, error? } }
+   *       تُمرَّر من المستدعي لتمييز: سجل فارغ حقيقي / فشل قراءة / استعادة جزئية.
    */
-  function rehydrate(rows) {
+  function rehydrate(rows, meta = {}) {
+    status.rehydrateMeta = meta;
     const live = [];
     for (const r of rows ?? []) {
-      let meta = null;
-      try { meta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? null); } catch { meta = null; }
+      let parsedMeta = null;
+      try { parsedMeta = typeof r.meta === 'string' ? JSON.parse(r.meta) : (r.meta ?? null); } catch { parsedMeta = null; }
       if (r.type === 'live_lifecycle') {
         live.push({
-          kind: meta?.kind ?? r.kind, symbol: r.symbol, timeframe: meta?.timeframe ?? null,
-          zoneId: meta?.zoneId ?? null, key: meta?.key ?? null, at: Number(r.ts),
-          phase: null, payload: meta?.payload ?? meta ?? null
+          kind: parsedMeta?.kind ?? r.kind, symbol: r.symbol, timeframe: parsedMeta?.timeframe ?? null,
+          zoneId: parsedMeta?.zoneId ?? null, key: parsedMeta?.key ?? null, at: Number(r.ts),
+          phase: null, payload: parsedMeta?.payload ?? parsedMeta ?? null
         });
       } else if (r.type === 'live_opportunity' || r.type === 'live_opportunity_closed') {
-        const op = meta?.opportunity ?? null;
+        const op = parsedMeta?.opportunity ?? null;
         if (!op) continue;
         live.push({
           kind: r.type === 'live_opportunity_closed' ? 'closed' : 'published',
@@ -1248,11 +1342,17 @@ export function createLiveOpportunityEngine(deps) {
       if (!trackers.has(st.key)) { trackers.set(st.key, st); restoredTrackers += 1; }
     }
     for (const op of ops) {
-      if (!op.outcome && !opportunities.has(op.id)) { opportunities.set(op.id, op); restoredOpps += 1; }
+      if (!op.outcome && !opportunities.has(op.id) && !deferredTracking.has(op.id)) {
+        opportunities.set(op.id, op);
+        restoredOpps += 1;
+      }
     }
+    // الاستعادة قد تُعيد أكثر من سعة العرض: الفائض يذهب إلى المتابعة المؤجلة
+    // (بلا نتيجة اصطناعية) — نفس سياسة publish() الحية.
+    enforceFeedBounds();
     status.rehydratedAt = now();
-    status.rehydrated = { trackers: restoredTrackers, opportunities: restoredOpps };
-    log.log?.(`[live-opp] rehydrated ${restoredTrackers} trackers / ${restoredOpps} opportunities`);
+    status.rehydrated = { trackers: restoredTrackers, opportunities: restoredOpps, inputRows: rows?.length ?? 0 };
+    log.log?.(`[live-opp] rehydrated ${restoredTrackers} trackers / ${restoredOpps} opportunities (rows=${rows?.length ?? 0})`);
     return status.rehydrated;
   }
 

@@ -1060,8 +1060,10 @@ const saveLiquidityEvent = async (type, zone, message, meta = {}) => {
       meta: JSON.stringify({ ...meta, zone }),
       ts: Date.now()
     });
+    return { ok: true };
   } catch (e) {
     console.error('[liquidity-zones] event save failed:', e.message);
+    return { ok: false, error: e };
   }
 };
 
@@ -2400,6 +2402,7 @@ const liveOppEngine = createLiveOpportunityEngine({
     row?.type === 'live_lifecycle' ? row : { opportunity: row }
   ),
   log: console,
+  notePersist: (r) => health.notePersist(r),
   config: {
     maxKlineSubs: Number(process.env.LIVE_MAX_KLINE_SUBS) || 600,
     maxFlowSubs: Number(process.env.LIVE_MAX_FLOW_SUBS) || 60,
@@ -2422,18 +2425,35 @@ const liveOppEngine = createLiveOpportunityEngine({
 setTimeout(() => {
   // استعادة الحالات النشطة قبل بدء الدورات (عقيدة §12): إغلاق النظام لا يقتل التتبع
   void (async () => {
-    try {
-      const day = 86_400_000;
-      const [lc, ops] = await Promise.all([
-        db.events.liveLifecycle(Date.now() - day).catch(() => []),
-        db.events.liveOppEvents(Date.now() - 7 * day).catch(() => [])
-      ]);
-      liveOppEngine.rehydrate([...(lc || []), ...(ops || [])]);
-    } catch (e) {
-      console.error('[live-opp] rehydrate failed:', e.message);
-    } finally {
-      liveOppEngine.start();
+    const day = 86_400_000;
+    // سقوف مطابقة لسقوف db.js: التجاوز يعني أن أحداثًا أقدم لم تُقرأ — يُعلَن لا يُخفى
+    const LC_LIMIT = 5000;
+    const OPS_LIMIT = 2000;
+    const [lcResult, opsResult] = await Promise.allSettled([
+      db.events.liveLifecycle(Date.now() - day, LC_LIMIT),
+      db.events.liveOppEvents(Date.now() - 7 * day, OPS_LIMIT)
+    ]);
+    const lc = lcResult.status === 'fulfilled' ? (lcResult.value || []) : null;
+    const ops = opsResult.status === 'fulfilled' ? (opsResult.value || []) : null;
+    const recoveryMeta = {
+      lifecycle: {
+        ok: lc !== null, count: lc?.length ?? 0, error: lcResult.reason?.message ?? null,
+        truncated: lc !== null && lc.length >= LC_LIMIT
+      },
+      opportunities: {
+        ok: ops !== null, count: ops?.length ?? 0, error: opsResult.reason?.message ?? null,
+        truncated: ops !== null && ops.length >= OPS_LIMIT
+      }
+    };
+    if (!recoveryMeta.lifecycle.ok || !recoveryMeta.opportunities.ok) {
+      console.error('[live-opp] recovery query failed:', recoveryMeta);
     }
+    if (recoveryMeta.lifecycle.truncated || recoveryMeta.opportunities.truncated) {
+      console.warn('[live-opp] recovery hit row limit — أقدم الأحداث لم تُقرأ:', recoveryMeta);
+    }
+    // نستعيد ما توفر: إذا فشل استعلام واحد نستمر بالآخر، لكن لا ندَّعي اكتمال الاستعادة.
+    liveOppEngine.rehydrate([...(lc || []), ...(ops || [])], recoveryMeta);
+    liveOppEngine.start();
   })();
 }, 75_000); // يبدأ بعد استقرار اللفّات القائمة (مناطق السيولة + الفرص + الباك تيست)
 
@@ -2758,7 +2778,8 @@ app.get('/api/live-opportunities/history', handle(async (req, res) => {
   }
   const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
   const sinceTs = Date.now() - days * 86_400_000;
-  const rows = await db.events.liveOppEvents(sinceTs).catch(() => []);
+  // فشل القراءة يُمرَّر إلى handle (500) — لا يُحوَّل إلى تاريخ فارغ يبدو "لا نتائج"
+  const rows = await db.events.liveOppEvents(sinceTs);
   const events = [];
   for (const r of rows) {
     let meta = {};
