@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readAllPages } from '../services/readAllPages.mjs';
+import { readAllPages, readAllPagesComplete } from '../services/readAllPages.mjs';
 
 test('readAllPages: reads each descending cursor page once and returns chronological rows', async () => {
   const source = Array.from({ length: 7 }, (_, index) => ({ id: 7 - index }));
@@ -32,4 +32,19 @@ test('readAllPages: propagates read failures and rejects unstable cursors', asyn
     calls += 1;
     return [{ id: calls === 1 ? 4 : 5 }];
   }, { pageSize: 1, maxRows: 3 }), /cursor did not move backward/);
+});
+
+test('readAllPagesComplete: returns complete pages and rejects a capped partial history', async () => {
+  const source = Array.from({ length: 6 }, (_, index) => ({ id: 6 - index }));
+  const readPage = async ({ beforeId, limit }) =>
+    source.filter(row => beforeId === null || row.id < beforeId).slice(0, limit);
+
+  assert.deepEqual(
+    await readAllPagesComplete(readPage, { pageSize: 2, maxRows: 6 }),
+    [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }, { id: 6 }]
+  );
+  await assert.rejects(
+    readAllPagesComplete(readPage, { pageSize: 2, maxRows: 4 }),
+    /complete-history limit/
+  );
 });

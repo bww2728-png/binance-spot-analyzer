@@ -695,14 +695,30 @@ export function createLiveOpportunityEngine(deps) {
       broadcast({ type: 'live_opportunity_closed', opportunity: op });
       // النتيجة تُحفظ فور حسمها أعلاه؛ هنا لا حاجة لمحاولة إضافية تُخفي الفشل.
     }
-    while (history.length > cfg.historyLimit) history.pop();
+    for (const op of history) {
+      if (!op.outcome || op.outcomeSaved || op.outcomeSaving) continue;
+      op.outcomeSaving = true;
+      void persistWithResult('live_opportunity', () => persist({ ...op, closed: true }))
+        .then(saved => {
+          if (saved.ok) op.outcomeSaved = true;
+          else op.outcomeSaving = false;
+        });
+    }
+    while (history.length > cfg.historyLimit) {
+      const removable = history.findIndex(op => op.outcomeSaved === true);
+      if (removable < 0) break;
+      history.splice(removable, 1);
+    }
   }
 
   /** سباق مع مهلة: يحمي الدورة من أي نداء معلّق (شبكة/قاعدة بيانات) */
-  const withTimeout = (promise, ms, fallback) => Promise.race([
-    promise,
-    new Promise(resolve => setTimeout(() => resolve(fallback), ms))
-  ]);
+  const withTimeout = (promise, ms, fallback) => {
+    let timer;
+    const timeout = new Promise(resolve => {
+      timer = setTimeout(() => resolve(fallback), ms);
+    });
+    return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+  };
 
   /** تحديث دوري لحظي (كل ثانية) للصفقات المنشورة والمناطق قيد المراقبة — بث deltas للواجهة */
   function tickPublished() {

@@ -107,13 +107,24 @@ function emitHealth() {
   for (const l of healthListeners) l(healthState);
 }
 
+function isServerHealth(data: unknown): data is ServerHealth {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const value = data as Record<string, unknown>;
+  const mem = value.mem;
+  return Number.isFinite(value.uptimeSec) &&
+    !!mem && typeof mem === 'object' && !Array.isArray(mem) &&
+    Number.isFinite((mem as Record<string, unknown>).rssMb) &&
+    Array.isArray(value.engines);
+}
+
 async function fetchHealthOnce() {
   if (healthInFlight) return;
   healthInFlight = true;
   try {
     const res = await fetch('/api/health/deep');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as ServerHealth;
+    const data: unknown = await res.json();
+    if (!isServerHealth(data)) throw new Error('استجابة صحة الخادم لا تطابق المخطط المتوقع');
     healthState = summarize(data, null, false);
   } catch (e) {
     healthState = summarize(healthState.health, e instanceof Error ? e.message : String(e), false);

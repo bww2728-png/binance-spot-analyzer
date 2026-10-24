@@ -197,3 +197,49 @@ test('recoveryRequired: صفوف الفرص التالفة تمنع الاستع
   assert.deepEqual(engine.start(), { skipped: true, recovery: 'failed' });
   engine.stop();
 });
+
+test('persist: تستمر إعادة محاولة النتيجة بعد انتقال الفرصة إلى التاريخ', async () => {
+  let currentTime = 1_000_000;
+  let persistCalls = 0;
+  const engine = createLiveOpportunityEngine({
+    now: () => currentTime,
+    persist: async row => {
+      if (!row.closed) return { ok: true };
+      persistCalls += 1;
+      return persistCalls < 3 ? { ok: false, error: 'temporary database failure' } : { ok: true };
+    },
+    resolveTargets: async () => ['BTCUSDT'],
+    fetchPrices: async () => ({ BTCUSDT: 106 }),
+    fetchBookSignals: async () => ({}),
+    fetchRawKlines: async () => [],
+    zoneSource: () => [],
+    log: { log() {}, warn() {}, error() {} }
+  });
+  const opportunity = {
+    id: 'btc-5m-z1', symbol: 'BTCUSDT', timeframe: '5m', zoneId: 'z1',
+    entry: 99, stop: 96, tp: 105, composite: 0.9, rr: 2,
+    detectedAt: 900_000, outcome: null
+  };
+  engine.rehydrate([
+    { type: 'live_opportunity', symbol: 'BTCUSDT', ts: 900_000, meta: JSON.stringify({ opportunity }) }
+  ], { lifecycle: { ok: true, count: 0 }, opportunities: { ok: true, count: 1 } });
+
+  await engine.runCycle();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(persistCalls, 1);
+
+  currentTime += 180_001;
+  await engine.runCycle();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(engine.getFeed().total, 0);
+  assert.equal(engine.getHistory().total, 1);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await engine.runCycle();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.equal(persistCalls, 3);
+  assert.equal(engine.getHistory().opportunities[0].outcomeSaved, true);
+  engine.stop();
+});

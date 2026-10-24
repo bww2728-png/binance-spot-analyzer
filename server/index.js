@@ -25,7 +25,7 @@ import {
 import { renderZoneChart } from './liquidity-zones/chart.mjs';
 import { createLiveOpportunityEngine } from './live-opportunities/loop.mjs';
 import { createLiveOpportunityRecovery } from './live-opportunities/recovery.mjs';
-import { readAllPages } from './services/readAllPages.mjs';
+import { readAllPages, readAllPagesComplete } from './services/readAllPages.mjs';
 import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams, createKeyQueue } from './market/streams.mjs';
 import { createHealth } from './health.mjs';
@@ -2636,7 +2636,8 @@ app.get('/api/strategy2/calibration', handle(async (_req, res) => {
 app.get('/api/strategy2/history', handle(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
   const sinceTs = Date.now() - days * 86_400_000;
-  const rows = await db.events.strategy2Events(sinceTs);
+  const rows = await readAllPagesComplete(({ beforeId, limit }) =>
+    db.events.strategy2EventsPage(sinceTs, beforeId, limit), { pageSize: 1000, maxRows: 50_000 });
   const events = [];
   for (const r of rows) {
     let meta = {};
@@ -2819,7 +2820,8 @@ app.get('/api/live-opportunities/history', handle(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
   const sinceTs = Date.now() - days * 86_400_000;
   // فشل القراءة يُمرَّر إلى handle (500) — لا يُحوَّل إلى تاريخ فارغ يبدو "لا نتائج"
-  const rows = await db.events.liveOppEvents(sinceTs);
+  const rows = await readAllPagesComplete(({ beforeId, limit }) =>
+    db.events.liveOppEventsPage(sinceTs, beforeId, limit), { pageSize: 1000, maxRows: 50_000 });
   const events = [];
   for (const r of rows) {
     let meta = {};

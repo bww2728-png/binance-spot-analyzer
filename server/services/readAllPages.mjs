@@ -31,3 +31,9 @@ export async function readAllPages(readPage, { pageSize = 1000, maxRows = 50_000
     beforeId = lastId;
   }
 }
+
+export async function readAllPagesComplete(readPage, options = {}) {
+  const result = await readAllPages(readPage, options);
+  if (result.truncated) throw new Error('Paged read exceeded the configured complete-history limit');
+  return result.rows;
+}
