@@ -150,6 +150,7 @@ export function createMarketStreams({
   const seedFails = new Map();       // "SYM|tf" → { fails, quarantinedUntil } (حجر المفاتيح الميتة)
   const trades = new Map();          // symbol → [{price, qty, isBuyerMaker, at}]
   let candleCloseHandlers = new Set();
+  const klineUpdateHandlers = new Set();
   /**
    * مخزن الشموع المجمّع: مصدر واحد للشموع لكل الفريمات، يُغذّى من بث 1m وحده.
    * العلة التي يُصلحها: فحص مناطق السيولة الحي كان يطلب REST لكل (رمز × فريم) في كل
@@ -320,6 +321,9 @@ export function createMarketStreams({
       if (!k || !data?.s) return;
       const tf = String(k.i ?? tfFromStream(stream));
       upsertKline(data.s, tf, k);
+      for (const cb of klineUpdateHandlers) {
+        try { cb({ symbol: data.s, timeframe: tf, kline: k }); } catch { /* مستمع فاشل لا يوقف البث */ }
+      }
       /**
        * تغذية المخزن المجمّع من شمعة 1m وحدها: القيم تُؤخذ من رسالة بينانس كما هي
        * بلا أي حساب (open/high/low/close/volume، وtakerBuyBase من الميدان V).
@@ -991,6 +995,11 @@ export function createMarketStreams({
     onCandleClose(cb) {
       candleCloseHandlers.add(cb);
       return () => candleCloseHandlers.delete(cb);
+    },
+    onKlineUpdate(cb) {
+      if (typeof cb !== 'function') return () => {};
+      klineUpdateHandlers.add(cb);
+      return () => klineUpdateHandlers.delete(cb);
     },
     /**
      * مستمع إغلاق الشموع المجمّعة: cb({ symbol, tf, bar }) لكل شمعة أُغلقت في المخزن.

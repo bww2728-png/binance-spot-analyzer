@@ -52,6 +52,9 @@ import { measureIdentityStability, createIdentityCollector } from './services/zo
  * راجع `server/liquidity-zones/v2/index.mjs` و`server/services/liquidityShadowV2.mjs`.
  */
 import { detectLiquidityZonesV2 } from './liquidity-zones/v2/index.mjs';
+import { createLiquidityWorkbench } from './services/liquidityWorkbench.mjs';
+import { createLiquidityWorkbenchRouter } from './routes/liquidityWorkbenchRouter.mjs';
+import { TF_MS } from './market/candleStore.mjs';
 import { compareEngines, summarizeSample, createParityCollector } from './services/liquidityShadowV2.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -133,7 +136,9 @@ const runtime = {
   zones: () => null,
   /** دليل الاستعادة بعد إعادة التشغيل: عدد المراجعات المستعادة ومفاتيح الظل */
   stateRestore: () => null,
+  liquidityWorkbench: () => null
 };
+let liquidityWorkbench = null;
 // نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
 app.get('/healthz', (req, res) => res.json({ ok: true, up: Date.now() }));
 // نقطة جاهزية غير حاجبة: لا تنتظر Supabase/Binance أبداً (تشخيص سريع دون تعليق healthcheck)
@@ -1620,6 +1625,11 @@ setTimeout(() => {
   if (t.unref) t.unref();
 }, 90_000);
 
+app.use('/api/liquidity-workbench', createLiquidityWorkbenchRouter({
+  getWorkbench: () => liquidityWorkbench,
+  timeframes: ALL_TIMEFRAMES
+}));
+
 app.get('/api/liquidity-zones/status', handle(async (_req, res) => {
   res.json({
     live: {
@@ -2228,6 +2238,55 @@ const marketStreams = createMarketStreams({
   },
   fetchAllPrices: () => db.binance.allTickerPrices()
 });
+let workbenchTickSize = null;
+let workbenchRetryDelayMs = 5000;
+let workbenchRetryTimer = null;
+liquidityWorkbench = createLiquidityWorkbench({
+  repository: db.liquidityWorkbench,
+  market: marketStreams,
+  fetchKlines: (symbol, timeframe, limit) => db.binance.klines(symbol, timeframe, limit),
+  fetchDepth: (symbol, limit) => db.binance.depth(symbol, limit),
+  timeframes: ALL_TIMEFRAMES,
+  timeframeMs: TF_MS,
+  tickSizeFor: async (symbol) => {
+    if (workbenchTickSize == null) {
+      const info = await db.binance.exchangeInfo();
+      const pair = info.symbols?.find((entry) => entry.symbol === symbol && entry.status === 'TRADING' && entry.isSpotTradingAllowed && entry.quoteAsset === 'USDT');
+      const tick = pair?.filters?.find((filter) => filter.filterType === 'PRICE_FILTER')?.tickSize;
+      if (!tick || Number(tick) <= 0) throw new Error(`تعذر إثبات دقة سعر ${symbol} من بيانات Binance Spot`);
+      workbenchTickSize = Number(tick);
+    }
+    return workbenchTickSize;
+  },
+  engineOptions: () => ({
+    tolerancePct: liquidityState.adjustment.tolerancePct,
+    biasPerKind: liquidityState.adjustment.visualBias || {}
+  }),
+  onUpdate: (event) => {
+    if (event.type === 'status') console.warn(`[liquidity-workbench] recovery=${event.status.recovery}: ${event.status.error ?? ''}`);
+  }
+});
+runtime.liquidityWorkbench = () => liquidityWorkbench.status();
+const scheduleWorkbenchRetry = () => {
+  if (workbenchRetryTimer) clearTimeout(workbenchRetryTimer);
+  workbenchRetryTimer = setTimeout(() => {
+    workbenchRetryTimer = null;
+    void startLiquidityWorkbench();
+  }, workbenchRetryDelayMs);
+  workbenchRetryTimer.unref?.();
+};
+const startLiquidityWorkbench = async () => {
+  try {
+    const result = await liquidityWorkbench.start();
+    workbenchRetryDelayMs = 5000;
+    if (result.recovery === 'ready') console.log(`[liquidity-workbench] ready: ${result.seeded}/${result.expected} timeframes`);
+  } catch (error) {
+    console.warn('[liquidity-workbench] startup blocked:', String(error?.message ?? error).slice(0, 180));
+    workbenchRetryDelayMs = Math.min(300_000, workbenchRetryDelayMs * 2);
+    scheduleWorkbenchRetry();
+  }
+};
+setTimeout(() => { void startLiquidityWorkbench(); }, 30_000);
 setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
 /**
  * ★التحويل الحادث: مستمع واحد على إغلاق الشموع المجمّعة. كل شمعة أُغلقت في المخزن
@@ -3519,6 +3578,8 @@ const shutdown = async (signal) => {
   try { await shadow.persistDb(db); } catch { /* لا يمنع الخروج */ }
   try { await persistLearning(); } catch { /* لا يمنع الخروج */ }
   try { await workerPool.close(); } catch { /* ignore */ }
+  try { liquidityWorkbench?.stop(); } catch { /* ignore */ }
+  if (workbenchRetryTimer) clearTimeout(workbenchRetryTimer);
   try { marketStreams.stop(); } catch { /* ignore */ }
   try { server.close(); } catch { /* ignore */ }
 };
@@ -3533,6 +3594,7 @@ health.addSection('market', () => { try { return runtime.marketStats(); } catch 
  * + نسبة التسخين). يُعرض داخل لقطة الصحة وفي العيّنات المحفوظة.
  */
 health.addSection('candles', () => { try { return runtime.candles?.() ?? null; } catch { return null; } });
+health.addSection('liquidityWorkbench', () => { try { return runtime.liquidityWorkbench?.() ?? null; } catch { return null; } });
 /** ربط مزوّد الشموع بلقطة الصحة اللحظية (لا في العيّنات فقط) */
 health.setCandlesProvider(() => { try { return runtime.candles?.() ?? null; } catch { return null; } });
 health.addSection('targets', () => { try { return { ...runtime.targets(), source: runtime.targetsSource() }; } catch { return null; } });

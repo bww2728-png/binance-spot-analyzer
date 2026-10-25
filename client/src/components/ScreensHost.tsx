@@ -21,8 +21,9 @@ const SCREEN_LABELS: Record<Screen, string> = {
   liveOpportunities: 'الفرص الحية',
   strategy2: 'الفرص الحية — استراتيجيتي',
   notifications: 'الإشعارات',
-  liquidityZones: 'مناطق السيولة',
+  liquidityZones: 'مناطق السيولة القديمة',
   liquidityV2: 'محرك السيولة الجديد',
+  liquidityWorkbench: 'مختبر السيولة الموحد',
   customLiquidity: 'جولة مخصصة',
   dashboard: 'لوحة التحكم',
   settings: 'الإعدادات والفلاتر'
@@ -39,6 +40,7 @@ const LOADERS: Record<Screen, () => Promise<{ default: ComponentType }>> = {
   notifications: () => import('./NotificationCenter'),
   liquidityZones: () => import('./LiquidityZonesScreen'),
   liquidityV2: () => import('./LiquidityV2Screen'),
+  liquidityWorkbench: () => import('./LiquidityWorkbenchScreen'),
   customLiquidity: () => import('./CustomLiquidityScreen'),
   dashboard: () => import('./Dashboard'),
   settings: () => import('./SettingsPanel')

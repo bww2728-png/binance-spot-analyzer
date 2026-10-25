@@ -14,7 +14,7 @@ export default function App() {
     const onHash = () => {
       const h = location.hash.replace('#/', '');
       const target = h === 'history' ? 'autoHistory' : h;
-      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'liquidityV2', 'customLiquidity', 'liveOpportunities', 'notifications', 'strategy2'] as const).includes(target as never) && target !== screen) {
+      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'liquidityWorkbench', 'liquidityV2', 'customLiquidity', 'liveOpportunities', 'notifications', 'strategy2'] as const).includes(target as never) && target !== screen) {
         setScreen(target as never);
       }
     };
@@ -48,7 +48,8 @@ export default function App() {
     { id: 'liveOpportunities', label: 'الفرص الحية', shortLabel: 'حية', count: null },
     { id: 'strategy2', label: 'الفرص الحية — استراتيجيتي', shortLabel: 'استراتيجيتي', count: null },
     { id: 'notifications', label: 'الإشعارات', shortLabel: 'الإشعارات', count: unreadNotifications },
-    { id: 'liquidityZones', label: 'مناطق السيولة', shortLabel: 'السيولة', count: null },
+    { id: 'liquidityWorkbench', label: 'مختبر السيولة الموحد', shortLabel: 'السيولة الموحدة', count: null },
+    { id: 'liquidityZones', label: 'مناطق السيولة القديمة', shortLabel: 'القديم', count: null },
     { id: 'liquidityV2', label: 'محرك السيولة الجديد (عرض)', shortLabel: 'الجديد', count: null },
     { id: 'customLiquidity', label: 'جولة مخصصة', shortLabel: 'جولة', count: null },
     { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },

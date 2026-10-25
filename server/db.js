@@ -14,6 +14,7 @@ export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 // تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 const baseHeaders = {
   apikey: SUPABASE_KEY,
@@ -35,6 +36,29 @@ async function rest(path, { method = 'GET', body, prefer } = {}) {
     const err = new Error(`Supabase REST ${res.status}: ${text}`);
     err.status = res.status;
     throw err;
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
+  const key = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_KEY;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
+    method,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      ...(prefer ? { Prefer: prefer } : {})
+    },
+    signal: AbortSignal.timeout(20000),
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    const error = new Error(`Supabase REST ${res.status}: ${text}`);
+    error.status = res.status;
+    throw error;
   }
   const text = await res.text();
   return text ? JSON.parse(text) : null;
@@ -160,6 +184,7 @@ const db = {
       if (endTime) params.set('endTime', String(endTime));
       return fetchBinanceJson(`/api/v3/klines?${params.toString()}`, 15000);
     },
+    depth: (symbol, limit = 20) => fetchBinanceJson(`/api/v3/depth?symbol=${encodeURIComponent(symbol)}&limit=${Math.min(Math.max(Number(limit) || 20, 5), 100)}`, 10000),
     tickerPrices: async (symbols) => {
       const q = encodeURIComponent(JSON.stringify(symbols));
       const rows = await fetchBinanceJson(`/api/v3/ticker/price?symbols=${q}`, 10000);
@@ -363,6 +388,40 @@ const db = {
       return rows.length ? rows[0].updated_at : 0;
     },
     upsertChunk: (rows) => rest('/symbols?on_conflict=symbol&select=*', { method: 'POST', body: rows, prefer: 'resolution=merge-duplicates,return=representation' })
+  },
+  liquidityWorkbench: {
+    listScans: async (symbol) => {
+      const q = new URLSearchParams({ symbol: `eq.${symbol}`, select: '*', order: 'computed_at.desc', limit: '14' });
+      return restWorkbench(`/liquidity_workbench_scans?${q}`);
+    },
+    listEvents: async (symbol, limit = 200) => {
+      const q = new URLSearchParams({ symbol: `eq.${symbol}`, select: '*', order: 'event_at.desc,id.desc', limit: String(Math.min(Math.max(Number(limit) || 200, 1), 500)) });
+      return restWorkbench(`/liquidity_workbench_events?${q}`);
+    },
+    listCandles: async (symbol, timeframe, limit = 500) => {
+      const q = new URLSearchParams({ symbol: `eq.${symbol}`, timeframe: `eq.${timeframe}`, select: '*', order: 'open_time.desc', limit: String(Math.min(Math.max(Number(limit) || 500, 1), 500)) });
+      const rows = await restWorkbench(`/liquidity_workbench_candles?${q}`);
+      return rows.reverse();
+    },
+    upsertCandles: (rows) => restWorkbench('/liquidity_workbench_candles?on_conflict=symbol,timeframe,open_time', {
+      method: 'POST', body: rows, prefer: 'resolution=merge-duplicates,return=minimal'
+    }),
+    upsertScan: (row) => restWorkbench('/liquidity_workbench_scans?on_conflict=engine,symbol,timeframe', {
+      method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=minimal'
+    }),
+    insertZoneEvent: (row) => restWorkbench('/liquidity_workbench_events?on_conflict=idempotency_key', {
+      method: 'POST', body: row, prefer: 'resolution=ignore-duplicates,return=minimal'
+    }),
+    insertSample: (row) => restWorkbench('/liquidity_workbench_samples?on_conflict=sample_key', {
+      method: 'POST', body: row, prefer: 'resolution=ignore-duplicates,return=minimal'
+    }),
+    pruneRaw: async (cutoff) => {
+      const candles = new URLSearchParams({ close_time: `lt.${Number(cutoff)}` });
+      const samples = new URLSearchParams({ sampled_at: `lt.${Number(cutoff)}` });
+      await restWorkbench(`/liquidity_workbench_candles?${candles}`, { method: 'DELETE', prefer: 'return=minimal' });
+      await restWorkbench(`/liquidity_workbench_samples?${samples}`, { method: 'DELETE', prefer: 'return=minimal' });
+      return true;
+    }
   },
   analyses: {
     list: () => rest('/analyses?select=*'),
