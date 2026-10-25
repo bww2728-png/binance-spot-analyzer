@@ -106,12 +106,23 @@ test('recovery blocks startup on failed storage read and accepts a truly empty r
   empty.service.stop();
 });
 
-test('truncated history does not seed or start market subscriptions', async () => {
+test('truncated history below the detection minimum does not seed or start market subscriptions', async () => {
   const repository = mockRepository();
-  const workbench = makeWorkbench({ repository, fetchCount: 499 });
-  await assert.rejects(workbench.service.start(), /499\/500/);
+  const workbench = makeWorkbench({ repository, fetchCount: 59 });
+  await assert.rejects(workbench.service.start(), /59\/60/);
   assert.equal(workbench.market.subscriptions.klines.size, 0);
   assert.equal(workbench.service.status().recovery, 'failed');
+});
+
+test('history shorter than 500 but above the minimum (real 1w case: 479 bars) seeds and starts', async () => {
+  const repository = mockRepository();
+  const workbench = makeWorkbench({ repository, fetchCount: 479 });
+  const status = await workbench.service.start();
+  assert.equal(status.recovery, 'ready');
+  assert.equal(status.seeded, timeframes.length);
+  assert.equal(repository.candles.get('BTCUSDT|1m').length, 479);
+  assert.deepEqual(workbench.market.subscriptions.klines.get('liquidity-workbench'), ['BTCUSDT|1m', 'BTCUSDT|5m']);
+  workbench.service.stop();
 });
 
 test('stop during startup cancels pending history fetch without subscribing or saving scans', async () => {

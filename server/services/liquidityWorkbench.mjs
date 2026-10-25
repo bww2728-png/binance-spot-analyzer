@@ -4,6 +4,13 @@ import { detectLiquidityZonesV2 } from '../liquidity-zones/v2/index.mjs';
 
 const ENGINE_VERSION = { legacy: 'liquidity-engine-v1', v2: 'liquidity-engine-v2' };
 const HISTORY_LIMIT = 500;
+/**
+ * الحد الأدنى لشموع الإغلاق المقبولة لكل فريم. الفريمات الكبيرة (1w مثلاً) لا تملك
+ * 500 شمعة مغلقة أصلًا في تاريخ الزوج كله (BTCUSDT سبوت ≈ 479 أسبوعًا)، والمحرك
+ * نفسه يتجاوز الكشف تحت 40 شمعة؛ فشرط 500 الكامل كان يُسقط فريمات سليمة ويوقف
+ * الاستعادة كلها. 60 شمعة تحفظ هامش أمان فوق حد الكشف دون مساس بقواعده.
+ */
+const MIN_HISTORY_BARS = 60;
 const asMillis = (value) => {
   const n = typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value) ? Date.parse(value) : Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -460,7 +467,7 @@ export function createLiquidityWorkbench({
           if (rows.length < HISTORY_LIMIT) {
             const fetched = closedRows(await fetchKlines(symbol, timeframe, HISTORY_LIMIT + 10), now());
             if (!isCurrentStart()) return { ...state, recovery: 'idle' };
-            if (fetched.length < HISTORY_LIMIT) throw new Error(`شموع تاريخية غير كافية للفريم ${timeframe}: ${fetched.length}/${HISTORY_LIMIT}`);
+            if (fetched.length < MIN_HISTORY_BARS) throw new Error(`شموع تاريخية غير كافية للفريم ${timeframe}: ${fetched.length}/${MIN_HISTORY_BARS}`);
             rows = fetched;
             await repository.upsertCandles(rows.map((row) => toStoredCandle(symbol, timeframe, row, now())));
             if (!isCurrentStart()) return { ...state, recovery: 'idle' };
