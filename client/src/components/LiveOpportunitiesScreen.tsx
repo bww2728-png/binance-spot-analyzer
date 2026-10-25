@@ -10,6 +10,7 @@ import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
 import PersistedOpportunityHistory from './PersistedOpportunityHistory';
 import { useScreenState } from '../lib/useScreenState';
+import { formatPrice } from '../lib/formatPrice';
 
 /**
  * واجهة «الفرص الحية» — دخول شراء فقط عبر سويب مناطق SSL + أدوات الأوردر فلو.
@@ -47,8 +48,7 @@ const locationLabel: Record<string, string> = {
   imbalance_down: 'خارج التوازن هبوطاً'
 };
 
-const fmt = (v: number | null | undefined, digits = 6) =>
-  v == null || !Number.isFinite(Number(v)) ? '—' : Number(v).toPrecision(digits);
+const fmt = (v: number | null | undefined, digits = 6) => formatPrice(v, digits);
 
 const pct = (v: number | null | undefined) =>
   v == null || !Number.isFinite(Number(v)) ? '—' : `${(Number(v) * 100).toFixed(1)}%`;
@@ -266,7 +266,7 @@ export default function LiveOpportunitiesScreen() {
               ? `جارٍ ${calibProgress ? `${calibProgress.done}/${calibProgress.total}` : feed.calibration.progress ? `${feed.calibration.progress.done}/${feed.calibration.progress.total}` : ''}`
               : feed?.calibration.at ? `جاهزة · ${feed.calibration.trades} صفقة` : 'بانتظار أول معايرة'}
           </div>
-          <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>آخر تحديث {ago(feed?.calibration.at, now)}</div>
+          <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>آخر معايرة {ago(feed?.calibration.at, now)}</div>
         </div>
       </div>
 
@@ -524,9 +524,9 @@ export default function LiveOpportunitiesScreen() {
                     <tr key={`${e.id ?? e.ts}-${e.symbol}`} style={{ borderTop: '1px solid var(--border-1)' }}>
                       <td className="px-3 py-2 font-bold num" style={{ color: 'var(--text-1)' }}>{e.symbol}</td>
                       <td className="px-3 py-2 num" style={{ color: 'var(--text-3)' }}>{e.timeframe ?? '—'}</td>
-                      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{e.entry ?? '—'}</td>
-                      <td className="px-3 py-2 num" style={{ color: 'var(--down)' }}>{e.stop ?? '—'}</td>
-                      <td className="px-3 py-2 num" style={{ color: 'var(--up)' }}>{e.tp ?? '—'}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{formatPrice(e.entry)}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--down)' }}>{formatPrice(e.stop)}</td>
+                      <td className="px-3 py-2 num" style={{ color: 'var(--up)' }}>{formatPrice(e.tp)}</td>
                       <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{e.rr ?? '—'}</td>
                       <td className="px-3 py-2 num" style={{ color: 'var(--text-2)' }}>{e.calibratedWinRate == null ? '—' : pct(e.calibratedWinRate)}</td>
                       <td className="px-3 py-2 font-bold" style={{ color: e.outcome === 'target' || e.outcome === 'target2' ? 'var(--up)' : e.outcome === 'stop' ? 'var(--down)' : 'var(--text-3)' }}>

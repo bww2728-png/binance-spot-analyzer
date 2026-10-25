@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { PersistedOpportunityHistoryItem, PersistedRejectionReason } from '../lib/types';
 import LoadErrorState from './ui/LoadErrorState';
+import { formatPrice } from '../lib/formatPrice';
 
 type Props = { engine: 'live' | 'strategy2' };
 
@@ -113,8 +114,8 @@ export default function PersistedOpportunityHistory({ engine }: Props) {
             <article key={item.eventId} className="rounded-lg p-3 grid grid-cols-2 md:grid-cols-6 gap-x-3 gap-y-1 text-[11px]" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
               <div><span style={{ color: 'var(--text-3)' }}>الرمز </span><strong className="num">{item.symbol}</strong></div>
               <div><span style={{ color: 'var(--text-3)' }}>الفريم </span><strong className="num">{item.timeframe}</strong></div>
-              <div><span style={{ color: 'var(--text-3)' }}>الدخول </span><strong className="num">{item.entry ?? '—'}</strong></div>
-              <div><span style={{ color: 'var(--text-3)' }}>وقف/هدف </span><strong className="num">{item.stop ?? '—'} / {item.target ?? '—'}</strong></div>
+              <div><span style={{ color: 'var(--text-3)' }}>الدخول </span><strong className="num">{formatPrice(item.entry)}</strong></div>
+              <div><span style={{ color: 'var(--text-3)' }}>وقف/هدف </span><strong className="num">{formatPrice(item.stop)} / {formatPrice(item.target)}</strong></div>
               <div><span style={{ color: 'var(--text-3)' }}>R:R </span><strong className="num">{item.rr ?? '—'}</strong></div>
               <div><span style={{ color: 'var(--text-3)' }}>الحالة </span><strong style={{ color: item.outcome ? 'var(--text-1)' : 'var(--accent)' }}>{outcomeLabel(item.outcome)}</strong></div>
               <div className="col-span-2 md:col-span-6 text-[10px]" style={{ color: 'var(--text-3)' }}>{new Date(item.publishedAt).toLocaleString('ar')}</div>
