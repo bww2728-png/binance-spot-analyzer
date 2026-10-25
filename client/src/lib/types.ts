@@ -597,6 +597,15 @@ export interface PersistedOpportunityHistoryItem {
   payload: Record<string, unknown>;
 }
 
+export interface PersistedOpportunityHistorySummary {
+  engine: 'live' | 'strategy2';
+  eventCount: number | null;
+  uniqueOpportunityCount: number;
+  uniqueCountComplete: boolean;
+  scannedEvents: number;
+  generatedAt: number;
+}
+
 export interface PersistedOpportunityHistoryPage {
   items: PersistedOpportunityHistoryItem[];
   total: number;
@@ -611,7 +620,13 @@ export interface PersistedRejectionReason {
 
 export interface BuyFeed {
   busy: boolean;
+  paused: boolean;
+  pauseUpdatedAt: number | null;
   cycle: number;
+  priceAgeMs: number | null;
+  lastPricesAt: number;
+  schedule: { cycleMs: number; calibrationMs: number };
+  market: { connected: boolean; priceAgeMs: number | null; stalePriceRatio: number | null; staleCandles: number; tradingStaleCandles: number } | null;
   recovery?: { state: 'pending' | 'loading' | 'ready' | 'failed'; error: string | null; attemptedAt: number | null; readyAt: number | null };
   scope: string;
   pairsTotal: number;

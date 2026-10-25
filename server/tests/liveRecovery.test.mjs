@@ -8,8 +8,13 @@ function makeEngine() {
   let recovery = { state: 'pending', error: null };
   let calibrationReads = 0;
   let starts = 0;
+  let pause = { paused: false, pauseUpdatedAt: null };
   const engine = {
     async loadCalibration() { calibrationReads += 1; },
+    setPaused(paused, pauseUpdatedAt) {
+      pause = { paused, pauseUpdatedAt };
+      events.push(`paused:${paused}`);
+    },
     setRecoveryState(state, details = {}) {
       recovery = { state, error: details.error ?? null, metadata: details.metadata ?? null };
       events.push(`state:${state}`);
@@ -22,7 +27,7 @@ function makeEngine() {
     getStatus() { return { recovery }; },
     start() { starts += 1; events.push('start'); }
   };
-  return { engine, events, starts: () => starts, calibrationReads: () => calibrationReads };
+  return { engine, events, starts: () => starts, calibrationReads: () => calibrationReads, pause: () => pause };
 }
 
 function fakeTimers() {
@@ -69,6 +74,45 @@ test('live recovery: keeps the engine paused after a read error and retries into
   assert.equal(h.calibrationReads(), 2);
   assert.ok(h.events.includes('rehydrate:0'));
   assert.equal(recovery.getState().attempt, 0);
+});
+
+test('live recovery: restores the persisted emergency pause before starting the engine', async () => {
+  const h = makeEngine();
+  const recovery = createLiveOpportunityRecovery({
+    engine: h.engine,
+    readLifecycle: emptyPage,
+    readOpportunities: emptyPage,
+    readPauseState: async () => ({ paused: true, pauseUpdatedAt: 1_700_000_000_000 }),
+    log: { log() {}, error() {} }
+  });
+
+  const result = await recovery.runNow();
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(h.pause(), { paused: true, pauseUpdatedAt: 1_700_000_000_000 });
+  assert.ok(h.events.indexOf('paused:true') < h.events.indexOf('start'));
+  assert.equal(h.starts(), 1);
+});
+
+test('live recovery: a failed emergency-state read prevents startup and schedules retry', async () => {
+  const h = makeEngine();
+  const timers = fakeTimers();
+  const recovery = createLiveOpportunityRecovery({
+    engine: h.engine,
+    readLifecycle: emptyPage,
+    readOpportunities: emptyPage,
+    readPauseState: async () => { throw new Error('control state unavailable'); },
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+    log: { log() {}, error() {} }
+  });
+
+  const result = await recovery.runNow();
+
+  assert.equal(result.ok, false);
+  assert.equal(h.starts(), 0);
+  assert.equal(h.engine.getStatus().recovery.state, 'failed');
+  assert.equal(recovery.getState().retryScheduled, true);
 });
 
 test('live recovery: a truncated read never reaches rehydrate or start', async () => {

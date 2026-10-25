@@ -3,7 +3,7 @@ import { api } from '../lib/api';
 import type { Analysis, BarcodeScan, CaseRow, ChartLevel, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
 import type { SortResultRow, SortInput } from '../lib/sorting';
 import { sortAnalyses } from '../lib/sorting';
-import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol, type LiveOppTickRow, type LiveWatchTickRow } from '../lib/binance';
+import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol, type LiveOppTickRow, type LiveWatchTickRow, type SymbolsSocketState } from '../lib/binance';
 import { queueZoneCapture } from '../lib/autoCapture';
 import { evaluateShariah } from '../lib/shariah';
 
@@ -123,6 +123,8 @@ interface StoreState {
   getScreenState: (screen: Screen) => ScreenState | undefined;
   /* اللقطة الحية للفرص المنشورة والمناطق قيد المراقبة (tick كل ثانية من الخادم عبر WS) */
   liveOppTick: { at: number; opportunities: Record<string, LiveOppTickRow>; watching: Record<string, LiveWatchTickRow> } | null;
+  liveOppSocketState: SymbolsSocketState;
+  liveOppEventsRevision: number;
   calibrationProgress: { done: number; total: number } | null;
   /* نبضة محرك «الفرص الحية — استراتيجيتي» عبر WS (تحديث لحظي للشاشة) */
   strategy2Pulse: { at: number; kind: string } | null;
@@ -159,6 +161,7 @@ interface StoreState {
 
 let streams: BinanceStreams | null = null;
 let symbolsChannelStarted = false;
+let lastLiveSocketState: SymbolsSocketState | null = null;
 const priceUnsubs = new Map<string, () => void>();
 /* تجميع نبضات الأسعار: الكتابة إلى خريطة مؤقتة ودفعة set() واحدة كل 600ms
  * بدل كتابة كاملة للمخزن عند كل رسالة miniTicker — يخفض إعادة رسم اللوحة من N/ثانية إلى دفعتين */
@@ -216,6 +219,8 @@ export const useStore = create<StoreState>((set, get) => ({
   archiveSection: 'cases',
   screenStates: {},
   liveOppTick: null,
+  liveOppSocketState: 'connecting',
+  liveOppEventsRevision: 0,
   calibrationProgress: null,
   strategy2Pulse: null,
   strategy2Rows: {},
@@ -318,12 +323,14 @@ export const useStore = create<StoreState>((set, get) => ({
         } else if (msg.type === 'live_opportunity_new' && msg.opportunity) {
           const o = msg.opportunity as { symbol: string; timeframe: string; entry: number; stop: number; tp: number; rr: number; composite: number };
           get().pushToast(`فرصة شراء ${o.symbol} (${o.timeframe}) — دخول ${o.entry} · وقف ${o.stop} · هدف ${o.tp} · R:R ${o.rr} · درجة ${o.composite}`, 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: 'alert' });
+          set((st) => ({ liveOppEventsRevision: st.liveOppEventsRevision + 1 }));
         } else if (msg.type === 'live_sweep_detected' && msg.symbol) {
           get().pushToast(`${msg.symbol} (${msg.timeframe}): سويب سيولة بيعية مكتشف — بانتظار الاستعادة`, 'info', undefined, { category: 'liveOpps', symbol: String(msg.symbol) });
         } else if (msg.type === 'live_opportunity_closed' && msg.opportunity) {
           const o = msg.opportunity as { symbol: string; timeframe: string; outcome: string };
           const win = o.outcome === 'target';
           get().pushToast(`نتيجة فرصة ${o.symbol} (${o.timeframe}): ${win ? 'وصلت الهدف' : 'ضربت الوقف'}`, win ? 'info' : 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: win ? 'info' : 'alert' });
+          set((st) => ({ liveOppEventsRevision: st.liveOppEventsRevision + 1 }));
         } else if (msg.type === 'live_opportunities_tick') {
           // لقطة كاملة كل ثانية: الصفقات المنشورة + المناطق قيد المراقبة
           const opportunities: Record<string, LiveOppTickRow> = {};
@@ -371,6 +378,17 @@ export const useStore = create<StoreState>((set, get) => ({
           const text = [n.title, n.body].filter(Boolean).join(' — ') || 'إشعار';
           get().pushToast(text, n.severity === 'alert' ? 'alert' : 'info', undefined, { category: 'liveOpps', symbol: n.symbol, severity: n.severity === 'alert' ? 'alert' : 'info' });
           set({ strategy2Pulse: { at: Date.now(), kind: 'central_notification' } });
+        } else if (msg.type === 'live_opportunities_control') {
+          set((st) => ({ liveOppEventsRevision: st.liveOppEventsRevision + 1 }));
+        }
+      }, (state) => {
+        const previous = lastLiveSocketState;
+        lastLiveSocketState = state;
+        set({ liveOppSocketState: state });
+        if (previous === 'connected' && state === 'reconnecting') {
+          get().pushToast('انقطع التحديث الحي مؤقتًا؛ سيعاد الاتصال تلقائيًا', 'alert', undefined, { category: 'liveOpps', severity: 'error' });
+        } else if (previous === 'reconnecting' && state === 'connected') {
+          get().pushToast('عاد اتصال التحديث الحي', 'info', undefined, { category: 'liveOpps', severity: 'info' });
         }
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));

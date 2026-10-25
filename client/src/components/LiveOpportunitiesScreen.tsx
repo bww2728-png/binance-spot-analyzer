@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { useStore } from '../store/useStore';
 import { BigChart } from './ChartModal';
@@ -73,7 +73,10 @@ export default function LiveOpportunitiesScreen() {
   const [closed, setClosed] = useState<BuyHistoryEvent[] | null>(null);
   const [closedError, setClosedError] = useState<string | null>(null);
   const [busyMsg, setBusyMsg] = useState<string | null>(null);
+  const [controlBusy, setControlBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const lastRecoveryState = useRef<string | null>(null);
+  const pushToast = useStore(s => s.pushToast);
 
   const load = useCallback(async () => {
     try {
@@ -87,8 +90,19 @@ export default function LiveOpportunitiesScreen() {
 
   useEffect(() => { void load(); }, [load]);
 
-  // احتياطي بطيء فقط — التحديث اللحظي يأتي عبر بث tick (كل ثانية) من قناة الخادم
-  useVisiblePoll(load, { intervalMs: 60_000, immediate: false });
+  useEffect(() => {
+    const state = feed?.recovery?.state ?? null;
+    const previous = lastRecoveryState.current;
+    if (state === 'failed' && previous !== 'failed') {
+      pushToast('تعذرت استعادة الفرص المحفوظة؛ إنشاء الفرص الجديدة متوقف حتى نجاح الاستعادة.', 'alert', undefined, { category: 'liveOpps', severity: 'error' });
+    } else if (state === 'ready' && previous === 'failed') {
+      pushToast('اكتملت استعادة الفرص المحفوظة وعاد المحرك للعمل.', 'info', undefined, { category: 'liveOpps', severity: 'info' });
+    }
+    lastRecoveryState.current = state;
+  }, [feed?.recovery?.state, pushToast]);
+
+  // احتياطي محدود يعيد التحقق حتى عند فقد البث؛ لا يتكرر أسرع من كل 15 ثانية
+  useVisiblePoll(load, { intervalMs: 15_000, immediate: false });
 
   // شريحة الحالة: الفلاتر والقسم الداخلي تُحفظ وتُستعاد
   useScreenState('liveOpportunities', {
@@ -99,33 +113,6 @@ export default function LiveOpportunitiesScreen() {
       if (s.filters.section) setSection(s.filters.section as typeof section);
     }
   });
-
-  useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    let ws: WebSocket | null = null;
-    let reloadTimer: number | null = null;
-    // نبضات البث تصل عنقودياً (حتى 30 نبضة سويب في العناقيد) — جلب واحد كل 1.5 ث كحد أقصى
-    const scheduleReload = () => {
-      if (reloadTimer != null) return;
-      reloadTimer = window.setTimeout(() => { reloadTimer = null; void load(); }, 1500);
-    };
-    try {
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data as string);
-          const t = String(msg?.type ?? '');
-          if (t.startsWith('live_opportunity') || t.startsWith('live_sweep') || t.startsWith('live_calibration')) {
-            scheduleReload();
-          }
-        } catch { /* رسالة غير JSON */ }
-      };
-    } catch { /* بلا بث — الاعتماد على التحديث الدوري */ }
-    return () => {
-      if (reloadTimer != null) window.clearTimeout(reloadTimer);
-      ws?.close();
-    };
-  }, [load]);
 
   // ساعة محلية للعرض النسبي («منذ …») — واعية بالإخفاء فلا تعمل في الخلفية
   useVisiblePoll(() => setNow(Date.now()), { intervalMs: 1000 });
@@ -149,6 +136,21 @@ export default function LiveOpportunitiesScreen() {
     } catch (e) {
       setBusyMsg(null);
       setError(e instanceof Error ? e.message : 'تعذر تشغيل المعايرة');
+    }
+  };
+
+  const togglePause = async () => {
+    if (controlBusy || !feed) return;
+    setControlBusy(true);
+    setError(null);
+    try {
+      const result = await api.setBuyPaused(!feed.paused);
+      setFeed(current => current ? { ...current, ...result } : current);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'تعذر تغيير حالة المحرك');
+    } finally {
+      setControlBusy(false);
     }
   };
 
@@ -178,9 +180,19 @@ export default function LiveOpportunitiesScreen() {
   /* اللقطة الحية من قناة WebSocket — تُدمج فوق بيانات الجلب */
   const liveTick = useStore(s => s.liveOppTick);
   const calibProgress = useStore(s => s.calibrationProgress);
+  const socketState = useStore(s => s.liveOppSocketState);
+  const liveOppEventsRevision = useStore(s => s.liveOppEventsRevision);
+  useEffect(() => {
+    void load();
+    if (section === 'closed') void loadClosed();
+  }, [liveOppEventsRevision, load, loadClosed, section]);
   const tickOpp = (id: string) => liveTick?.opportunities?.[id] ?? null;
   const tickWatch = (key: string) => liveTick?.watching?.[key] ?? null;
   const tickAge = liveTick ? Math.max(0, Math.round((now - liveTick.at) / 1000)) : null;
+  const socketFresh = socketState === 'connected' && tickAge != null && tickAge < 5;
+  const socketLabel = socketState === 'connected'
+    ? tickAge == null ? 'متصل · بانتظار أول تحديث' : tickAge < 5 ? 'بث حي' : `متصل · بيانات متأخرة ${tickAge} ث`
+    : socketState === 'connecting' ? 'جارٍ الاتصال' : socketState === 'closed' ? 'الاتصال مغلق' : 'إعادة الاتصال';
 
   const byTf = useMemo(() => {
     const map = new Map<string, number>();
@@ -205,16 +217,25 @@ export default function LiveOpportunitiesScreen() {
           <span
             className="px-3 py-1.5 rounded-full text-[11px] font-bold"
             style={{
-              background: tickAge != null && tickAge < 5 ? 'var(--up-soft)' : 'var(--surface-1)',
-              color: tickAge != null && tickAge < 5 ? 'var(--up)' : 'var(--text-3)',
+              background: socketFresh ? 'var(--up-soft)' : 'var(--surface-1)',
+              color: socketFresh ? 'var(--up)' : 'var(--warn)',
               border: '1px solid var(--border-1)'
             }}
-            title="بث WebSocket لحظي من الخادم"
+            title="حالة اتصال WebSocket ونبضة آخر تحديث"
           >
-            {tickAge != null && tickAge < 5 ? 'بث حي' : 'بلا نبضات'}{tickAge != null ? ` · ${tickAge} ث` : ''}
+            {socketLabel}
           </span>
-          <button onClick={() => void runScan()} className="px-4 py-2 rounded-lg text-[12px] font-bold" style={{ background: 'var(--accent)', color: '#fff' }}>دورة مسح الآن</button>
-          <button onClick={() => void runCalibration()} className="px-4 py-2 rounded-lg text-[12px] font-bold" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>تشغيل المعايرة</button>
+          <button
+            onClick={() => void togglePause()}
+            disabled={controlBusy || !feed || (!feed.paused && feed.recovery?.state !== 'ready')}
+            className="px-4 py-2 rounded-lg text-[12px] font-bold disabled:opacity-50"
+            style={{ background: feed?.paused ? 'var(--up-soft)' : 'var(--down-soft)', color: feed?.paused ? 'var(--up)' : 'var(--down)', border: '1px solid var(--border-1)' }}
+            aria-pressed={feed?.paused ?? false}
+          >
+            {controlBusy ? 'جارٍ التحديث…' : feed?.paused ? 'استئناف إنشاء الفرص' : 'إيقاف طارئ للفرص الجديدة'}
+          </button>
+          <button onClick={() => void runScan()} disabled={feed?.paused} className="px-4 py-2 rounded-lg text-[12px] font-bold disabled:opacity-50" style={{ background: 'var(--accent)', color: '#fff' }}>دورة مسح الآن</button>
+          <button onClick={() => void runCalibration()} disabled={feed?.paused} className="px-4 py-2 rounded-lg text-[12px] font-bold disabled:opacity-50" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>تشغيل المعايرة</button>
         </div>
       </div>
 
@@ -222,6 +243,11 @@ export default function LiveOpportunitiesScreen() {
         * وسم البيانات القديمة: الفرص تُبنى على أسعار، وسعر متقادم يعني قراراً على صورة
         * قديمة للسوق. الشرط من الخادم نفسه (عمر آخر سعر) لا من انطباع الواجهة.
         */}
+      {feed?.paused && (
+        <div className="rounded-lg px-3 py-2 text-[12px] font-bold" role="status" style={{ background: 'var(--warn-soft)', color: 'var(--warn)', border: '1px solid var(--warn)' }}>
+          متوقف مؤقتًا: لن تُنشأ فرص جديدة ولن تبدأ معايرة؛ متابعة الفرص المفتوحة مستمرة.
+        </div>
+      )}
       <StaleDataBanner />
       {feed?.recovery && feed.recovery.state !== 'ready' && (
         <div className="rounded-lg px-3 py-2 text-[12px] space-y-1" role="status" style={{ background: 'var(--warn-soft)', color: 'var(--warn)', border: '1px solid var(--warn)' }}>
@@ -542,7 +568,7 @@ export default function LiveOpportunitiesScreen() {
         </>
       )}
 
-      <PersistedOpportunityHistory engine="live" />
+      <PersistedOpportunityHistory engine="live" refreshKey={liveOppEventsRevision} />
 
       {(chartId || watchChart) && (
         <LiveChartModal

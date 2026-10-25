@@ -189,6 +189,10 @@ export function createLiveOpportunityEngine(deps) {
 
   const status = {
     busy: false,
+    paused: false,
+    pauseUpdatedAt: null,
+    market: null,
+    priceAgeMs: null,
     cycle: 0,
     scope: 'halal_no_barcode',
     pairsTotal: 0,
@@ -244,7 +248,9 @@ export function createLiveOpportunityEngine(deps) {
   let tickTimer = null;
   let unsubCandleClose = null;
   let running = false;
-  let lastPrices = {};          // آخر أسعار معروفة (احتياطي الـtick إن غاب البث)
+  let pauseGeneration = 0;
+  let lastPrices = {};
+  let lastPricesAt = 0;
   let lastFastCycleAt = 0;
   const verifying = new Set();  // مرشحون قيد التحقق الآن (منع التكرار بين الدورات المتقاربة)
 
@@ -333,6 +339,13 @@ export function createLiveOpportunityEngine(deps) {
     if (!raw || raw.length < 60) raw = await fetchRawKlines(symbol, timeframe, 500);
     const candles = normalizeCandles(raw);
     if (candles.length < 60) return null;
+    const latestCandleTime = Number(candles.at(-1)?.time);
+    const latestCandleAt = latestCandleTime > 1e12 ? latestCandleTime : latestCandleTime * 1000;
+    const candleAgeLimit = tfSeconds(timeframe) * 2000 + 5000;
+    if (!Number.isFinite(latestCandleAt) || latestCandleAt > now() + 5000 || now() - latestCandleAt > candleAgeLimit) {
+      status.funnel.noData += 1;
+      return null;
+    }
     const profile = computeVolumeProfile(candles);
     const location = classifyLocation(candles, profile);
     const cvd = computeCvd(raw, 50); // يحتاج الشموع الخام (يقرأ عمود Taker Buy)
@@ -341,8 +354,9 @@ export function createLiveOpportunityEngine(deps) {
 
   /** تحقق شبكي كامل لمرشح + نشر إن اجتاز */
   async function evaluateCandidate({ symbol, zone, state, price }) {
+    if (status.paused) return null;
     const enriched = await enrich(symbol, zone.timeframe);
-    if (!enriched) return null;
+    if (!enriched || status.paused) return null;
     const { candles, profile, location, cvd } = enriched;
 
     // إعادة تقديم الحالة بالسعر الحي (لا بأدنى قاع — وإلا لن تُكتشف الاستعادة أبداً)،
@@ -481,6 +495,7 @@ export function createLiveOpportunityEngine(deps) {
       return null;
     }
 
+    if (status.paused) return null;
     const detectedAt = now();
     // القاعدة 1 (لا تسريب مستقبلي): المعايرة المستخدمة يجب أن تسبق لحظة القرار
     if (calibration.at != null && Number(calibration.at) > detectedAt) {
@@ -869,14 +884,25 @@ export function createLiveOpportunityEngine(deps) {
       if (targets.length) lastTargets = targets;
       status.pairsTotal = targets.length;
       status.cycle += 1;
-      // الأسعار من بث WebSocket المتزامن (صفر REST) — وREST احتياطياً لما يغيب فقط
-      let prices = market?.connected?.() ? market.getPrices(targets) : {};
+      // الأسعار الحديثة فقط — يُهمل المخزون القديم ثم يُستخدم REST عند الحاجة
+      let prices = {};
+      if (typeof market?.getFreshPrice === 'function') {
+        for (const symbol of targets) {
+          const price = market.getFreshPrice(symbol);
+          if (Number.isFinite(price)) prices[symbol] = price;
+        }
+      } else if (market?.connected?.()) {
+        prices = market.getPrices(targets);
+      }
       const missing = targets.filter(s => !Number.isFinite(prices[s]));
       if (missing.length) {
         const rest = await withTimeout(Promise.resolve(fetchPrices(missing)).catch(() => ({})), 45_000, {});
         prices = { ...rest, ...prices };
       }
       lastPrices = prices;
+      lastPricesAt = now();
+      status.market = market?.stats?.() ?? null;
+      status.priceAgeMs = status.market?.priceAgeMs ?? null;
 
       const allowed = new Set(targets);
       const bySymbol = new Map();
@@ -942,7 +968,7 @@ export function createLiveOpportunityEngine(deps) {
           }
           const close = next.geometry?.toLiquidityAtr;
           const veryClose = Number.isFinite(close) && close <= cfg.watchApproachAtr;
-          if (canPublish(next, publishKeyFor(next)) || next.phase === 'reclaimed' || (next.phase === 'approaching' && veryClose)) {
+          if (!status.paused && (canPublish(next, publishKeyFor(next)) || next.phase === 'reclaimed' || (next.phase === 'approaching' && veryClose))) {
             candidates.push({ symbol, zone, state: next, price: px });
           }
         }
@@ -1032,12 +1058,14 @@ export function createLiveOpportunityEngine(deps) {
 
   /** معايرة walk-forward: مناطق SSL التاريخية المسحوبة → محاكاة → شرائح (فريم × فئة الثقة) */
   async function runCalibration({ symbols = null, timeframes = null } = {}) {
+    if (status.paused) return { skipped: true, reason: 'المحرك متوقف مؤقتًا' };
     if (cfg.recoveryRequired && status.recovery.state !== 'ready') {
       return { skipped: true, recovery: status.recovery.state };
     }
     if (calibration.busy) return { skipped: true, reason: 'المعايرة قيد التنفيذ' };
     calibration.busy = true;
     calibration.error = null;
+    const runGeneration = pauseGeneration;
     try {
       const targets = symbols ?? (await resolveTargets()).slice(0, cfg.calibration.symbols);
       const frames = timeframes ?? cfg.calibration.timeframes ?? TF_ORDER;
@@ -1049,8 +1077,10 @@ export function createLiveOpportunityEngine(deps) {
       const all = [];
       const rejectedTotals = {};
       const runTask = async ({ symbol, tf }) => {
+        if (status.paused || runGeneration !== pauseGeneration) return;
         try {
           const raw = await fetchRawKlines(symbol, tf, cfg.calibration.bars);
+          if (status.paused || runGeneration !== pauseGeneration) return;
           const candles = normalizeCandles(raw);
           if (candles.length >= 200) {
             const scanArgs = {
@@ -1062,6 +1092,7 @@ export function createLiveOpportunityEngine(deps) {
             const zones = workers
               ? await workers.run('scanHistory', scanArgs, { timeoutMs: cfg.scanTimeoutMs ?? 120_000 })
               : scanHistory(scanArgs);
+            if (status.paused || runGeneration !== pauseGeneration) return;
             // نفس بوابات المحرك الحي: عمق السويب · الموقع · الجلسة · التدفق · R:R
       const { trades, rejected: rej } = calibrateSweeps({
         candles, zones, timeframe: tf, raw,
@@ -1145,6 +1176,10 @@ export function createLiveOpportunityEngine(deps) {
         await sleep(cfg.calibration.sleepMs);
       };
       await Promise.all(tasks.map(t => limit(() => runTask(t))));
+      if (status.paused || runGeneration !== pauseGeneration) {
+        calibration.progress = null;
+        return { skipped: true, reason: 'تم إيقاف المعايرة مؤقتًا' };
+      }
       const rows = summarizeSegments(all, {
         targetWinRate: cfg.targetWinRate, minTrades: cfg.minSegmentTrades
       });
@@ -1225,7 +1260,13 @@ export function createLiveOpportunityEngine(deps) {
     const decided = status.wins + status.losses;
     return {
       busy: status.busy,
+      paused: status.paused,
+      pauseUpdatedAt: status.pauseUpdatedAt,
       cycle: status.cycle,
+      priceAgeMs: status.priceAgeMs,
+      lastPricesAt,
+      schedule: { cycleMs: cfg.cycleMs, calibrationMs: cfg.calibrationMs },
+      market: status.market,
       recovery: { ...status.recovery },
       scope: status.scope,
       pairsTotal: status.pairsTotal,
@@ -1266,7 +1307,13 @@ export function createLiveOpportunityEngine(deps) {
   function getStatus() {
     return {
       busy: status.busy,
+      paused: status.paused,
+      pauseUpdatedAt: status.pauseUpdatedAt,
       cycle: status.cycle,
+      priceAgeMs: status.priceAgeMs,
+      lastPricesAt,
+      market: market?.stats?.() ?? status.market,
+      schedule: { cycleMs: cfg.cycleMs, calibrationMs: cfg.calibrationMs },
       scope: status.scope,
       rehydrated: status.rehydrated ?? null,
       rehydratedAt: status.rehydratedAt ?? null,
@@ -1448,6 +1495,15 @@ export function createLiveOpportunityEngine(deps) {
     void runCycle();
   }
 
+  function setPaused(paused, pauseUpdatedAt = now()) {
+    const nextPaused = Boolean(paused);
+    if (status.paused !== nextPaused) pauseGeneration += 1;
+    status.paused = nextPaused;
+    status.pauseUpdatedAt = status.paused ? Number(pauseUpdatedAt) || now() : null;
+    status.updatedAt = now();
+    return { paused: status.paused, pauseUpdatedAt: status.pauseUpdatedAt };
+  }
+
   function stop() {
     running = false;
     if (cycleTimer) clearInterval(cycleTimer);
@@ -1460,7 +1516,7 @@ export function createLiveOpportunityEngine(deps) {
   }
 
   return {
-    start, stop, runCycle, runCalibration, loadCalibration, rehydrate, setRecoveryState,
+    start, stop, setPaused, runCycle, runCalibration, loadCalibration, rehydrate, setRecoveryState,
     getFeed, getStatus, getHistory, getCalibration, findOpportunity, getTracker,
     _internals: { trackers, opportunities, history, segments, rejected, status, calibration, cfg }
   };

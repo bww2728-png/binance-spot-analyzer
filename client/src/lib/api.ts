@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, PersistedOpportunityHistoryPage, PersistedRejectionReason, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse, LiquidityV2ZonesResponse, LiquidityV2StatusResponse, Candle } from './types';
+import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, PersistedOpportunityHistoryPage, PersistedOpportunityHistorySummary, PersistedRejectionReason, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse, LiquidityV2ZonesResponse, LiquidityV2StatusResponse, Candle } from './types';
 
 /**
  * خلفية البيانات موحدة عبر REST API (نفس-الأصل) دائماً.
@@ -505,8 +505,12 @@ const liveOpportunitiesApi = {
     if (opts.beforeId != null) q.set('beforeId', String(opts.beforeId));
     return fetch(`${BASE}/opportunities/persisted-history?${q}`, { signal }).then(j<PersistedOpportunityHistoryPage>);
   },
+  getPersistedOpportunityHistorySummary: (engine: 'live' | 'strategy2', signal?: AbortSignal) =>
+    fetch(`${BASE}/opportunities/persisted-history/summary?engine=${engine}`, { signal }).then(j<PersistedOpportunityHistorySummary>),
   getRejectedOpportunitySummary: (engine: 'live' | 'strategy2', signal?: AbortSignal) =>
     fetch(`${BASE}/opportunities/rejected-summary?engine=${engine}`, { signal }).then(j<{ engine: string; reasons: PersistedRejectionReason[]; generatedAt: number }>),
+  setBuyPaused: (paused: boolean) =>
+    fetch(`${BASE}/live-opportunities/control`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused }) }).then(j<{ ok: boolean; paused: boolean; pauseUpdatedAt: number | null }>),
   runBuyScan: () =>
     fetch(`${BASE}/live-opportunities/run`, { method: 'POST' }).then(j<{ ok: boolean; started: boolean }>),
   runBuyCalibration: (body?: { symbols?: string[]; timeframes?: string[] }) =>

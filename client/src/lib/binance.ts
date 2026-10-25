@@ -315,8 +315,9 @@ export interface SymbolsUpdateMsg {
   done?: number;
 }
 
-/** اتصال WebSocket بنفس أصل الخادم (مسار /ws) مع إعادة اتصال تلقائي */
-export function connectSymbolsSocket(onUpdate: (msg: SymbolsUpdateMsg) => void): () => void {
+export type SymbolsSocketState = 'connecting' | 'connected' | 'reconnecting' | 'closed';
+
+export function connectSymbolsSocket(onUpdate: (msg: SymbolsUpdateMsg) => void, onState?: (state: SymbolsSocketState) => void): () => void {
   let ws: WebSocket | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let attempt = 0;
@@ -324,22 +325,31 @@ export function connectSymbolsSocket(onUpdate: (msg: SymbolsUpdateMsg) => void):
 
   const open = () => {
     if (closed) return;
+    onState?.(attempt === 0 ? 'connecting' : 'reconnecting');
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
-    ws.onopen = () => { attempt = 0; };
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data as string) as SymbolsUpdateMsg;
-        if (msg.type) onUpdate(msg);
-      } catch { /* ignore malformed */ }
-    };
-    ws.onclose = () => {
+    try {
+      ws = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.onopen = () => { attempt = 0; onState?.('connected'); };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data as string) as SymbolsUpdateMsg;
+          if (msg.type) onUpdate(msg);
+        } catch { /* ignore malformed */ }
+      };
+      ws.onclose = () => {
+        if (closed) return;
+        attempt += 1;
+        onState?.('reconnecting');
+        const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5));
+        retryTimer = setTimeout(open, delay);
+      };
+      ws.onerror = () => ws?.close();
+    } catch {
       if (closed) return;
       attempt += 1;
-      const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5));
-      retryTimer = setTimeout(open, delay);
-    };
-    ws.onerror = () => { /* onclose follows */ };
+      onState?.('reconnecting');
+      retryTimer = setTimeout(open, Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
+    }
   };
 
   open();
@@ -347,6 +357,7 @@ export function connectSymbolsSocket(onUpdate: (msg: SymbolsUpdateMsg) => void):
   return () => {
     closed = true;
     if (retryTimer) clearTimeout(retryTimer);
+    onState?.('closed');
     try { ws?.close(); } catch { /* ignore */ }
   };
 }

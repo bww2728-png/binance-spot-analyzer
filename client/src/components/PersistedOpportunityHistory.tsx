@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api';
-import type { PersistedOpportunityHistoryItem, PersistedRejectionReason } from '../lib/types';
+import type { PersistedOpportunityHistoryItem, PersistedOpportunityHistorySummary, PersistedRejectionReason } from '../lib/types';
 import LoadErrorState from './ui/LoadErrorState';
 import { formatPrice } from '../lib/formatPrice';
 
-type Props = { engine: 'live' | 'strategy2' };
+type Props = { engine: 'live' | 'strategy2'; refreshKey?: number };
 
 const outcomeLabel = (value: string | null) => {
   if (!value) return 'قيد النتيجة';
@@ -13,9 +13,11 @@ const outcomeLabel = (value: string | null) => {
   return value;
 };
 
-export default function PersistedOpportunityHistory({ engine }: Props) {
+export default function PersistedOpportunityHistory({ engine, refreshKey = 0 }: Props) {
   const [items, setItems] = useState<PersistedOpportunityHistoryItem[]>([]);
   const [total, setTotal] = useState(0);
+  const [summary, setSummary] = useState<PersistedOpportunityHistorySummary | null>(null);
+  const [summaryError, setSummaryError] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,13 +61,25 @@ export default function PersistedOpportunityHistory({ engine }: Props) {
     }
   }, [engine]);
 
+  const loadSummary = useCallback(async () => {
+    setSummaryError(false);
+    try {
+      setSummary(await api.getPersistedOpportunityHistorySummary(engine));
+    } catch {
+      setSummary(null);
+      setSummaryError(true);
+    }
+  }, [engine]);
+
   useEffect(() => {
     setItems([]);
     setNextCursor(null);
     setTotal(0);
+    setSummary(null);
     void loadPage(true);
     void loadReasons();
-  }, [engine]);
+    void loadSummary();
+  }, [engine, loadReasons, loadSummary, refreshKey]);
 
   useEffect(() => {
     const node = sentinel.current;
@@ -84,9 +98,14 @@ export default function PersistedOpportunityHistory({ engine }: Props) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="font-bold text-[14px]" style={{ color: 'var(--text-1)' }}>{title}</h3>
-          <p className="text-[11px] mt-1" style={{ color: 'var(--text-3)' }}>سجل دائم من قاعدة البيانات · {total.toLocaleString('ar')} فرصة محفوظة · يعرض الأحدث أولًا</p>
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-3)' }}>
+            سجل دائم من قاعدة البيانات · {summary?.eventCount != null ? summary.eventCount.toLocaleString('ar') : '—'} حدث نشر ·{' '}
+            {summary
+              ? `${summary.uniqueCountComplete ? '' : '≥ '}${summary.uniqueOpportunityCount.toLocaleString('ar')} فرصة فريدة${summary.uniqueCountComplete ? '' : ' (عدد غير مكتمل)'}`
+              : summaryError ? 'تعذر حساب عدد الفرص الفريدة' : 'جارٍ حساب الفرص الفريدة'} · يعرض الأحدث أولًا
+          </p>
         </div>
-        <button className="btn btn-secondary text-[11px]" onClick={() => void loadPage(true)} disabled={loading}>تحديث السجل</button>
+        <button className="btn btn-secondary text-[11px]" onClick={() => { void loadPage(true); void loadSummary(); }} disabled={loading}>تحديث السجل</button>
       </div>
 
       {reasons.length > 0 && (

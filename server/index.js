@@ -2366,8 +2366,8 @@ const liveOppEngine = createLiveOpportunityEngine({
   fetchPrices: async (symbols) => {
     try {
       if (marketStreams.connected()) {
-        const live = marketStreams.getPrices(symbols);
-        if (symbols.every(s => Number.isFinite(live[s]))) return live;
+        const live = Object.fromEntries(symbols.map(symbol => [symbol, marketStreams.getFreshPrice(symbol)]));
+        if (symbols.every(symbol => Number.isFinite(live[symbol]))) return live;
       }
     } catch { /* سقط للاحتياطي REST */ }
     const all = await db.binance.allTickerPrices().catch(() => null);
@@ -2422,8 +2422,15 @@ const liveOppEngine = createLiveOpportunityEngine({
   shadow
 });
 const LIVE_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const LIVE_OPPORTUNITIES_CONTROL_KEY = 'live_opportunities_control';
 const liveOpportunityRecovery = createLiveOpportunityRecovery({
   engine: liveOppEngine,
+  readPauseState: async () => {
+    const saved = await db.engineState.getStrict(LIVE_OPPORTUNITIES_CONTROL_KEY);
+    if (saved == null) return { paused: false, pauseUpdatedAt: null };
+    if (typeof saved.paused !== 'boolean') throw new Error('حالة إيقاف المحرك المحفوظة غير صالحة');
+    return { paused: saved.paused, pauseUpdatedAt: saved.pauseUpdatedAt ?? null };
+  },
   readLifecycle: () => readAllPages(
     ({ beforeId, limit }) => db.events.liveLifecyclePage(Date.now() - LIVE_RECOVERY_WINDOW_MS, beforeId, limit),
     { pageSize: 1000, maxRows: 50_000 }
@@ -2796,10 +2803,33 @@ app.get('/api/opportunities/persisted-history', handle(async (req, res) => {
   res.json({ items, total: page.total, nextCursor: page.nextCursor, generatedAt: Date.now() });
 }));
 
+app.get('/api/opportunities/persisted-history/summary', handle(async (req, res) => {
+  const engine = req.query.engine === 'strategy2' ? 'strategy2' : 'live';
+  const summary = await db.events.opportunityHistorySummary({ engine });
+  res.json({ engine, ...summary, generatedAt: Date.now() });
+}));
+
 app.get('/api/opportunities/rejected-summary', handle(async (req, res) => {
   const engine = req.query.engine === 'strategy2' ? 'strategy2' : 'live';
   const reasons = await db.events.rejectedSummary({ engine });
   res.json({ engine, reasons, generatedAt: Date.now() });
+}));
+
+app.post('/api/live-opportunities/control', handle(async (req, res) => {
+  if (typeof req.body?.paused !== 'boolean') {
+    res.status(400).json({ error: 'يجب تحديد حالة الإيقاف' });
+    return;
+  }
+  const paused = req.body.paused;
+  if (!paused && liveOppEngine.getStatus().recovery.state !== 'ready') {
+    res.status(409).json({ error: 'لا يمكن استئناف إنشاء فرص جديدة قبل اكتمال الاستعادة' });
+    return;
+  }
+  const pauseUpdatedAt = paused ? Date.now() : null;
+  await db.engineState.put(LIVE_OPPORTUNITIES_CONTROL_KEY, { paused, pauseUpdatedAt });
+  const control = liveOppEngine.setPaused(paused, pauseUpdatedAt);
+  broadcast({ type: 'live_opportunities_control', ...control });
+  res.json({ ok: true, ...control });
 }));
 
 app.get('/api/live-opportunities/status', handle(async (_req, res) => {

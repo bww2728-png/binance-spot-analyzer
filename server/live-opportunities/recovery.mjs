@@ -2,6 +2,7 @@ export function createLiveOpportunityRecovery({
   engine,
   readLifecycle,
   readOpportunities,
+  readPauseState = async () => ({ paused: false, pauseUpdatedAt: null }),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
   retryDelayMs = 30_000,
@@ -27,7 +28,7 @@ export function createLiveOpportunityRecovery({
   const scheduleRetry = (runGeneration) => {
     if (stopped || runGeneration !== generation || timer) return;
     attempt += 1;
-    const delay = Math.min(retryDelayMs * attempt, maxRetryDelayMs);
+    const delay = Math.min(retryDelayMs * 2 ** Math.min(attempt - 1, 8), maxRetryDelayMs);
     timer = setTimeoutFn(() => {
       timer = null;
       launch(runGeneration);
@@ -41,10 +42,11 @@ export function createLiveOpportunityRecovery({
     engine.setRecoveryState('loading');
     const metadata = {};
     try {
-      const [lifecycleResult, opportunitiesResult, calibrationResult] = await Promise.allSettled([
+      const [lifecycleResult, opportunitiesResult, calibrationResult, pauseStateResult] = await Promise.allSettled([
         readLifecycle(),
         readOpportunities(),
-        engine.loadCalibration()
+        engine.loadCalibration(),
+        readPauseState()
       ]);
       if (stopped || runGeneration !== generation) return { skipped: true };
       metadata.lifecycle = lifecycleResult.status === 'fulfilled'
@@ -56,6 +58,9 @@ export function createLiveOpportunityRecovery({
       metadata.calibration = calibrationResult.status === 'fulfilled'
         ? { ok: true }
         : { ok: false, error: String(calibrationResult.reason?.message ?? calibrationResult.reason) };
+      metadata.control = pauseStateResult.status === 'fulfilled'
+        ? { ok: true, paused: Boolean(pauseStateResult.value?.paused), pauseUpdatedAt: Number(pauseStateResult.value?.pauseUpdatedAt) || null }
+        : { ok: false, error: String(pauseStateResult.reason?.message ?? pauseStateResult.reason) };
 
       const failed = Object.entries(metadata).filter(([, result]) => !result.ok || result.truncated);
       if (failed.length) {
@@ -73,6 +78,7 @@ export function createLiveOpportunityRecovery({
         throw new Error(engine.getStatus().recovery.error ?? 'تعذر استكمال استعادة الفرص المحفوظة');
       }
       if (stopped || runGeneration !== generation) return { skipped: true };
+      engine.setPaused?.(metadata.control.paused, metadata.control.pauseUpdatedAt);
       engine.start();
       attempt = 0;
       if (timer) clearTimeoutFn(timer);

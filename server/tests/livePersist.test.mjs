@@ -40,6 +40,7 @@ test('persist: نجاح تسجيل حدث دورة حياة (سويب) يُبل�
   assert.ok(successes.length >= 1, 'يجب تسجيل نجاح حفظ واحد على الأقل');
   assert.ok(successes.some(n => n.key === 'live_lifecycle'));
   assert.equal(status().persist.failures, 0);
+  assert.equal(status().priceAgeMs, null, 'غياب قياس عمر السعر لا يُعرض كأن العمر صفر');
 });
 
 test('persist: فشل الحفظ لا يُخفى — notePersist يتلقى الخطأ وعداد الفشل يزيد', async () => {
@@ -91,6 +92,28 @@ test('persist: النتيجة تُحفظ فور حسمها لا بعد مؤقت 
   await engine.runCycle();
   const outcomeSaves = persistCalls.filter(r => r.closed === true);
   assert.ok(outcomeSaves.length >= 1, 'يجب حفظ النتيجة فور حسمها');
+});
+
+test('emergency pause skips calibration while continuing to resolve open opportunities', async () => {
+  const { engine, persistCalls, setPrice } = makeEngine({ persistResult: 'ok' });
+  const opportunity = {
+    id: 'btc-5m-open', symbol: 'BTCUSDT', timeframe: '5m', zoneId: 'z1', kind: 'ssl',
+    entry: 99, stop: 96, tp: 105, detectedAt: 900_000, outcome: null
+  };
+  engine.rehydrate([
+    { type: 'live_opportunity', symbol: 'BTCUSDT', ts: 900_000, meta: JSON.stringify({ opportunity }) }
+  ], { lifecycle: { ok: true, count: 0 }, opportunities: { ok: true, count: 1 } });
+  engine.setPaused(true, 950_000);
+  setPrice(106);
+
+  assert.deepEqual(await engine.runCalibration(), { skipped: true, reason: 'المحرك متوقف مؤقتًا' });
+  await engine.runCycle();
+
+  assert.equal(engine.getStatus().paused, true);
+  assert.equal(engine.getFeed().total, 1);
+  assert.equal(engine.getFeed().opportunities[0]?.outcome, 'target');
+  assert.ok(persistCalls.some(row => row.closed === true), 'يُحفظ حسم الفرصة المفتوحة أثناء الإيقاف');
+  engine.stop();
 });
 
 test('calibration: إشعار الاكتمال لا يؤكد الحفظ دون نتيجة تخزين صريحة ويُرسل مرة', async () => {

@@ -2,6 +2,7 @@ import { applyFeedback } from './liquidity/engine.mjs';
 import { gate, reportRateLimit, sleep, RATE_WAIT_CAP_MS } from './net/gate.mjs';
 import { compactSnapshot, expandSnapshotMeta } from './services/snapshotCodec.mjs';
 import { readAllPages } from './services/readAllPages.mjs';
+import { summarizeOpportunityHistory } from './services/opportunityHistorySummary.mjs';
 
 /**
  * المحدد الموحّد يُحقن من الخادم (أو من الاختبارات) عبر `setRateLimiter`.
@@ -19,6 +20,8 @@ const baseHeaders = {
   Authorization: `Bearer ${SUPABASE_KEY}`,
   'Content-Type': 'application/json'
 };
+
+const opportunityHistorySummaryCache = new Map();
 
 async function rest(path, { method = 'GET', body, prefer } = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
@@ -560,6 +563,18 @@ const db = {
       if (!rows?.length) return null;
       try { return rows[0].meta ? JSON.parse(rows[0].meta) : null; } catch { return null; }
     },
+    getStrict: async (key) => {
+      const rows = await rest(`/events_log?type=eq.engine_state&symbol=eq.${encodeURIComponent(key)}&select=meta,ts&limit=1`);
+      if (!rows?.length) return null;
+      if (rows[0].meta == null) throw new Error(`حالة تشغيل محفوظة بلا محتوى: ${key}`);
+      try {
+        const parsed = typeof rows[0].meta === 'string' ? JSON.parse(rows[0].meta) : rows[0].meta;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('صيغة حالة تشغيل غير صالحة');
+        return parsed;
+      } catch (error) {
+        throw new Error(`تعذر قراءة حالة التشغيل المحفوظة (${key}): ${error.message}`);
+      }
+    },
     put: async (key, value) => {
       const body = { type: 'engine_state', symbol: String(key), message: String(key), meta: JSON.stringify(value ?? null), ts: Date.now() };
       const existing = await rest(`/events_log?type=eq.engine_state&symbol=eq.${encodeURIComponent(key)}&select=id&limit=1`);
@@ -585,7 +600,12 @@ const db = {
       return rest(`/events_log?${q}`);
     },
     get: (id) => rest(`/events_log?id=eq.${Number(id)}&select=*&limit=1`).then(rows => rows[0] ?? null),
-    create: (row) => rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' }),
+    create: async (row) => {
+      const created = await rest('/events_log?select=*', { method: 'POST', body: row, prefer: 'return=representation' });
+      if (row?.type === 'live_opportunity') opportunityHistorySummaryCache.delete('live');
+      if (row?.type === 'strategy2_published') opportunityHistorySummaryCache.delete('strategy2');
+      return created;
+    },
     /* ——— عمليات سياسة الاحتفاظ (حذف مقيّد بالموافقة المعتمدة) ——— */
     /** قراءة خفيفة لنوع واحد (معرّفات فقط عادةً) — للقطات المناطق */
     /**
@@ -679,6 +699,32 @@ const db = {
         if (ids.has(opportunityId)) matchingOutcomes.push(row);
       }
       return { published: published ?? [], outcomes: matchingOutcomes, total, nextCursor: published?.length === pageLimit ? published[published.length - 1].id : null };
+    },
+    opportunityHistorySummary: async ({ engine = 'live', maxRows = 50_000 } = {}) => {
+      const cached = opportunityHistorySummaryCache.get(engine);
+      if (cached && cached.expiresAt > Date.now()) return cached.value;
+      const strategy2 = engine === 'strategy2';
+      const publishedType = strategy2 ? 'strategy2_published' : 'live_opportunity';
+      const countQuery = new URLSearchParams({ select: 'id', type: `eq.${publishedType}` });
+      const countResponse = await fetch(`${SUPABASE_URL}/rest/v1/events_log?${countQuery}`, {
+        method: 'HEAD',
+        headers: { ...baseHeaders, Prefer: 'count=exact' },
+        signal: AbortSignal.timeout(20000)
+      });
+      if (!countResponse.ok) throw new Error(`Supabase REST ${countResponse.status}`);
+      const rangeMatch = /\/(\d+)$/.exec(countResponse.headers.get('content-range') ?? '');
+      const eventCount = rangeMatch ? Number(rangeMatch[1]) : null;
+      const scan = await readAllPages(({ beforeId, limit }) => {
+        const q = new URLSearchParams({ select: 'id,meta' });
+        q.set('type', `eq.${publishedType}`);
+        if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
+        q.set('order', 'id.desc');
+        q.set('limit', String(Math.min(Math.max(Number(limit) || 1000, 1), 1000)));
+        return rest(`/events_log?${q}`);
+      }, { pageSize: 1000, maxRows });
+      const summary = summarizeOpportunityHistory(scan.rows, eventCount, { truncated: scan.truncated });
+      opportunityHistorySummaryCache.set(engine, { expiresAt: Date.now() + 15_000, value: summary });
+      return summary;
     },
     opportunityOutcomeEventsPage: (type, sinceTs, beforeId = null, limit = 1000) => {
       const q = new URLSearchParams({ select: 'id,type,symbol,meta,ts' });

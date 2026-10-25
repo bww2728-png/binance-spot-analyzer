@@ -8,6 +8,7 @@ const nodeEnv = (globalThis as unknown as { process?: { env?: Record<string, str
 // مضيف HMR يُقرأ من البيئة فقط — بلا قيمة مدمجة لمضيف معاينة من جلسة سابقة.
 // عند غيابه يُستنتج المضيف تلقائياً من الطلب (سلوك Vite الافتراضي).
 const hmrHost = nodeEnv?.VERDENT_HMR_HOST;
+const apiProxyTarget = nodeEnv?.VITE_API_PROXY_TARGET || 'http://localhost:8787';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -16,7 +17,8 @@ export default defineConfig({
     allowedHosts: true,
     ...(hmrHost ? { hmr: { host: hmrHost, protocol: 'wss', clientPort: 443 } } : {}),
     proxy: {
-      '/api': 'http://localhost:8787'
+      '/api': apiProxyTarget,
+      '/ws': { target: apiProxyTarget, ws: true }
     }
   },
   build: {
