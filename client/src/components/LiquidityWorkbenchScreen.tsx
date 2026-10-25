@@ -20,6 +20,13 @@ const directionLabel = (zone: LiquidityWorkbenchZone) => {
   if (zone.direction === 'down' || zone.kind.endsWith('bsl') || zone.kind === 'supply') return 'أعلى/هابطة حسب تسمية المحرك';
   return 'غير محددة في المصدر';
 };
+const workbenchErrorMessage = (message: string | null | undefined) => {
+  if (!message) return null;
+  if (message.includes('SUPABASE_SERVICE_ROLE_KEY')) {
+    return 'توقّف المختبر بأمان لأن إعداد حفظ البيانات على الخادم غير مكتمل. لن تظهر نتائج المسح حتى يُستكمل إعداد سر الخدمة في إعدادات أسرار مشروع Verdent ثم يُنشر إصدار جديد. لا تضع هذا السر في المتصفح أو ترسله عبر المحادثة.';
+  }
+  return message;
+};
 const zoneKey = (zone: LiquidityWorkbenchZone) => `${zone.engine}|${zone.id}`;
 const readNotes = (timeframe: string): ManualNote[] => {
   try {
@@ -144,7 +151,7 @@ export default function LiquidityWorkbenchScreen() {
         <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border-1)', background: 'var(--surface-1)' }}><div className="text-[10px]" style={{ color: 'var(--text-3)' }}>المقارنة</div><div className="mt-1 text-xs font-semibold" style={{ color: 'var(--text-1)' }}>{snapshot?.matches.length ?? 0} مرشح تطابق</div><div className="mt-1 text-[10px]" style={{ color: 'var(--text-3)' }}>لا تُدمج المناطق ولا يعني التطابق صحةً</div></div>
       </section>
 
-      {(error || snapshot?.status.error) && <div role="alert" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>{error ?? snapshot?.status.error}</div>}
+      {workbenchErrorMessage(error ?? snapshot?.status.error) && <div role="alert" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>{workbenchErrorMessage(error ?? snapshot?.status.error)}</div>}
       {priceOld && <div role="status" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>لا يوجد سعر حديث مثبت الآن؛ ستظل المناطق معروضة، لكن قياس المسافة موسوم بأنه قديم أو غير متاح.</div>}
 
       <LiquidityWorkbenchChart candles={snapshot?.candles ?? []} zones={allZones} dataSource={snapshot?.dataSource ?? 'unknown'} />
