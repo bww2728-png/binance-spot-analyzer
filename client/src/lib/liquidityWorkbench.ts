@@ -38,6 +38,7 @@ export interface LiquidityWorkbenchStatus {
   lastPrunedAt: number | null;
   tickSize: number | null;
   samples: number;
+  persistence?: 'supabase' | 'memory-fallback' | string;
 }
 
 export interface LiquidityWorkbenchSnapshot {

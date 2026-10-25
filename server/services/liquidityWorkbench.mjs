@@ -547,7 +547,7 @@ export function createLiquidityWorkbench({
       volume: Number(row[5] ?? 0)
     }));
     return {
-      status: { ...state, recovery: state.recovery, error: state.error },
+      status: { ...state, recovery: state.recovery, error: state.error, persistence: repository.persistenceMode ?? 'supabase' },
       symbol,
       timeframe,
       currentPrice: price,
@@ -563,5 +563,5 @@ export function createLiquidityWorkbench({
     };
   };
 
-  return { start, stop, snapshot, status: () => ({ ...state }), get started() { return started; } };
+  return { start, stop, snapshot, status: () => ({ ...state, persistence: repository.persistenceMode ?? 'supabase' }), get started() { return started; } };
 }

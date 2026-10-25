@@ -152,6 +152,7 @@ export default function LiquidityWorkbenchScreen() {
       </section>
 
       {workbenchErrorMessage(error ?? snapshot?.status.error) && <div role="alert" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>{workbenchErrorMessage(error ?? snapshot?.status.error)}</div>}
+      {snapshot?.status.persistence === 'memory-fallback' && <div role="status" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#0ea5e955', background: '#0ea5e912', color: '#0369a1' }}>يعمل المختبر الآن ببيانات الجلسة الحية فقط: التخزين الدائم غير مهيأ في هذا النشر، لذا تُفقد النتائج عند إعادة تشغيل الخادم. بقية الوظائف — الشموع والكشف عند الإغلاق والمقارنة — تعمل بشكل طبيعي.</div>}
       {priceOld && <div role="status" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>لا يوجد سعر حديث مثبت الآن؛ ستظل المناطق معروضة، لكن قياس المسافة موسوم بأنه قديم أو غير متاح.</div>}
 
       <LiquidityWorkbenchChart candles={snapshot?.candles ?? []} zones={allZones} dataSource={snapshot?.dataSource ?? 'unknown'} />
