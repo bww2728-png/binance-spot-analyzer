@@ -23,9 +23,10 @@ const FETCH_CONCURRENCY = 6;   // نداءات متوازية محدودة
 const TTL_MS = 30 * 60_000;    // صلاحية الكاش الافتراضية (legacy)
 const MIN_DAYS = 7;
 const MAX_DAYS_LEGACY = 120;
-// v2: حساب 90 يوماً يقاس محلياً بـ435MB ذاكرة — مع العملية الرئيسية يتجاوز حد
-// ذاكرة حاوية النشر فيُقتل التطبيق كله (وثّق: 502 عند 08:15 و08:49). سقف آمن مقاس.
-const MAX_DAYS_V2 = 30;
+// v2: ذروة ذاكرة مقاسة محلياً — 14d: 190MB، 30d: 240MB، 90d: 435MB. الـ502 الحية
+// وقعت حين ركض تسخين legacy90 وv2 بالتوازي فجمعت الذاكرة فوق حد الحاوية. لذا:
+// سقف v2 = 14 يوماً، تسخين متسلسل، ووسم كومة عامل v2 حتى يموت وحده لا التطبيق.
+const MAX_DAYS_V2 = 14;
 const DEFAULT_DAYS = 90;
 const MAX_ZONES = 400;         // سقف عرض معلن — لا يقطع الحساب
 const MAX_CACHE_ENTRIES = 4;
@@ -110,7 +111,9 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     return new Promise((resolve, reject) => {
       const worker = new Worker(WORKER_PATH, {
         workerData: { engineKey, symbol, timeframe, bars, buf: flat.buffer },
-        resourceLimits: { maxOldGenerationSizeMb: 1024 }
+        // وسم كومة حاد: تجاوز العامل حدّه يُنهيه وحده بخطأ نظيف (تهدئة) بدل
+        // أن تتجاوز ذاكرة العملية المشتركة حد الحاوية فيُسقط التطبيق كله.
+        resourceLimits: { maxOldGenerationSizeMb: engineKey === 'v2' ? 128 : 512 }
       });
       const timer = setTimeout(() => {
         worker.terminate();
@@ -263,12 +266,12 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     return { symbol: s, engine: e, days: d };
   }
 
-  /** تسخين خلفي عند الإقلاع: legacy بعمق كامل، وv2 عند سقفه الآمن (30 يوماً) */
-  function warmUpDefaults(symbol = 'BTCUSDT') {
+  /** تسخين متسلسل عند الإقلاع: لا حسابان ثقيلان متوازيان أبداً (درس 502 الحية) */
+  async function warmUpDefaults(symbol = 'BTCUSDT') {
     if (!warmup) return;
-    setTimeout(() => {
-      void getHistory({ symbol, engine: 'legacy', days: DEFAULT_DAYS }).catch(() => {});
-      void getHistory({ symbol, engine: 'v2', days: MAX_DAYS_V2 }).catch(() => {});
+    setTimeout(async () => {
+      try { await getHistory({ symbol, engine: 'legacy', days: DEFAULT_DAYS }); } catch { /* cooldown يكفي */ }
+      try { await getHistory({ symbol, engine: 'v2', days: MAX_DAYS_V2 }); } catch { /* cooldown يكفي */ }
     }, 3_000);
   }
 

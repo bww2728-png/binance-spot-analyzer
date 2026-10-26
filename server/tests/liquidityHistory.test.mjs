@@ -30,14 +30,14 @@ test('validate rejects bad inputs without computing', () => {
   assert.throws(() => svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'v9', days: 90 })), /محرك غير مدعوم/);
   assert.throws(() => svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 3 })), /العمق بالأيام/);
   assert.throws(() => svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 500 })), /العمق بالأيام/);
-  assert.throws(() => svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'v2', days: 31 })), /عمق v2 الأقصى/); // v2 محدود بالذاكرة
+  assert.throws(() => svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'v2', days: 15 })), /عمق v2 الأقصى/); // v2 محدود بالذاكرة (مقاس)
   assert.throws(() => svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: Number.NaN })), /العمق بالأيام/);
   const ok = svc.validate(validCandles({ symbol: 'btcusdt', engine: undefined, days: undefined }));
   assert.equal(ok.symbol, 'BTCUSDT');
   assert.equal(ok.engine, 'legacy'); // الافتراضي
   assert.equal(ok.days, 90); // الافتراضي
   const v2 = svc.validate(validCandles({ symbol: 'BTCUSDT', engine: 'v2', days: undefined }));
-  assert.equal(v2.days, 30); // الافتراضي لمحرك v2 هو سقفه الآمن المقاس
+  assert.equal(v2.days, 14); // الافتراضي لمحرك v2 هو سقفه الآمن المقاس
 });
 
 test('fetching pages the full depth in fixed-start batches with bounded concurrency', async () => {
