@@ -415,6 +415,21 @@ const db = {
     upsertScan: (row) => restWorkbench('/liquidity_workbench_scans?on_conflict=engine,symbol,timeframe', {
       method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=minimal'
     }),
+    upsertPoints: (rows) => restWorkbench('/liquidity_workbench_points?on_conflict=point_id', {
+      method: 'POST', body: rows, prefer: 'resolution=merge-duplicates,return=minimal'
+    }),
+    listPoints: ({ symbol, timeframe, engine, zoneId, limit = 500 }) => {
+      const q = new URLSearchParams({
+        select: '*',
+        symbol: `eq.${symbol}`,
+        timeframe: `eq.${timeframe}`,
+        order: 'point_time.asc',
+        limit: String(Math.min(Math.max(Number(limit) || 500, 1), 2000))
+      });
+      if (engine) q.set('engine', `eq.${engine}`);
+      if (zoneId) q.set('zone_id', `eq.${zoneId}`);
+      return restWorkbench(`/liquidity_workbench_points?${q}`);
+    },
     insertZoneEvent: (row) => restWorkbench('/liquidity_workbench_events?on_conflict=idempotency_key', {
       method: 'POST', body: row, prefer: 'resolution=ignore-duplicates,return=minimal'
     }),

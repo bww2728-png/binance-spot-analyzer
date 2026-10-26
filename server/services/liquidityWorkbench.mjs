@@ -17,6 +17,63 @@ const asMillis = (value) => {
   return n < 1e12 ? n * 1000 : n;
 };
 const stableKey = (...values) => createHash('sha256').update(values.map(String).join('|')).digest('hex');
+export const deriveZonePoints = (engine, zones, candles, reviewedAt) => zones.flatMap((zone) => {
+  const points = [];
+  const add = ({ type, role, time, index, price, low, high, payload }) => {
+    const normalizedTime = asMillis(time);
+    const numericPrice = Number(price);
+    const numericLow = Number(low);
+    const numericHigh = Number(high);
+    const pointPayload = { ...(payload ?? {}), zoneKind: zone.kind, zoneState: zone.state ?? null, zoneConfidence: zone.confidence ?? null };
+    const pointId = stableKey(engine, zone.symbol, zone.timeframe, zone.id, type, role, normalizedTime ?? '', index ?? '', Number.isFinite(numericPrice) ? numericPrice : '', Number.isFinite(numericLow) ? numericLow : '', Number.isFinite(numericHigh) ? numericHigh : '');
+    points.push({
+      point_id: pointId,
+      engine,
+      symbol: zone.symbol,
+      timeframe: zone.timeframe,
+      zone_id: String(zone.id),
+      point_type: type,
+      role,
+      point_time: normalizedTime,
+      candle_index: index == null || !Number.isInteger(Number(index)) ? null : Number(index),
+      price: Number.isFinite(numericPrice) ? numericPrice : null,
+      price_low: Number.isFinite(numericLow) ? numericLow : null,
+      price_high: Number.isFinite(numericHigh) ? numericHigh : null,
+      zone_state: zone.state ?? null,
+      confirmed_at: asMillis(zone.confirmedAt),
+      last_reviewed_at: reviewedAt,
+      rules_version: engine,
+      payload: pointPayload
+    });
+  };
+  for (const [pointIndex, point] of (zone.touchPoints ?? []).entries()) {
+    const isOrigin = pointIndex === 0 && (zone.kind === 'supply' || zone.kind === 'demand');
+    add({
+      type: isOrigin ? 'origin_candle' : zone.kind.startsWith('trendline_') ? 'trendline_anchor' : 'liquidity_touch',
+      role: isOrigin ? 'zone_origin' : pointIndex === 0 ? 'first_touch' : 'cluster_touch',
+      time: point.time ?? candles?.[point.index]?.time,
+      index: point.index,
+      price: point.price,
+      payload: { form: zone.form ?? null }
+    });
+  }
+  for (const [pointIndex, point] of (zone.trendline?.points ?? []).entries()) {
+    add({ type: 'trendline_anchor', role: `anchor_${pointIndex + 1}`, time: point.time ?? candles?.[point.index]?.time, index: point.index, price: point.price });
+  }
+  for (const gap of zone.fvgs ?? []) {
+    const candle = candles?.[gap.index];
+    add({
+      type: 'fvg', role: 'zone_gap', time: candle?.time ?? gap.time, index: gap.index,
+      price: (Number(gap.top) + Number(gap.bottom)) / 2, low: gap.bottom, high: gap.top,
+      payload: { kind: gap.kind }
+    });
+  }
+  for (const event of zone.structureEvents ?? []) {
+    const candle = candles?.[event.index];
+    add({ type: `structure_${event.type}`, role: 'confirmation_or_structure', time: event.time ?? candle?.time, index: event.index, price: event.price ?? event.brokenLevel, payload: event });
+  }
+  return points;
+});
 const directionOf = (zone) => {
   const direction = String(zone?.direction ?? '').toLowerCase();
   if (direction === 'up') return 'up';
@@ -102,6 +159,34 @@ function closedRows(rawRows, now) {
       && Number.isFinite(Number(row[6]))
       && Number(row[6]) < now)
     .slice(-HISTORY_LIMIT);
+}
+
+async function forEachClosedRange(fetchKlines, symbol, timeframe, duration, fromOpen, toOpen, now, onRows) {
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(fromOpen) || !Number.isFinite(toOpen)) {
+    throw new Error(`حدود استعادة غير صالحة للفريم ${timeframe}`);
+  }
+  if (toOpen < fromOpen) return 0;
+  if ((toOpen - fromOpen) % duration !== 0) throw new Error(`نطاق استعادة غير محاذٍ لشموع الفريم ${timeframe}`);
+
+  let nextOpen = fromOpen;
+  let total = 0;
+  while (nextOpen <= toOpen) {
+    const count = Math.min(1000, Math.floor((toOpen - nextOpen) / duration) + 1);
+    const pageEnd = nextOpen + (count - 1) * duration + duration - 1;
+    const raw = await fetchKlines(symbol, timeframe, count, nextOpen, pageEnd);
+    const page = (Array.isArray(raw) ? raw : [])
+      .filter((row) => Array.isArray(row) && Number.isFinite(Number(row[0])) && Number.isFinite(Number(row[6])) && Number(row[6]) < now)
+      .filter((row) => Number(row[0]) >= nextOpen && Number(row[0]) <= pageEnd)
+      .sort((left, right) => Number(left[0]) - Number(right[0]));
+    if (page.length !== count) throw new Error(`قراءة استعادة ناقصة للفريم ${timeframe}: ${page.length}/${count}`);
+    for (let index = 0; index < page.length; index += 1) {
+      if (Number(page[index][0]) !== nextOpen + index * duration) throw new Error(`فجوة شموع في استعادة الفريم ${timeframe}`);
+    }
+    await onRows(page);
+    total += page.length;
+    nextOpen += count * duration;
+  }
+  return total;
 }
 
 function fromStoredCandle(row) {
@@ -222,25 +307,35 @@ export function createLiquidityWorkbench({
     const expectedOpenTime = Number(last[0]) + duration;
     const missing = Math.round((incomingRow[0] - expectedOpenTime) / duration);
     if (missing <= 0) return history;
-    if (missing > HISTORY_LIMIT) throw new Error(`فجوة بيانات تتجاوز نافذة الاستعادة للفريم ${timeframe}`);
-    const rows = closedRows(await fetchKlines(symbol, timeframe, missing, expectedOpenTime, incomingRow[0] - 1), now());
-    if (rows.length !== missing) throw new Error(`تعذرت استعادة ${missing} شمعة مفقودة للفريم ${timeframe}`);
-    for (let index = 0; index < rows.length; index += 1) {
-      if (Number(rows[index][0]) !== expectedOpenTime + index * duration) throw new Error(`بيانات غير متصلة أثناء استعادة الفريم ${timeframe}`);
-    }
-    await repository.upsertCandles(rows.map((row) => toStoredCandle(symbol, timeframe, row, now(), 'binance-spot-backfill')));
+    if ((incomingRow[0] - expectedOpenTime) % duration !== 0) throw new Error(`توقيت شمعة غير متوافق مع الفريم ${timeframe}`);
+    let repairedHistory = history;
+    await forEachClosedRange(fetchKlines, symbol, timeframe, duration, expectedOpenTime, incomingRow[0] - duration, now(), async (page) => {
+      for (const row of page) {
+        repairedHistory = [...repairedHistory, row].slice(-HISTORY_LIMIT);
+        liveCandles.set(timeframe, repairedHistory);
+        await repository.upsertCandles([toStoredCandle(symbol, timeframe, row, now(), 'binance-spot-backfill')]);
+        await scanClosedBar({
+          symbol, timeframe,
+          kline: { t: row[0], T: row[6], o: row[1], h: row[2], l: row[3], c: row[4], v: row[5], V: row[9], x: true },
+          duringRecovery: true
+        });
+        if (state.recovery === 'degraded') throw new Error(state.error ?? `فشل حفظ استعادة الفريم ${timeframe}`);
+      }
+    });
     state.lastGapRepairedAt = now();
-    return [...history, ...rows];
+    state.recovery = 'ready';
+    state.error = null;
+    return repairedHistory;
   };
 
-  const scanClosedBar = async ({ symbol: closedSymbol, timeframe, kline }) => {
+  const scanClosedBar = async ({ symbol: closedSymbol, timeframe, kline, duringRecovery = false }) => {
     if (stopping || closedSymbol !== symbol || !state.timeframes.includes(timeframe) || kline?.x !== true) return;
     const row = normalizeKline(kline);
     if (!row) throw new Error(`شمعة إغلاق غير صالحة للفريم ${timeframe}`);
     const openTime = row[0];
     const key = `${closedSymbol}|${timeframe}`;
-    if (processedBars.get(key) === openTime) return;
-    if (state.recovery !== 'ready' && state.recovery !== 'degraded') return;
+    if (processedBars.get(key) >= openTime) return;
+    if (!duringRecovery && state.recovery !== 'ready' && state.recovery !== 'degraded') return;
     const history = liveCandles.get(timeframe) ?? [];
     const last = history.at(-1);
     if (!last || Number(last[0]) !== openTime) {
@@ -310,30 +405,43 @@ export function createLiquidityWorkbench({
         { engine: ENGINE_VERSION.v2, zones: v2Zones }
       ];
       for (const { engine, zones } of engineRows) {
+        const pointRows = deriveZonePoints(engine, zones, candles, computedAt);
+        if (pointRows.length) await repository.upsertPoints(pointRows);
         const previous = new Map((scans.get(`${engine}|${closedSymbol}|${timeframe}`)?.zones ?? []).map((zone) => [zone.id, zone]));
         for (const zone of zones) {
           const oldZone = previous.get(zone.id);
-          const eventType = !oldZone ? 'discovered' : oldZone.state !== zone.state ? 'state_changed' : null;
-          if (!eventType) continue;
-          const eventKey = eventType === 'discovered'
-            ? stableKey(engine, closedSymbol, timeframe, zone.id, eventType)
-            : stableKey(engine, closedSymbol, timeframe, zone.id, eventType, oldZone?.state ?? '', zone.state ?? '', openTime);
-          const zoneEvent = {
-            idempotency_key: eventKey,
-            engine,
-            symbol: closedSymbol,
-            timeframe,
-            zone_id: String(zone.id),
-            event_type: eventType,
-            event_at: computedAt,
-            payload: { previousState: oldZone?.state ?? null, zone, candleOpenTime: openTime }
-          };
-          await repository.insertZoneEvent(zoneEvent);
-          if (!eventKeys.has(eventKey)) {
-            eventKeys.add(eventKey);
-            recentEvents.unshift(zoneEvent);
-            if (recentEvents.length > 200) recentEvents.pop();
-            if (eventKeys.size > 2000) eventKeys.delete(eventKeys.values().next().value);
+          const changes = [];
+          if (!oldZone) changes.push({ type: 'discovered', previousState: null, previousTouchPoints: null });
+          else {
+            if (oldZone.state !== zone.state) changes.push({ type: 'state_changed', previousState: oldZone.state ?? null, previousTouchPoints: null });
+            if (JSON.stringify(oldZone.touchPoints ?? []) !== JSON.stringify(zone.touchPoints ?? [])) {
+              changes.push({ type: 'touch_points_changed', previousState: null, previousTouchPoints: oldZone.touchPoints ?? [] });
+            }
+            const oldGeometry = JSON.stringify({ referenceLevel: oldZone.referenceLevel, liquidityLevel: oldZone.liquidityLevel, zoneBox: oldZone.zoneBox, bodyBox: oldZone.bodyBox, trendline: oldZone.trendline });
+            const newGeometry = JSON.stringify({ referenceLevel: zone.referenceLevel, liquidityLevel: zone.liquidityLevel, zoneBox: zone.zoneBox, bodyBox: zone.bodyBox, trendline: zone.trendline });
+            if (oldGeometry !== newGeometry) changes.push({ type: 'geometry_changed', previousState: null, previousTouchPoints: null, previousGeometry: JSON.parse(oldGeometry) });
+          }
+          for (const change of changes) {
+            const eventKey = change.type === 'discovered'
+              ? stableKey(engine, closedSymbol, timeframe, zone.id, change.type, openTime)
+              : stableKey(engine, closedSymbol, timeframe, zone.id, change.type, openTime, JSON.stringify(zone.touchPoints ?? []), zone.state ?? '');
+            const zoneEvent = {
+              idempotency_key: eventKey,
+              engine,
+              symbol: closedSymbol,
+              timeframe,
+              zone_id: String(zone.id),
+              event_type: change.type,
+              event_at: computedAt,
+              payload: { previousState: change.previousState, previousTouchPoints: change.previousTouchPoints, previousGeometry: change.previousGeometry ?? null, zone, candleOpenTime: openTime }
+            };
+            await repository.insertZoneEvent(zoneEvent);
+            if (!eventKeys.has(eventKey)) {
+              eventKeys.add(eventKey);
+              recentEvents.unshift(zoneEvent);
+              if (recentEvents.length > 200) recentEvents.pop();
+              if (eventKeys.size > 2000) eventKeys.delete(eventKeys.values().next().value);
+            }
           }
         }
       }
@@ -369,7 +477,7 @@ export function createLiquidityWorkbench({
       processedBars.set(key, openTime);
       state.latestCloseAt = Number(kline.T) || now();
       state.latestScanAt = computedAt;
-      state.recovery = 'ready';
+      state.recovery = duringRecovery ? 'loading' : 'ready';
       state.error = null;
       onUpdate({ type: 'scan', symbol: closedSymbol, timeframe, at: computedAt });
     } catch (error) {
@@ -472,9 +580,25 @@ export function createLiquidityWorkbench({
             await repository.upsertCandles(rows.map((row) => toStoredCandle(symbol, timeframe, row, now())));
             if (!isCurrentStart()) return { ...state, recovery: 'idle' };
           }
-          liveCandles.set(timeframe, rows.slice(-HISTORY_LIMIT));
           const latest = rows.at(-1);
-          if (latest) latestRows.set(timeframe, latest);
+          if (!latest) throw new Error(`لا توجد شموع مغلقة لاستعادة الفريم ${timeframe}`);
+          latestRows.set(timeframe, latest);
+          const cursor = processedBars.get(`${symbol}|${timeframe}`) ?? 0;
+          if (cursor > Number(latest[0])) throw new Error(`مؤشر المسح يتجاوز آخر شمعة للفريم ${timeframe}`);
+          const cursorIndex = rows.findIndex((row) => Number(row[0]) === cursor);
+          if (cursor > 0 && cursorIndex >= 0) {
+            liveCandles.set(timeframe, rows.slice(0, cursorIndex + 1));
+          } else if (cursor > 0) {
+            const duration = Number(timeframeMs[timeframe]);
+            const contextStart = cursor - (HISTORY_LIMIT - 1) * duration;
+            const contextRows = [];
+            await forEachClosedRange(fetchKlines, symbol, timeframe, duration, contextStart, cursor, now(), async (page) => contextRows.push(...page));
+            if (contextRows.length < MIN_HISTORY_BARS) throw new Error(`شموع سياق غير كافية لاستعادة الفريم ${timeframe}`);
+            liveCandles.set(timeframe, contextRows.slice(-HISTORY_LIMIT));
+            await repository.upsertCandles(contextRows.map((row) => toStoredCandle(symbol, timeframe, row, now(), 'binance-spot-recovery')));
+          } else {
+            liveCandles.set(timeframe, rows.slice(-HISTORY_LIMIT));
+          }
           state.seeded += 1;
           state.storedCandles += rows.length;
         }
@@ -484,15 +608,27 @@ export function createLiquidityWorkbench({
         for (const timeframe of state.timeframes) {
           const latest = latestRows.get(timeframe);
           const latestOpenTime = Number(latest?.[0]);
-          const storedOpenTime = processedBars.get(`${symbol}|${timeframe}`) ?? 0;
-          if (!latest || latestOpenTime <= storedOpenTime) continue;
-          await scanClosedBar({
-            symbol,
-            timeframe,
-            kline: { t: latest[0], T: latest[6], o: latest[1], h: latest[2], l: latest[3], c: latest[4], v: latest[5], V: latest[9], x: true }
-          });
-          if (state.recovery === 'degraded') throw new Error(state.error ?? 'فشل تخزين المسح الأولي');
+          const cursor = processedBars.get(`${symbol}|${timeframe}`) ?? 0;
+          if (!latest || latestOpenTime <= cursor) continue;
+          const duration = Number(timeframeMs[timeframe]);
+          if (cursor > 0) {
+            const recoveryStart = cursor + duration;
+            const replayed = await forEachClosedRange(fetchKlines, symbol, timeframe, duration, recoveryStart, latestOpenTime, now(), async (page) => {
+              for (const row of page) {
+                if (!isCurrentStart()) return;
+                const kline = { t: row[0], T: row[6], o: row[1], h: row[2], l: row[3], c: row[4], v: row[5], V: row[9], x: true };
+                await scanClosedBar({ symbol, timeframe, kline, duringRecovery: true });
+                if (state.recovery === 'degraded') throw new Error(state.error ?? 'فشل تخزين شمعة الاستعادة');
+              }
+            });
+            if (replayed) state.lastGapRepairedAt = now();
+          } else {
+            const kline = { t: latest[0], T: latest[6], o: latest[1], h: latest[2], l: latest[3], c: latest[4], v: latest[5], V: latest[9], x: true };
+            await scanClosedBar({ symbol, timeframe, kline, duringRecovery: true });
+            if (state.recovery === 'degraded') throw new Error(state.error ?? 'فشل تخزين المسح الأولي');
+          }
         }
+        state.recovery = 'ready';
         if (stopping) return { ...state, recovery: 'idle' };
         const keys = state.timeframes.map((timeframe) => `${symbol}|${timeframe}`);
         market.setKlineSubscriptions(keys, 'liquidity-workbench');
@@ -554,7 +690,7 @@ export function createLiquidityWorkbench({
       volume: Number(row[5] ?? 0)
     }));
     return {
-      status: { ...state, recovery: state.recovery, error: state.error, persistence: repository.persistenceMode ?? 'supabase' },
+      status: { ...state, recovery: state.recovery, error: state.error, persistence: repository.persistenceMode ?? 'supabase', persistenceDetails: repository.persistenceStatus?.() ?? null },
       symbol,
       timeframe,
       currentPrice: price,
@@ -570,5 +706,5 @@ export function createLiquidityWorkbench({
     };
   };
 
-  return { start, stop, snapshot, status: () => ({ ...state, persistence: repository.persistenceMode ?? 'supabase' }), get started() { return started; } };
+  return { start, stop, snapshot, listPoints: ({ timeframe, engine, zoneId }) => repository.listPoints({ symbol, timeframe, engine, zoneId, limit: 2000 }), status: () => ({ ...state, persistence: repository.persistenceMode ?? 'supabase', persistenceDetails: repository.persistenceStatus?.() ?? null }), get started() { return started; } };
 }

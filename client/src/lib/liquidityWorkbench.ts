@@ -13,6 +13,10 @@ export interface LiquidityWorkbenchZone {
   confirmedAt?: number | null;
   sweptAt?: number | null;
   zoneBox?: { high?: number; low?: number } | null;
+  touchPoints?: Array<{ index?: number; time?: number; price?: number }>;
+  trendline?: { points?: Array<{ index?: number; time?: number; price?: number }> } | null;
+  fvgs?: Array<{ index?: number; kind?: string; top?: number; bottom?: number }>;
+  structureEvents?: Array<{ type?: string; index?: number; time?: number; price?: number }>;
   reasons?: string[];
   engine: string;
   observation: {
@@ -22,6 +26,26 @@ export interface LiquidityWorkbenchZone {
     priceAgeMs: number | null;
     basis: string;
   };
+}
+
+export interface LiquidityWorkbenchPoint {
+  point_id: string;
+  engine: string;
+  symbol: string;
+  timeframe: string;
+  zone_id: string;
+  point_type: string;
+  role: string;
+  point_time: number | null;
+  candle_index: number | null;
+  price: number | null;
+  price_low: number | null;
+  price_high: number | null;
+  zone_state: string | null;
+  confirmed_at: number | null;
+  last_reviewed_at: number;
+  rules_version: string;
+  payload: Record<string, unknown>;
 }
 
 export interface LiquidityWorkbenchStatus {
@@ -84,6 +108,17 @@ export async function fetchLiquidityWorkbench(timeframe: string, signal?: AbortS
     throw new Error(String(body.error ?? `تعذر تحميل مقارنة السيولة (${response.status})`));
   }
   return response.json() as Promise<LiquidityWorkbenchSnapshot>;
+}
+
+export async function fetchLiquidityWorkbenchPoints(timeframe: string, engine: string, zoneId: string, signal?: AbortSignal): Promise<LiquidityWorkbenchPoint[]> {
+  const query = new URLSearchParams({ timeframe, engine, zoneId });
+  const response = await fetch(`/api/liquidity-workbench/points?${query}`, { signal });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(String(body.error ?? `تعذر تحميل نقاط المنطقة (${response.status})`));
+  }
+  const body = await response.json() as { points?: LiquidityWorkbenchPoint[] };
+  return Array.isArray(body.points) ? body.points : [];
 }
 
 export async function fetchLiquidityWorkbenchStatus(signal?: AbortSignal): Promise<LiquidityWorkbenchStatus> {

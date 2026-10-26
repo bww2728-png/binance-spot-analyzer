@@ -50,6 +50,25 @@ database.exec(`
     source TEXT NOT NULL,
     payload TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS points (
+    point_id TEXT PRIMARY KEY,
+    engine TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    zone_id TEXT NOT NULL,
+    point_type TEXT NOT NULL,
+    role TEXT NOT NULL,
+    point_time INTEGER NOT NULL,
+    candle_index INTEGER,
+    price REAL,
+    price_low REAL,
+    price_high REAL,
+    zone_state TEXT,
+    confirmed_at INTEGER,
+    last_reviewed_at INTEGER NOT NULL,
+    rules_version TEXT NOT NULL,
+    payload TEXT NOT NULL
+  );
 `);
 
 const parseRows = (rows) => rows.map((row) => ({ ...row, payload: JSON.parse(row.payload) }));
@@ -63,6 +82,9 @@ const repository = {
   async listCandles(symbol, timeframe, limit = 500) {
     return database.prepare('SELECT * FROM (SELECT * FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY open_time DESC LIMIT ?) ORDER BY open_time ASC').all(symbol, timeframe, limit);
   },
+  async listPoints({ symbol, timeframe, engine, zoneId }) {
+    return database.prepare('SELECT * FROM points WHERE symbol = ? AND timeframe = ? AND engine = ? AND zone_id = ? ORDER BY point_time ASC').all(symbol, timeframe, engine, zoneId).map((row) => ({ ...row, payload: JSON.parse(row.payload) }));
+  },
   async upsertCandles(rows) {
     const insert = database.prepare(`INSERT INTO candles (symbol, timeframe, open_time, open, high, low, close, volume, close_time, taker_buy_base, source, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -74,6 +96,12 @@ const repository = {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (engine, symbol, timeframe) DO UPDATE SET candle_open_time=excluded.candle_open_time, computed_at=excluded.computed_at, bar_count=excluded.bar_count, data_source=excluded.data_source, payload=excluded.payload`)
       .run(row.engine, row.symbol, row.timeframe, row.candle_open_time, row.computed_at, row.bar_count, row.data_source, JSON.stringify(row.payload));
+  },
+  async upsertPoints(rows) {
+    const insert = database.prepare(`INSERT INTO points (point_id, engine, symbol, timeframe, zone_id, point_type, role, point_time, candle_index, price, price_low, price_high, zone_state, confirmed_at, last_reviewed_at, rules_version, payload)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (point_id) DO UPDATE SET zone_state=excluded.zone_state, confirmed_at=excluded.confirmed_at, last_reviewed_at=excluded.last_reviewed_at, payload=excluded.payload`);
+    for (const row of rows) insert.run(row.point_id, row.engine, row.symbol, row.timeframe, row.zone_id, row.point_type, row.role, row.point_time, row.candle_index, row.price, row.price_low, row.price_high, row.zone_state, row.confirmed_at, row.last_reviewed_at, row.rules_version, JSON.stringify(row.payload));
   },
   async insertZoneEvent(row) {
     database.prepare('INSERT OR IGNORE INTO events (idempotency_key, engine, symbol, timeframe, zone_id, event_type, event_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -145,6 +173,7 @@ console.log(JSON.stringify({
   restoredEventKeys: snapshot.recentEvents.map((event) => event.idempotency_key),
   scanRows: database.prepare('SELECT COUNT(*) AS count FROM scans').get().count,
   candleRows: database.prepare('SELECT COUNT(*) AS count FROM candles').get().count,
+  pointRows: database.prepare('SELECT COUNT(*) AS count FROM points').get().count,
   eventRows: database.prepare('SELECT COUNT(*) AS count FROM events').get().count
 }));
 service.stop();

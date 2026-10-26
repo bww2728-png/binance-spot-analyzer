@@ -55,7 +55,7 @@ import { measureIdentityStability, createIdentityCollector } from './services/zo
 import { detectLiquidityZonesV2 } from './liquidity-zones/v2/index.mjs';
 import { createLiquidityWorkbench } from './services/liquidityWorkbench.mjs';
 import { createLiquidityHistoryService } from './services/liquidityHistory.mjs';
-import { withMemoryFallback } from './services/liquidityWorkbenchRepository.mjs';
+import { withDurablePersistence } from './services/liquidityWorkbenchRepository.mjs';
 import { createLiquidityWorkbenchRouter } from './routes/liquidityWorkbenchRouter.mjs';
 import { TF_MS } from './market/candleStore.mjs';
 import { compareEngines, summarizeSample, createParityCollector } from './services/liquidityShadowV2.mjs';
@@ -2283,11 +2283,11 @@ const marketStreams = createMarketStreams({
 let workbenchTickSize = null;
 let workbenchRetryDelayMs = 5000;
 let workbenchRetryTimer = null;
-const workbenchRepository = withMemoryFallback(db.liquidityWorkbench);
+const workbenchRepository = withDurablePersistence(db.liquidityWorkbench);
 liquidityWorkbench = createLiquidityWorkbench({
   repository: workbenchRepository,
   market: marketStreams,
-  fetchKlines: (symbol, timeframe, limit) => db.binance.klines(symbol, timeframe, limit),
+  fetchKlines: (symbol, timeframe, limit, startTime, endTime) => db.binance.klines(symbol, timeframe, limit, startTime, endTime),
   fetchDepth: (symbol, limit) => db.binance.depth(symbol, limit),
   timeframes: ALL_TIMEFRAMES,
   timeframeMs: TF_MS,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import LiquidityWorkbenchChart from './LiquidityWorkbenchChart';
-import { fetchLiquidityWorkbench, type LiquidityWorkbenchSnapshot, type LiquidityWorkbenchZone } from '../lib/liquidityWorkbench';
+import { fetchLiquidityWorkbench, fetchLiquidityWorkbenchPoints, type LiquidityWorkbenchPoint, type LiquidityWorkbenchSnapshot, type LiquidityWorkbenchZone } from '../lib/liquidityWorkbench';
 import { useStore } from '../store/useStore';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 
@@ -15,6 +15,9 @@ const asDate = (value: number | null | undefined) => {
 };
 const money = (value: number | null | undefined) => Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-US', { maximumFractionDigits: 8 }) : 'غير متاح';
 const stateLabel = (value: string | null | undefined) => ({ potential: 'محتملة', candidate: 'مرشحة', confirmed: 'مؤكدة وفق المحرك', swept: 'تم السحب وفق المحرك' }[String(value)] ?? value ?? 'غير محددة');
+const pointTypeLabel = (value: string) => ({ origin_candle: 'شمعة الأصل', liquidity_touch: 'لمسة سيولة', trendline_anchor: 'نقطة ارتكاز خط الاتجاه', fvg: 'فجوة قيمة عادلة', structure_idm: 'حدث IDM', structure_bos_up: 'حدث BOS صاعد', structure_bos_down: 'حدث BOS هابط', structure_choch_up: 'حدث CHoCH صاعد', structure_choch_down: 'حدث CHoCH هابط' }[value] ?? value);
+const pointRoleLabel = (value: string) => value === 'zone_origin' ? 'أصل المنطقة' : value === 'first_touch' ? 'اللمسة الأولى' : value === 'cluster_touch' ? 'لمسة ضمن التجميع' : value === 'zone_gap' ? 'فجوة مرتبطة' : value === 'confirmation_or_structure' ? 'حدث بنيوي' : value.replace(/^anchor_/, 'ارتكاز ');
+const eventLabel = (value: string) => ({ discovered: 'اكتشاف منطقة', state_changed: 'تغيّر حالة المنطقة', touch_points_changed: 'تغيّرت نقاط التكوين', geometry_changed: 'تغيّر شكل المنطقة أو مستوياتها' }[value] ?? value);
 const directionLabel = (zone: LiquidityWorkbenchZone) => {
   if (zone.direction === 'up' || zone.kind.endsWith('ssl') || zone.kind === 'demand') return 'أسفل/صاعدة حسب تسمية المحرك';
   if (zone.direction === 'down' || zone.kind.endsWith('bsl') || zone.kind === 'supply') return 'أعلى/هابطة حسب تسمية المحرك';
@@ -37,7 +40,16 @@ const readNotes = (timeframe: string): ManualNote[] => {
   }
 };
 
-function ZoneList({ title, zones, color }: { title: string; zones: LiquidityWorkbenchZone[]; color: string }) {
+function ZoneList({ title, zones, color, selectedKey, points, pointsLoading, pointsError, onTogglePoints }: {
+  title: string;
+  zones: LiquidityWorkbenchZone[];
+  color: string;
+  selectedKey: string | null;
+  points: LiquidityWorkbenchPoint[];
+  pointsLoading: boolean;
+  pointsError: string | null;
+  onTogglePoints: (zone: LiquidityWorkbenchZone) => void;
+}) {
   return (
     <section className="rounded-xl border p-3" style={{ borderColor: 'var(--border-1)', background: 'var(--surface-1)' }}>
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -46,29 +58,45 @@ function ZoneList({ title, zones, color }: { title: string; zones: LiquidityWork
       </div>
       {!zones.length ? <div className="py-5 text-center text-xs" style={{ color: 'var(--text-3)' }}>لا توجد نتائج محفوظة لهذا الفريم بعد.</div> : (
         <div className="max-h-[420px] space-y-2 overflow-auto">
-          {zones.map((zone) => (
-            <article key={zoneKey(zone)} className="rounded-lg border p-2.5" style={{ borderColor: 'var(--border-1)', background: 'var(--surface-0)' }}>
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="font-mono text-xs font-bold" style={{ color }}>{zone.kind}</div>
-                  <div className="mt-1 text-[10px]" style={{ color: 'var(--text-3)' }}>{zone.id}</div>
+          {zones.map((zone) => {
+            const key = zoneKey(zone);
+            const isSelected = selectedKey === key;
+            return (
+              <article key={key} className="rounded-lg border p-2.5" style={{ borderColor: 'var(--border-1)', background: 'var(--surface-0)' }}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-mono text-xs font-bold" style={{ color }}>{zone.kind}</div>
+                    <div className="mt-1 text-[10px]" style={{ color: 'var(--text-3)' }}>{zone.id}</div>
+                  </div>
+                  <span className="rounded-md px-1.5 py-1 text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>{stateLabel(zone.state)}</span>
                 </div>
-                <span className="rounded-md px-1.5 py-1 text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>{stateLabel(zone.state)}</span>
-              </div>
-              <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-                <dt style={{ color: 'var(--text-3)' }}>المستوى المرجعي</dt><dd className="text-left font-mono" dir="ltr" style={{ color: 'var(--text-1)' }}>{money(zone.referenceLevel)}</dd>
-                <dt style={{ color: 'var(--text-3)' }}>مستوى السيولة</dt><dd className="text-left font-mono" dir="ltr" style={{ color: 'var(--text-1)' }}>{money(zone.liquidityLevel)}</dd>
-                <dt style={{ color: 'var(--text-3)' }}>الجهة المسجلة</dt><dd className="text-left" style={{ color: 'var(--text-2)' }}>{directionLabel(zone)}</dd>
-                <dt style={{ color: 'var(--text-3)' }}>البعد عن السعر</dt><dd className="text-left font-mono" dir="ltr" style={{ color: 'var(--text-1)' }}>{money(zone.observation.distance)} ({zone.observation.distancePct == null ? 'غير متاح' : `${zone.observation.distancePct.toFixed(4)}%`})</dd>
-                <dt style={{ color: 'var(--text-3)' }}>عدد اللمسات المسجّل</dt><dd className="text-left" style={{ color: 'var(--text-2)' }}>{zone.touches ?? 'غير متاح'}</dd>
-                <dt style={{ color: 'var(--text-3)' }}>وقت الاكتشاف</dt><dd className="text-left text-[10px]" style={{ color: 'var(--text-2)' }}>{asDate(zone.createdAt)}</dd>
-              </dl>
-              <div className="mt-2 border-t pt-2 text-[9px]" style={{ borderColor: 'var(--border-1)', color: 'var(--text-3)' }}>
-                المسافة = القيمة المطلقة للمستوى المرجعي ناقص آخر سعر حديث. المصدر: {zone.engine}; عمر السعر: {zone.observation.priceAgeMs == null ? 'غير متاح' : `${Math.round(zone.observation.priceAgeMs / 1000)} ث`}.
-              </div>
-              {zone.reasons?.length ? <ul className="mt-2 space-y-1 text-[10px]" style={{ color: 'var(--text-2)' }}>{zone.reasons.map((reason, index) => <li key={`${zone.id}-${index}`}>• {reason}</li>)}</ul> : null}
-            </article>
-          ))}
+                <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                  <dt style={{ color: 'var(--text-3)' }}>المستوى المرجعي</dt><dd className="text-left font-mono" dir="ltr" style={{ color: 'var(--text-1)' }}>{money(zone.referenceLevel)}</dd>
+                  <dt style={{ color: 'var(--text-3)' }}>مستوى السيولة</dt><dd className="text-left font-mono" dir="ltr" style={{ color: 'var(--text-1)' }}>{money(zone.liquidityLevel)}</dd>
+                  <dt style={{ color: 'var(--text-3)' }}>الجهة المسجلة</dt><dd className="text-left" style={{ color: 'var(--text-2)' }}>{directionLabel(zone)}</dd>
+                  <dt style={{ color: 'var(--text-3)' }}>البعد عن السعر</dt><dd className="text-left font-mono" dir="ltr" style={{ color: 'var(--text-1)' }}>{money(zone.observation.distance)} ({zone.observation.distancePct == null ? 'غير متاح' : `${zone.observation.distancePct.toFixed(4)}%`})</dd>
+                  <dt style={{ color: 'var(--text-3)' }}>عدد اللمسات المسجّل</dt><dd className="text-left" style={{ color: 'var(--text-2)' }}>{zone.touches ?? 'غير متاح'}</dd>
+                  <dt style={{ color: 'var(--text-3)' }}>وقت الاكتشاف</dt><dd className="text-left text-[10px]" style={{ color: 'var(--text-2)' }}>{asDate(zone.createdAt)}</dd>
+                </dl>
+                <div className="mt-2 border-t pt-2 text-[9px]" style={{ borderColor: 'var(--border-1)', color: 'var(--text-3)' }}>
+                  المسافة = القيمة المطلقة للمستوى المرجعي ناقص آخر سعر حديث. المصدر: {zone.engine}; عمر السعر: {zone.observation.priceAgeMs == null ? 'غير متاح' : `${Math.round(zone.observation.priceAgeMs / 1000)} ث`}.
+                </div>
+                {zone.reasons?.length ? <ul className="mt-2 space-y-1 text-[10px]" style={{ color: 'var(--text-2)' }}>{zone.reasons.map((reason, index) => <li key={`${zone.id}-${index}`}>• {reason}</li>)}</ul> : null}
+                <button type="button" aria-expanded={isSelected} onClick={() => onTogglePoints(zone)} className="mt-2 w-full rounded-md border px-2 py-1.5 text-[10px] font-semibold" style={{ borderColor: 'var(--border-1)', color, background: 'var(--surface-1)' }}>
+                  {isSelected ? 'إخفاء سجل نقاط التكوين' : `عرض نقاط التكوين · ${zone.engine}`}
+                </button>
+                {isSelected && (
+                  <div className="mt-2 border-t pt-2" style={{ borderColor: 'var(--border-1)' }}>
+                    <div className="mb-2 text-[10px]" style={{ color: 'var(--text-3)' }}>النقاط محفوظة ومفلترة بمعرّف المحرك والمنطقة؛ هذه بيانات تكوين وليست توصية تداول.</div>
+                    {pointsLoading && <div role="status" className="text-[10px]" style={{ color: 'var(--text-2)' }}>جارٍ تحميل سجل النقاط من التخزين الدائم…</div>}
+                    {pointsError && <div role="alert" className="text-[10px]" style={{ color: '#b91c1c' }}>{pointsError}</div>}
+                    {!pointsLoading && !pointsError && !points.length && <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>لا توجد نقاط محفوظة لهذه المنطقة؛ لا يُستنتج من ذلك أن المنطقة لم تكن لها نقاط تكوين.</div>}
+                    {!!points.length && <ol className="max-h-48 space-y-1 overflow-auto text-[10px]">{points.map((point) => <li key={point.point_id} className="flex flex-wrap justify-between gap-2 rounded border p-1.5" style={{ borderColor: 'var(--border-1)', color: 'var(--text-2)' }}><span>{pointTypeLabel(point.point_type)} · {pointRoleLabel(point.role)} · {asDate(point.point_time)}</span><span className="font-mono" dir="ltr">{point.price == null ? `${money(point.price_low)}–${money(point.price_high)}` : money(point.price)}</span></li>)}</ol>}
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
     </section>
@@ -81,10 +109,19 @@ export default function LiquidityWorkbenchScreen() {
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<ManualNote[]>(() => readNotes('1h'));
   const [noteDraft, setNoteDraft] = useState('');
+  const [selectedPointZone, setSelectedPointZone] = useState<string | null>(null);
+  const [storedPoints, setStoredPoints] = useState<LiquidityWorkbenchPoint[]>([]);
+  const [pointsLoading, setPointsLoading] = useState(false);
+  const [pointsError, setPointsError] = useState<string | null>(null);
   const pushToast = useStore((store) => store.pushToast);
   const previousZones = useRef<Map<string, string> | null>(null);
+  const pointFetchRef = useRef<AbortController | null>(null);
   useEffect(() => {
     previousZones.current = null;
+    pointFetchRef.current?.abort();
+    setSelectedPointZone(null);
+    setStoredPoints([]);
+    setPointsError(null);
     setNotes(readNotes(timeframe));
   }, [timeframe]);
   const refreshSnapshot = useCallback(async (signal: AbortSignal) => {
@@ -110,6 +147,30 @@ export default function LiquidityWorkbenchScreen() {
       setError(String(fetchError instanceof Error ? fetchError.message : fetchError));
     }
   }, [pushToast, timeframe]);
+  const toggleZonePoints = useCallback(async (zone: LiquidityWorkbenchZone) => {
+    const key = zoneKey(zone);
+    pointFetchRef.current?.abort();
+    if (selectedPointZone === key) {
+      setSelectedPointZone(null);
+      setStoredPoints([]);
+      setPointsError(null);
+      setPointsLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    pointFetchRef.current = controller;
+    setSelectedPointZone(key);
+    setStoredPoints([]);
+    setPointsError(null);
+    setPointsLoading(true);
+    try {
+      setStoredPoints(await fetchLiquidityWorkbenchPoints(timeframe, zone.engine, zone.id, controller.signal));
+    } catch (fetchError) {
+      if (!controller.signal.aborted) setPointsError(String(fetchError instanceof Error ? fetchError.message : fetchError));
+    } finally {
+      if (!controller.signal.aborted) setPointsLoading(false);
+    }
+  }, [selectedPointZone, timeframe]);
   const { busy, refresh } = useVisiblePoll(refreshSnapshot, { intervalMs: 5000, immediate: true });
 
   const allZones = useMemo(() => [...(snapshot?.legacy ?? []), ...(snapshot?.v2 ?? [])], [snapshot]);
@@ -152,14 +213,14 @@ export default function LiquidityWorkbenchScreen() {
       </section>
 
       {workbenchErrorMessage(error ?? snapshot?.status.error) && <div role="alert" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>{workbenchErrorMessage(error ?? snapshot?.status.error)}</div>}
-      {snapshot?.status.persistence === 'memory-fallback' && <div role="status" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#0ea5e955', background: '#0ea5e912', color: '#0369a1' }}>يعمل المختبر الآن ببيانات الجلسة الحية فقط: التخزين الدائم غير مهيأ في هذا النشر، لذا تُفقد النتائج عند إعادة تشغيل الخادم. بقية الوظائف — الشموع والكشف عند الإغلاق والمقارنة — تعمل بشكل طبيعي.</div>}
+      {snapshot?.status.persistence === 'unavailable' && <div role="alert" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#ef444455', background: '#ef444412', color: '#b91c1c' }}>التخزين الدائم غير متاح؛ أوقف الخادم المسح بدل عرض نتائج غير محفوظة على أنها موثوقة. لا توجد ضمانة لاستعادة الحالة حتى يعود التخزين.</div>}
       {priceOld && <div role="status" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>لا يوجد سعر حديث مثبت الآن؛ ستظل المناطق معروضة، لكن قياس المسافة موسوم بأنه قديم أو غير متاح.</div>}
 
       <LiquidityWorkbenchChart candles={snapshot?.candles ?? []} zones={allZones} dataSource={snapshot?.dataSource ?? 'unknown'} />
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <ZoneList title="نتائج المحرك الحالي — دون تعديل" zones={snapshot?.legacy ?? []} color="#089981" />
-        <ZoneList title="نتائج المحرك v2 — دون تعديل" zones={snapshot?.v2 ?? []} color="#2563eb" />
+        <ZoneList title="نتائج المحرك الحالي — دون تعديل" zones={snapshot?.legacy ?? []} color="#089981" selectedKey={selectedPointZone} points={storedPoints} pointsLoading={pointsLoading} pointsError={pointsError} onTogglePoints={toggleZonePoints} />
+        <ZoneList title="نتائج المحرك v2 — دون تعديل" zones={snapshot?.v2 ?? []} color="#2563eb" selectedKey={selectedPointZone} points={storedPoints} pointsLoading={pointsLoading} pointsError={pointsError} onTogglePoints={toggleZonePoints} />
       </div>
 
       <section className="rounded-xl border p-3" style={{ borderColor: 'var(--border-1)', background: 'var(--surface-1)' }}>
@@ -182,7 +243,7 @@ export default function LiquidityWorkbenchScreen() {
             {snapshot.recentEvents.map((event) => (
               <article key={event.idempotency_key} className="flex flex-wrap items-start justify-between gap-2 rounded-lg border p-2 text-xs" style={{ borderColor: 'var(--border-1)', background: 'var(--surface-0)' }}>
                 <div>
-                  <div className="font-semibold" style={{ color: 'var(--text-1)' }}>{event.event_type === 'discovered' ? 'اكتشاف منطقة' : event.event_type === 'state_changed' ? 'تغيّر حالة المنطقة' : event.event_type}</div>
+                  <div className="font-semibold" style={{ color: 'var(--text-1)' }}>{eventLabel(event.event_type)}</div>
                   <div className="mt-1 font-mono text-[10px]" style={{ color: 'var(--text-3)' }}>{event.engine} · {event.symbol} · {event.timeframe} · {event.zone_id}</div>
                   {event.event_type === 'state_changed' && <div className="mt-1 text-[10px]" style={{ color: 'var(--text-2)' }}>{stateLabel(event.payload.previousState)} ← {stateLabel(event.payload.zone?.state)}</div>}
                 </div>

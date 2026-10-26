@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import express from 'express';
-import { createLiquidityWorkbench, findLiquidityMatchCandidates, describeZone } from '../services/liquidityWorkbench.mjs';
+import { createLiquidityWorkbench, deriveZonePoints, findLiquidityMatchCandidates, describeZone } from '../services/liquidityWorkbench.mjs';
 import { createLiquidityWorkbenchRouter } from '../routes/liquidityWorkbenchRouter.mjs';
 
 const timeframes = ['1m', '5m'];
@@ -13,6 +13,7 @@ const mockRepository = () => {
   const candles = new Map();
   const events = new Map();
   const samples = new Map();
+  const points = new Map();
   let failRead = false;
   let failWrite = false;
   return {
@@ -20,10 +21,12 @@ const mockRepository = () => {
     candles,
     events,
     samples,
+    points,
     set failRead(value) { failRead = value; },
     set failWrite(value) { failWrite = value; },
     async listScans() { if (failRead) throw new Error('read failure'); return [...scans.values()]; },
     async listEvents(symbol, limit = 200) { if (failRead) throw new Error('read failure'); return [...events.values()].filter((event) => event.symbol === symbol).sort((a, b) => b.event_at - a.event_at).slice(0, limit); },
+    async listPoints({ symbol, timeframe, engine, zoneId }) { if (failRead) throw new Error('read failure'); return [...points.values()].filter((point) => point.symbol === symbol && point.timeframe === timeframe && point.engine === engine && point.zone_id === zoneId); },
     async listCandles(symbol, timeframe) { if (failRead) throw new Error('read failure'); return candles.get(`${symbol}|${timeframe}`) ?? []; },
     async upsertCandles(rows) {
       if (failWrite) throw new Error('write failure');
@@ -35,6 +38,7 @@ const mockRepository = () => {
       }
     },
     async upsertScan(row) { if (failWrite) throw new Error('write failure'); scans.set(`${row.engine}|${row.symbol}|${row.timeframe}`, row); },
+    async upsertPoints(rows) { if (failWrite) throw new Error('write failure'); for (const row of rows) points.set(row.point_id, row); },
     async insertZoneEvent(row) { if (failWrite) throw new Error('write failure'); events.set(row.idempotency_key, row); },
     async insertSample(row) { if (failWrite) throw new Error('write failure'); samples.set(row.sample_key, row); },
     async pruneRaw() { if (failWrite) throw new Error('write failure'); return 0; }
@@ -70,7 +74,10 @@ const makeWorkbench = ({ repository = mockRepository(), market = mockMarket(), n
   const service = createLiquidityWorkbench({
     repository,
     market,
-    fetchKlines: fetchKlines ?? (async (_symbol, timeframe) => makeCandles(fetchCount, now() - ((fetchCount + 1) * intervalMs[timeframe]), intervalMs[timeframe])),
+    fetchKlines: fetchKlines ?? (async (_symbol, timeframe, limit, startTime, endTime) => {
+      const rows = makeCandles(fetchCount, now() - ((fetchCount + 1) * intervalMs[timeframe]), intervalMs[timeframe]);
+      return rows.filter((row) => (startTime == null || row[0] >= startTime) && (endTime == null || row[0] <= endTime)).slice(0, limit);
+    }),
     fetchDepth: async () => ({ bids: [['99', '2']], asks: [['101', '3']], at: now() }),
     timeframes,
     timeframeMs: intervalMs,
@@ -159,6 +166,24 @@ test('subscriptions are established only after every timeframe restores and stop
   assert.deepEqual(workbench.market.subscriptions.klines.get('liquidity-workbench'), []);
 });
 
+test('point ledger preserves source anchors and leaves missing timestamps unknown', () => {
+  const candles = [{ time: 1_700_000_000 }, { time: 1_700_003_600 }, { time: 1_700_007_200 }];
+  const zone = {
+    id: 'supply-a', symbol: 'BTCUSDT', timeframe: '1h', kind: 'supply', state: 'candidate', form: 'A',
+    touchPoints: [{ index: 0, price: 101 }, { index: 3, price: 100 }],
+    trendline: { points: [{ index: 1, time: 1_700_003_600, price: 102 }] },
+    fvgs: [{ index: 2, kind: 'bullish', top: 105, bottom: 103 }],
+    structureEvents: [{ type: 'BOS_up', index: 2, price: 106 }]
+  };
+  const points = deriveZonePoints('liquidity-engine-v2', [zone], candles, 1_800_000_000_000);
+  assert.deepEqual(points.map((point) => point.point_type), ['origin_candle', 'liquidity_touch', 'trendline_anchor', 'fvg', 'structure_BOS_up']);
+  assert.equal(points[0].point_time, 1_700_000_000_000);
+  assert.equal(points[1].point_time, null);
+  assert.equal(points[1].candle_index, 3);
+  assert.equal(points[0].payload.form, 'A');
+  assert.equal(new Set(points.map((point) => point.point_id)).size, points.length);
+});
+
 test('zone matching reports candidate only within one tick, timeframe, direction, and bar', () => {
   const legacy = [{ id: 'old-a', symbol: 'BTCUSDT', timeframe: '1m', kind: 'horizontal_bsl', referenceLevel: 100, createdAt: 1700000000 }];
   const v2 = [{ id: 'new-a', symbol: 'BTCUSDT', timeframe: '1m', kind: 'horizontal_bsl', direction: 'down', referenceLevel: 100.01, createdAt: 1700000000 }];
@@ -193,7 +218,34 @@ test('a new process restores scan state and does not duplicate persisted events'
   second.service.stop();
 });
 
-test('closed kline messages update persisted scans once per bar', async () => {
+test('restart replays every stored closed candle after the durable cursor in order', async () => {
+  const now = () => 1_800_000_000_000;
+  const repository = mockRepository();
+  const interval = intervalMs['1m'];
+  const history = makeCandles(500, now() - (501 * interval), interval);
+  const storedRows = history.map((row) => ({
+    symbol: 'BTCUSDT', timeframe: '1m', open_time: row[0], open: row[1], high: row[2], low: row[3],
+    close: row[4], volume: row[5], close_time: row[6], taker_buy_base: row[9], source: 'test', updated_at: now()
+  }));
+  repository.candles.set('BTCUSDT|1m', storedRows);
+  const cursorIndex = 496;
+  const cursor = history[cursorIndex][0];
+  repository.scans.set('combined|BTCUSDT|1m', {
+    engine: 'combined', symbol: 'BTCUSDT', timeframe: '1m', candle_open_time: cursor,
+    payload: { zones: { legacy: [], v2: [] } }, updated_at: now()
+  });
+  const scanned = [];
+  const upsertScan = repository.upsertScan.bind(repository);
+  repository.upsertScan = async (row) => { scanned.push(row.candle_open_time); return upsertScan(row); };
+  const workbench = makeWorkbench({ repository, now });
+  await workbench.service.start();
+  assert.deepEqual(scanned.filter((openTime) => openTime > cursor), history.slice(cursorIndex + 1).map((row) => row[0]));
+  assert.equal(workbench.service.status().recovery, 'ready');
+  assert.ok(workbench.service.status().lastGapRepairedAt);
+  workbench.service.stop();
+});
+
+ test('closed kline messages update persisted scans once per bar', async () => {
   const workbench = makeWorkbench();
   await workbench.service.start();
   const openTime = 1_800_000_000_000 - 60_000;
@@ -235,5 +287,10 @@ test('read-only router serves status and rejects unsupported timeframes', async 
   assert.equal(status.status, 200);
   const invalid = await fetch(`http://127.0.0.1:${address.port}/api/liquidity-workbench?timeframe=1M`);
   assert.equal(invalid.status, 400);
+  const invalidPointEngine = await fetch(`http://127.0.0.1:${address.port}/api/liquidity-workbench/points?timeframe=1m&engine=other&zoneId=test`);
+  assert.equal(invalidPointEngine.status, 400);
+  const points = await fetch(`http://127.0.0.1:${address.port}/api/liquidity-workbench/points?timeframe=1m&engine=liquidity-engine-v1&zoneId=test`);
+  assert.equal(points.status, 200);
+  assert.deepEqual((await points.json()).points, []);
   await new Promise((resolve) => server.close(resolve));
 });
