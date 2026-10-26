@@ -113,6 +113,9 @@ export default function LiquidityV2Screen() {
         </div>
       </div>
 
+      {/* الشارت التاريخي (1m) — في أعلى الشاشة: الميزة الأساسية للتحقق البصري */}
+      <LiquidityHistorySection engine="v2" symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
+
       {/* حصيلة قياس الظل */}
       {status && (
         <div className="rounded-xl p-3 sm:p-4" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
@@ -292,9 +295,6 @@ export default function LiquidityV2Screen() {
           </div>
         </div>
       )}
-
-      {/* الشارت التاريخي (1m) — حساب المحرك نفسه على عمق تاريخي كامل */}
-      <LiquidityHistorySection engine="v2" symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
 
       {/* تفصيل المناطق وتعليل كل واحدة */}
       {!!chartZones.length && (
