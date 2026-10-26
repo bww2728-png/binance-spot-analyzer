@@ -34,13 +34,26 @@ const serializeZone = (zone) => ({
   state: zone.state,
   direction: zone.direction,
   referenceLevel: zone.referenceLevel,
+  referenceAlt: Number.isFinite(Number(zone.referenceAlt)) ? Number(zone.referenceAlt) : null,
   liquidityLevel: zone.liquidityLevel,
   zoneBox: zone.zoneBox ?? null,
+  bodyBox: zone.bodyBox ?? null,
   createdAt: zone.createdAt ?? zone.confirmedAt ?? null,
   sweptAt: zone.sweptAt ?? null,
   confidence: zone.confidence,
   touches: zone.touches,
-  timeframe: zone.timeframe
+  timeframe: zone.timeframe,
+  // حقول الرسم بمنطق شارتي الشاشتين (MultiZoneChart / LiquidityV2Chart):
+  // نقاط اللمس الحقيقية للصناديق، وخط الاتجاه من نقاطه حتى إسقاطه.
+  touchPoints: Array.isArray(zone.touchPoints)
+    ? zone.touchPoints.slice(0, 12).map((p) => ({ time: Number(p.time), price: Number(p.price) })).filter((p) => Number.isFinite(p.time) && Number.isFinite(p.price))
+    : [],
+  trendline: zone.trendline && Array.isArray(zone.trendline.points) && zone.trendline.points.length >= 2
+    ? {
+        points: zone.trendline.points.slice(0, 8).map((p) => ({ time: Number(p.time), price: Number(p.price) })).filter((p) => Number.isFinite(p.time) && Number.isFinite(p.price)),
+        projected: Number(zone.trendline.projected)
+      }
+    : null
 });
 
 try {

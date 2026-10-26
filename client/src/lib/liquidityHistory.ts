@@ -11,14 +11,18 @@ export interface LiquidityHistoryZone {
   state: string;
   direction: string;
   referenceLevel: number;
+  referenceAlt: number | null;
   liquidityLevel: number;
   zoneBox: { high: number; low: number } | null;
+  bodyBox: { high: number; low: number } | null;
   createdAt: number | null;
   sweptAt: number | null;
   confidence: number;
   touches: number;
   timeframe: string;
-  engine: string;
+  engine?: string;
+  touchPoints: Array<{ time: number; price: number }>;
+  trendline: { points: Array<{ time: number; price: number }>; projected: number } | null;
 }
 
 export interface LiquidityHistoryResponse {
