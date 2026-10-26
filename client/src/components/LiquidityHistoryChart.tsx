@@ -39,9 +39,7 @@ export interface HistoryFilters {
 
 const DEFAULT_FILTERS: HistoryFilters = { showSwept: true, showTrendlines: true, showBoxes: true };
 
-// سقوف مطابقة لشارت LiquidityV2Chart (BOX_CAP/LINE_CAP/BOX_MAX_BARS/LINE_MIN_ALPHA)
-const BOX_CAP = 30;
-const LINE_CAP = 20;
+// حدود امتداد الشارت الحي (BOX_MAX_BARS/LINE_MIN_ALPHA)، دون سقف يخفي مناطق التاريخ.
 const BOX_MAX_BARS = 80;
 const LINE_MIN_ALPHA = 0.4;
 const MAX_LABELS = 12;
@@ -101,16 +99,17 @@ function drawZones(ctx: CanvasRenderingContext2D, coordinate: Coordinate, payloa
     const shown = zones.filter(z => filters.showSwept || z.state !== 'swept');
     const boxZones = shown
       .filter(z => (z.kind === 'supply' || z.kind === 'demand') && z.zoneBox && (z.state === 'confirmed' || z.state === 'swept'))
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, BOX_CAP);
+      .sort((a, b) =>
+        stateRank(a.state) - stateRank(b.state) ||
+        (b.confidence ?? 0) - (a.confidence ?? 0) ||
+        createdAtSec(b) - createdAtSec(a));
     const lineZones = shown
       .filter(z => z.kind === 'horizontal_bsl' || z.kind === 'horizontal_ssl' || z.kind.startsWith('trendline'))
       .filter(z => !z.kind.startsWith('trendline') || filters.showTrendlines)
       .sort((a, b) =>
         stateRank(a.state) - stateRank(b.state) ||
         (b.confidence ?? 0) - (a.confidence ?? 0) ||
-        createdAtSec(b) - createdAtSec(a))
-      .slice(0, LINE_CAP);
+        createdAtSec(b) - createdAtSec(a));
 
     // صناديق العرض/الطلب: من وقت الاكتشاف بامتداد محدود (80 شمعة × دقيقة)
     for (const z of boxZones) {
@@ -237,22 +236,25 @@ function drawZones(ctx: CanvasRenderingContext2D, coordinate: Coordinate, payloa
     // كما في شارت الشاشة نفسه.
     const ordered = zones
       .filter(z => filters.showSwept || z.state !== 'swept')
-      .sort((a, b) => stateRank(a.state) - stateRank(b.state) || createdAtSec(b) - createdAtSec(a))
-      .slice(0, 120);
+      .sort((a, b) => stateRank(a.state) - stateRank(b.state) || createdAtSec(b) - createdAtSec(a));
     for (const z of ordered) {
-      const touches = (z.touchPoints ?? []).filter(p => p.time >= visFrom && p.time <= visTo);
-      if (touches.length < 2) continue;
+      const allTouches = (z.touchPoints ?? []).slice().sort((a, b) => a.time - b.time);
+      if (allTouches.length < 2) continue;
+      const touches = allTouches.filter(p => p.time >= visFrom && p.time <= visTo);
       const bullish = z.kind.includes('ssl');
       const rgb = kindRgb(z.kind);
       const confirmed = z.state === 'confirmed';
       const sweptTime = z.state === 'swept' && z.sweptAt ? tsSeconds(z.sweptAt) : null;
-      const timeEnd = sweptTime ?? touches[touches.length - 1].time;
-      if (timeEnd <= touches[0].time) continue;
-      const xStart = coordinate.tx(touches[0].time);
-      const xEnd = coordinate.tx(timeEnd);
+      const timeStart = allTouches[0].time;
+      const timeEnd = sweptTime ?? allTouches[allTouches.length - 1].time;
+      const visibleStart = Math.max(timeStart, visFrom);
+      const visibleEnd = Math.min(timeEnd, visTo);
+      if (visibleEnd <= visibleStart) continue;
+      const xStart = coordinate.tx(visibleStart);
+      const xEnd = coordinate.tx(visibleEnd);
       if (xStart == null || xEnd == null || xEnd <= xStart) continue;
-      const stop = Number.isFinite(z.liquidityLevel) ? z.liquidityLevel : (bullish ? Math.min(...touches.map(p => p.price)) : Math.max(...touches.map(p => p.price)));
-      const prices = touches.map(p => p.price);
+      const stop = Number.isFinite(z.liquidityLevel) ? z.liquidityLevel : (bullish ? Math.min(...allTouches.map(p => p.price)) : Math.max(...allTouches.map(p => p.price)));
+      const prices = allTouches.map(p => p.price);
       const priceLow = bullish ? Math.min(...prices) : Math.min(...prices, stop);
       const priceHigh = bullish ? Math.max(...prices, stop) : Math.max(...prices);
       const yTop = coordinate.py(priceHigh);

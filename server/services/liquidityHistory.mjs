@@ -28,7 +28,6 @@ const MAX_DAYS_LEGACY = 120;
 // سقف v2 = 14 يوماً، تسخين متسلسل، ووسم كومة عامل v2 حتى يموت وحده لا التطبيق.
 const MAX_DAYS_V2 = 14;
 const DEFAULT_DAYS = 90;
-const MAX_ZONES = 400;         // سقف عرض معلن — لا يقطع الحساب
 const MAX_CACHE_ENTRIES = 4;
 const SYMBOL_RE = /^[A-Z0-9]{1,20}$/;
 // مهلة الحساب تتناسب مع حجم المهمة: القياس على الإنتاج ≈ 11× المحلي،
@@ -145,7 +144,6 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       throw new Error(`شموع تاريخية غير كافية للرمز ${symbol}: ${rows.length}`);
     }
     const result = await computeInWorker(engine, symbol, '1m', rows, jobTimeoutMs(engine, days));
-    const zonesCapped = result.totalZones > MAX_ZONES;
     const value = {
       engineKey: engine,
       engine: result.engine,
@@ -159,8 +157,8 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       bars: rows.length,
       gaps: Math.max(0, expected - rows.length),
       totalZones: result.totalZones,
-      zonesCapped,
-      zones: result.zones.slice(0, MAX_ZONES).map((zone) => ({ ...zone, engine: result.engine })),
+      zonesCapped: false,
+      zones: result.zones.map((zone) => ({ ...zone, engine: result.engine })),
       candles: rows,
       computeMs: result.computeMs,   // زمن حساب المحرك داخل الخيط المنفصل
       totalMs: now() - t0,           // الجلب + الحساب + التحويل

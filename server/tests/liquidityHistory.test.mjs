@@ -54,7 +54,9 @@ test('fetching pages the full depth in fixed-start batches with bounded concurre
   assert.equal(result.gaps, 0);
   assert.equal(result.source, 'binance-spot');
   assert.ok(result.bars > 9000, `bars=${result.bars}`);
-  assert.ok(Array.isArray(result.zones) && result.zones.length <= 400);
+  assert.ok(Array.isArray(result.zones));
+  assert.equal(result.zones.length, result.totalZones, 'تُعاد كل المناطق التي أنتجها المحرك');
+  assert.equal(result.zonesCapped, false, 'لا يُخفى جزء من المناطق عند التسليم');
   assert.ok(result.computeMs >= 0);
   // الشموع مدمجة [time,o,h,l,c,v] وزمنها صاعد بلا تكرار
   const first = result.candles[0];

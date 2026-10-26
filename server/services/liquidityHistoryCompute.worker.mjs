@@ -46,7 +46,7 @@ const serializeZone = (zone) => ({
   // حقول الرسم بمنطق شارتي الشاشتين (MultiZoneChart / LiquidityV2Chart):
   // نقاط اللمس الحقيقية للصناديق، وخط الاتجاه من نقاطه حتى إسقاطه.
   touchPoints: Array.isArray(zone.touchPoints)
-    ? zone.touchPoints.slice(0, 12).map((p) => ({ time: Number(p.time), price: Number(p.price) })).filter((p) => Number.isFinite(p.time) && Number.isFinite(p.price))
+    ? zone.touchPoints.map((p) => ({ time: Number(p.time), price: Number(p.price) })).filter((p) => Number.isFinite(p.time) && Number.isFinite(p.price))
     : [],
   trendline: zone.trendline && Array.isArray(zone.trendline.points) && zone.trendline.points.length >= 2
     ? {
