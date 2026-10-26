@@ -175,7 +175,9 @@ function HistoryChart({ data, height }: { data: LiquidityHistoryResponse; height
 }
 
 export default function LiquidityHistorySection({ engine, symbol }: { engine: 'legacy' | 'v2'; symbol: string }) {
-  const [open, setOpen] = useState(false);
+  // مفتوح افتراضياً: الخادم يُسخّن نتائج العمق الافتراضي عند الإقلاع، والكاش يجعل
+  // الفتح شبه فوري — وعند بارد تظهر حالة تجهيز واضحة مع استطلاع تلقائي.
+  const [open, setOpen] = useState(true);
   const [days, setDays] = useState(90);
   const [data, setData] = useState<LiquidityHistoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
