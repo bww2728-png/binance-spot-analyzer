@@ -420,7 +420,7 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
   // مفتوح افتراضياً: الخادم يُسخّن نتائج العمق الافتراضي عند الإقلاع، والكاش يجعل
   // الفتح شبه فوري — وعند بارد تظهر حالة تجهيز واضحة مع استطلاع تلقائي.
   const [open, setOpen] = useState(true);
-  const [days, setDays] = useState(90);
+  const [days, setDays] = useState(engine === 'v2' ? 30 : 90);
   const [data, setData] = useState<LiquidityHistoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -485,7 +485,7 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
             الشارت التاريخي — فريم الدقيقة فقط {symbol ? `· ${symbol}` : ''}
           </div>
           <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-3)' }}>
-            مناطق المحرك {engine === 'legacy' ? 'الحالي' : 'v2'} مرسومة بمنطق شارت هذه الشاشة نفسه (الألوان بالنوع: BSL أحمر / SSL أخضر{engine === 'v2' ? '، عرض برتقالي / طلب أزرق' : ''}). التمرير إلى الماضي متاح والمناطق مثبتة على أزمنتها. أول حساب لعمق 90 يوماً يستغرق {engine === 'v2' ? 'حتى ساعة' : 'دقائق'} ثم تُخزَّن النتيجة على الخادم.
+            مناطق المحرك {engine === 'legacy' ? 'الحالي' : 'v2'} مرسومة بمنطق شارت هذه الشاشة نفسه (الألوان بالنوع: BSL أحمر / SSL أخضر{engine === 'v2' ? '، عرض برتقالي / طلب أزرق' : ''}). التمرير إلى الماضي متاح والمناطق مثبتة على أزمنتها.{engine === 'v2' ? ' عمق v2 الأقصى 30 يوماً بحدود ذاكرة منصة النشر — للحصول على 3 أشهر استخدم شارت المحرك الحالي.' : ' أول حساب يستغرق دقائق ثم تُخزَّن النتيجة على الخادم.'}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -496,7 +496,7 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
             style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
             title="عمق التاريخ بالأيام"
           >
-            {[30, 60, 90, 120].map(d => <option key={d} value={d}>{d} يوماً</option>)}
+            {(engine === 'v2' ? [7, 14, 30] : [30, 60, 90, 120]).map(d => <option key={d} value={d}>{d} يوماً</option>)}
           </select>
           <button
             onClick={() => setOpen(o => !o)}
@@ -539,7 +539,7 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
       )}
       {loading && (
         <div className="rounded-lg px-3 py-3 text-[12px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
-          جارٍ تجهيز الشارت التاريخي: جلب شموع الدقيقة من Binance دفعةً بعد دفعة ثم حساب مناطق المحرك على خيط منفصل{engine === 'v2' ? ' — أول حساب لعمق 90 يوماً لمحرك v2 قد يستغرق حتى ساعة على خادم النشر، ثم تُخزَّن النتيجة ليوم كامل وتُحدَّث في الخلفية' : ' — أول حساب يستغرق دقائق ثم تُخزَّن النتيجة'}. يمكنك ترك الصفحة مفتوحة حتى الاكتمال.
+          جارٍ تجهيز الشارت التاريخي: جلب شموع الدقيقة من Binance دفعةً بعد دفعة ثم حساب مناطق المحرك على خيط منفصل — أول حساب يستغرق {engine === 'v2' ? 'دقائق معدودة' : 'دقائق'} ثم تُخزَّن النتيجة على الخادم. يمكنك ترك الصفحة مفتوحة حتى الاكتمال.
         </div>
       )}
 

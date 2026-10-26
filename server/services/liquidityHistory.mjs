@@ -22,7 +22,10 @@ const BATCH = 1000;            // سقف Binance لكل نداء klines
 const FETCH_CONCURRENCY = 6;   // نداءات متوازية محدودة
 const TTL_MS = 30 * 60_000;    // صلاحية الكاش الافتراضية (legacy)
 const MIN_DAYS = 7;
-const MAX_DAYS = 120;
+const MAX_DAYS_LEGACY = 120;
+// v2: حساب 90 يوماً يقاس محلياً بـ435MB ذاكرة — مع العملية الرئيسية يتجاوز حد
+// ذاكرة حاوية النشر فيُقتل التطبيق كله (وثّق: 502 عند 08:15 و08:49). سقف آمن مقاس.
+const MAX_DAYS_V2 = 30;
 const DEFAULT_DAYS = 90;
 const MAX_ZONES = 400;         // سقف عرض معلن — لا يقطع الحساب
 const MAX_CACHE_ENTRIES = 4;
@@ -250,19 +253,22 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     if (!SYMBOL_RE.test(s)) throw badRequest('صيغة الرمز غير صالحة');
     const e = String(engine ?? 'legacy');
     if (!(e in ENGINE_VERSIONS)) throw badRequest('محرك غير مدعوم — القيم: legacy أو v2');
-    const d = days == null ? DEFAULT_DAYS : Number(days);
-    if (!Number.isFinite(d) || d < MIN_DAYS || d > MAX_DAYS) {
-      throw badRequest(`العمق بالأيام يجب أن يكون بين ${MIN_DAYS} و${MAX_DAYS}`);
+    const maxDays = e === 'v2' ? MAX_DAYS_V2 : MAX_DAYS_LEGACY;
+    const d = days == null ? Math.min(DEFAULT_DAYS, maxDays) : Number(days);
+    if (!Number.isFinite(d) || d < MIN_DAYS || d > maxDays) {
+      throw badRequest(e === 'v2'
+        ? `عمق v2 الأقصى ${MAX_DAYS_V2} يوماً بحدود ذاكرة منصة النشر (الحساب على 90 يوماً يقاس بـ435MB) — استخدم legacy للعمق الأعمق`
+        : `العمق بالأيام يجب أن يكون بين ${MIN_DAYS} و${maxDays}`);
     }
     return { symbol: s, engine: e, days: d };
   }
 
-  /** تسخين خلفي عند الإقلاع: legacy ثم v2 بالعمق الافتراضي، تسلسلياً */
+  /** تسخين خلفي عند الإقلاع: legacy بعمق كامل، وv2 عند سقفه الآمن (30 يوماً) */
   function warmUpDefaults(symbol = 'BTCUSDT') {
     if (!warmup) return;
     setTimeout(() => {
       void getHistory({ symbol, engine: 'legacy', days: DEFAULT_DAYS }).catch(() => {});
-      void getHistory({ symbol, engine: 'v2', days: DEFAULT_DAYS }).catch(() => {});
+      void getHistory({ symbol, engine: 'v2', days: MAX_DAYS_V2 }).catch(() => {});
     }, 3_000);
   }
 
