@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { TIMEFRAMES, type Candle, type LiquidityV2StatusResponse, type LiquidityV2ZonesResponse, type LiquidityZoneV2 } from '../lib/types';
 import LiquidityV2Chart, { KIND_COLORS, EVENT_COLORS } from './LiquidityV2Chart';
+import LiquidityHistorySection from './LiquidityHistoryChart';
 
 /**
  * شاشة محرك السيولة v2 — **عرض فقط، بلا أي تفعيل**.
@@ -291,6 +292,9 @@ export default function LiquidityV2Screen() {
           </div>
         </div>
       )}
+
+      {/* الشارت التاريخي (1m) — حساب المحرك نفسه على عمق تاريخي كامل */}
+      <LiquidityHistorySection engine="v2" symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
 
       {/* تفصيل المناطق وتعليل كل واحدة */}
       {!!chartZones.length && (

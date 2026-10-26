@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import db from './db.js';
@@ -53,6 +54,7 @@ import { measureIdentityStability, createIdentityCollector } from './services/zo
  */
 import { detectLiquidityZonesV2 } from './liquidity-zones/v2/index.mjs';
 import { createLiquidityWorkbench } from './services/liquidityWorkbench.mjs';
+import { createLiquidityHistoryService } from './services/liquidityHistory.mjs';
 import { withMemoryFallback } from './services/liquidityWorkbenchRepository.mjs';
 import { createLiquidityWorkbenchRouter } from './routes/liquidityWorkbenchRouter.mjs';
 import { TF_MS } from './market/candleStore.mjs';
@@ -1820,6 +1822,36 @@ app.get('/api/liquidity-zones/v2/zones', handle(async (req, res) => {
     source: 'liquidity-engine-v2',
     note: 'عرض فقط — لا يُغذّي أي قرار منشور'
   });
+}));
+
+// ---- الشارت التاريخي (1m) لمحركي السيولة: قراءة سوق + عرض فقط، بلا أي كتابة ----
+const liquidityHistory = createLiquidityHistoryService({ klines: (s, tf, limit, startTime) => db.binance.klines(s, tf, limit, startTime) });
+app.get('/api/liquidity-history', handle(async (req, res) => {
+  let params;
+  try {
+    params = liquidityHistory.validate({
+      symbol: req.query.symbol,
+      engine: req.query.engine,
+      days: req.query.days
+    });
+  } catch (error) {
+    if (error?.statusCode === 400) return res.status(400).json({ error: error.message });
+    throw error;
+  }
+  const value = await liquidityHistory.getHistory(params);
+  // الحمولة كبيرة (~مئات آلاف الأرقام): gzip عند توفره في Accept-Encoding
+  const acceptsGzip = String(req.headers['accept-encoding'] || '').includes('gzip');
+  const payload = JSON.stringify(value);
+  if (acceptsGzip) {
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Encoding': 'gzip',
+      Vary: 'Accept-Encoding'
+    });
+    res.send(zlib.gzipSync(Buffer.from(payload)));
+  } else {
+    res.type('json').send(payload);
+  }
 }));
 
 app.get('/api/liquidity-zones/:id', handle(async (req, res) => {

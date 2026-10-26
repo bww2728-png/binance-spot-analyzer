@@ -4,6 +4,7 @@ import { ZoneCard, ZoneDetail, kindLabel } from './ZoneCards';
 import { TIMEFRAMES, type LiquidityDetection, type LiquidityZoneEngineStatus } from '../lib/types';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
+import LiquidityHistorySection from './LiquidityHistoryChart';
 import { useScreenState } from '../lib/useScreenState';
 
 export default function LiquidityZonesScreen() {
@@ -83,6 +84,7 @@ export default function LiquidityZonesScreen() {
       </div>
       {!visible.length && <div className="rounded-xl py-16 text-center text-sm" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>{progress?.busy ? 'المحرك يعمل ويضيف النتائج تدريجياً…' : 'لا توجد تحديدات مطابقة للفلاتر الحالية'}</div>}
       {selected && <ZoneDetail zone={selected} onClose={() => setSelected(null)} onReviewed={reviewed} />}
+      <LiquidityHistorySection engine="legacy" symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
     </section>
   );
 }
