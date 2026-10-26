@@ -275,7 +275,7 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
       )}
       {loading && (
         <div className="rounded-lg px-3 py-3 text-[12px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
-          جارٍ تجهيز الشارت التاريخي: جلب شموع الدقيقة من Binance دفعةً بعد دفعة ثم حساب مناطق المحرك — قد يستغرق ذلك نحو دقيقة في أول تشغيل…
+          جارٍ تجهيز الشارت التاريخي: جلب شموع الدقيقة من Binance دفعةً بعد دفعة ثم حساب مناطق المحرك على خيط منفصل. أول حساب لعمق 90 يوماً يستغرق دقائق (خاصة مع محرك v2) — والنتيجة تُخزَّن على الخادم فتفتح بسرعة بعدها. يمكنك ترك الصفحة مفتوحة حتى الاكتمال.
         </div>
       )}
 

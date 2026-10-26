@@ -1826,6 +1826,7 @@ app.get('/api/liquidity-zones/v2/zones', handle(async (req, res) => {
 
 // ---- الشارت التاريخي (1m) لمحركي السيولة: قراءة سوق + عرض فقط، بلا أي كتابة ----
 const liquidityHistory = createLiquidityHistoryService({ klines: (s, tf, limit, startTime) => db.binance.klines(s, tf, limit, startTime) });
+liquidityHistory.warmUpDefaults('BTCUSDT');
 app.get('/api/liquidity-history', handle(async (req, res) => {
   let params;
   try {
@@ -1838,7 +1839,12 @@ app.get('/api/liquidity-history', handle(async (req, res) => {
     if (error?.statusCode === 400) return res.status(400).json({ error: error.message });
     throw error;
   }
-  const value = await liquidityHistory.getHistory(params);
+  const state = liquidityHistory.request(params);
+  if (state.kind === 'computing') {
+    // الحساب يجري في خيط منفصل (v2 على 90 يوماً يستغرق دقائق): استطلع بعد قليل
+    return res.status(202).json({ status: 'computing', ...params, startedAt: state.startedAt });
+  }
+  const value = state.value;
   // الحمولة كبيرة (~مئات آلاف الأرقام): gzip عند توفره في Accept-Encoding
   const acceptsGzip = String(req.headers['accept-encoding'] || '').includes('gzip');
   const payload = JSON.stringify(value);

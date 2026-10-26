@@ -1,64 +1,54 @@
-import { detectLiquidityZones } from '../liquidity-zones/engine.mjs';
-import { detectLiquidityZonesV2 } from '../liquidity-zones/v2/index.mjs';
+import { Worker } from 'node:worker_threads';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
- * شارت تاريخي (1m) لمحركي السيولة — حساب عند الطلب فوق شموع تاريخية عميقة.
+ * شارت تاريخي (1m) لمحركي السيولة — تنسيق الجلب والحساب والتخزين المؤقت.
  *
- * يجلب شموع الدقيقة من Binance بتقسيم دفعات (1000 شمعة لكل نداء، تزامن محدود)،
- * ثم يشغّل المحرك المطلوب **كما هو** بلا أي تعديل على قواعد الكشف، على العمق
- * الكامل (endIndex = آخر شمعة). الكاش بالذاكرة بمفتاح (رمز، محرك، عمق) مع قفل
- * يمنع حسابين متوازيين لنفس المفتاح — لأن الحساب على ~130 ألف شمعة ثقيل.
+ * القياس على 129,600 شمعة اصطناعية: legacy ≈ 5 ثوانٍ، v2 ≈ 5 دقائق — لذلك:
+ * 1) الحساب في worker thread منفصل حتى لا يجمّد حساب v2 حلقة أحداث الخادم.
+ * 2) طلب الواجهة نمطه «ابدأ ثم استطلع»: `request()` يعيد النتيجة فوراً إن
+ *    كانت جاهزة، وإلا يبدأ الحساب ويعيد `computing` فيستطلع العميل كل ثوانٍ.
+ * 3) تسخين خلفي عند الإقلاع بالعمق الافتراضي ليكون الشارت جاهزاً عند أول استخدام.
+ * 4) الكاش بالذاكرة مع stale-while-revalidate: عند انتهاء الصلاحية تُقدَّم
+ *    القيمة القديمة فوراً ويُعاد الحساب في الخلفية.
  *
- * لا يحفظ شيئاً في قاعدة البيانات ولا يُغذّي أي قرار: قراءة السوق + عرض.
+ * جلب الشموع من Binance في الخيط الرئيسي (I/O غير حاجب، تزامن محدود). لا
+ * كتابة في قاعدة البيانات ولا تعديل على قواعد المحركين.
  */
 
 const MINUTE_MS = 60_000;
 const BATCH = 1000;            // سقف Binance لكل نداء klines
-const FETCH_CONCURRENCY = 4;   // نداءات متوازية محدودة — المحدد الداخلي يبقى مرجعاً
-const TTL_MS = 15 * 60_000;    // صلاحية الكاش: نتائج ثابتة تاريخياً في الأغلب
+const FETCH_CONCURRENCY = 6;   // نداءات متوازية محدودة
+const TTL_MS = 30 * 60_000;    // صلاحية الكاش
 const MIN_DAYS = 7;
 const MAX_DAYS = 120;
 const DEFAULT_DAYS = 90;
 const MAX_ZONES = 400;         // سقف عرض معلن — لا يقطع الحساب
-const MAX_CACHE_ENTRIES = 4;   // محركان × عمقان تقريباً
+const MAX_CACHE_ENTRIES = 4;
 const SYMBOL_RE = /^[A-Z0-9]{1,20}$/;
+const JOB_TIMEOUT_MS = 12 * 60_000; // سقف مهمة الحساب الواحدة
 
-const ENGINE_VERSIONS = {
-  legacy: 'liquidity-engine-v1',
-  v2: 'liquidity-engine-v2'
-};
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WORKER_PATH = path.join(__dirname, 'liquidityHistoryCompute.worker.mjs');
+
+const ENGINE_VERSIONS = { legacy: 'liquidity-engine-v1', v2: 'liquidity-engine-v2' };
 
 const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
 
-/** حقول الرسم فقط — تُسقط الحقول الثقيلة (visual، structureEvents…) من المخرجات */
-function serializeZone(zone, engineKey) {
-  return {
-    id: zone.id,
-    kind: zone.kind,
-    state: zone.state,
-    direction: zone.direction,
-    referenceLevel: zone.referenceLevel,
-    liquidityLevel: zone.liquidityLevel,
-    zoneBox: zone.zoneBox ?? null,
-    createdAt: zone.createdAt ?? zone.confirmedAt ?? null,
-    sweptAt: zone.sweptAt ?? null,
-    confidence: zone.confidence,
-    touches: zone.touches,
-    timeframe: zone.timeframe,
-    engine: ENGINE_VERSIONS[engineKey]
-  };
-}
-
-export function createLiquidityHistoryService({ klines, now = () => Date.now(), ttlMs = TTL_MS } = {}) {
+export function createLiquidityHistoryService({ klines, now = () => Date.now(), ttlMs = TTL_MS, warmup = true } = {}) {
   if (typeof klines !== 'function') throw new Error('liquidity-history: klines is required');
-  const cache = new Map();   // key → { expiresAt, value }
-  const inflight = new Map(); // key → Promise
+
+  const cache = new Map();      // key → { value, expiresAt }
+  const jobs = new Map();       // key → { startedAt, promise }
+  const queue = [];             // مهام بانتظار دوران العامل (تسلسلي لتفادي تنافس CPU)
+  let jobRunning = false;
 
   /** جلب شموع 1m بعمق `days` يوماً — دفعات ثابتة البداية بتزامن محدود */
   async function fetchCandles(symbol, days) {
     const end = now();
     const start = Math.floor((end - days * 86_400_000) / MINUTE_MS) * MINUTE_MS;
-    const expected = Math.floor((end - start) / MINUTE_MS) + 1; // شموع الفترة مغلقة على الطرفين
+    const expected = Math.floor((end - start) / MINUTE_MS) + 1;
     const starts = [];
     for (let t = start; t < end; t += BATCH * MINUTE_MS) starts.push(t);
     const batches = new Array(starts.length);
@@ -79,82 +69,166 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     await Promise.all(Array.from({ length: Math.min(FETCH_CONCURRENCY, starts.length) }, worker));
     if (failure) throw failure;
 
-    const candles = [];
+    const rows = [];
     let lastTime = -Infinity;
     for (const batch of batches) {
       for (const row of batch ?? []) {
         const openTime = Number(row[0]);
         if (!Number.isFinite(openTime) || openTime > end || openTime <= lastTime) continue;
         lastTime = openTime;
-        candles.push({
-          time: openTime / 1000,
-          open: Number(row[1]),
-          high: Number(row[2]),
-          low: Number(row[3]),
-          close: Number(row[4]),
-          volume: Number(row[5] ?? 0)
-        });
+        rows.push([
+          openTime / 1000,
+          Number(row[1]),
+          Number(row[2]),
+          Number(row[3]),
+          Number(row[4]),
+          Number(row[5] ?? 0)
+        ]);
       }
     }
-    return { candles, expected };
+    return { rows, expected, start, end };
   }
 
-  async function compute(key, { symbol, engine, days }) {
-    const t0 = now();
-    const { candles, expected } = await fetchCandles(symbol, days);
-    if (candles.length < 40) {
-      throw new Error(`شموع تاريخية غير كافية للرمز ${symbol}: ${candles.length}`);
+  /** حساب المحرك في worker — الوعد يُحسم عند انتهاء الخيط (نجاح أو فشل) */
+  function computeInWorker(engineKey, symbol, timeframe, rows) {
+    const bars = rows.length;
+    const flat = new Float64Array(bars * 6);
+    for (let i = 0; i < bars; i += 1) {
+      flat.set(rows[i], i * 6);
     }
-    const endIndex = candles.length - 1;
-    const zonesRaw = engine === 'v2'
-      ? detectLiquidityZonesV2({ symbol, timeframe: '1m', candles, endIndex })
-      : detectLiquidityZones({ symbol, timeframe: '1m', candles, endIndex });
-    const computeMs = now() - t0;
-    return {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(WORKER_PATH, {
+        workerData: { engineKey, symbol, timeframe, bars, buf: flat.buffer },
+        resourceLimits: { maxOldGenerationSizeMb: 1024 }
+      });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        reject(new Error(`تجاوز حساب المحرك ${engineKey} المهلة (${Math.round(JOB_TIMEOUT_MS / 60000)} دقائق)`));
+      }, JOB_TIMEOUT_MS);
+      worker.on('message', (msg) => {
+        clearTimeout(timer);
+        worker.terminate();
+        if (msg?.ok) resolve(msg);
+        else reject(new Error(msg?.error ?? 'فشل حساب المحرك'));
+      });
+      worker.on('error', (error) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          clearTimeout(timer);
+          reject(new Error(`انتهى خيط الحساب برمز ${code}`));
+        }
+      });
+    });
+  }
+
+  async function runJob(key, { symbol, engine, days }) {
+    const t0 = now();
+    const { rows, expected } = await fetchCandles(symbol, days);
+    if (rows.length < 40) {
+      throw new Error(`شموع تاريخية غير كافية للرمز ${symbol}: ${rows.length}`);
+    }
+    const result = await computeInWorker(engine, symbol, '1m', rows);
+    const zonesCapped = result.totalZones > MAX_ZONES;
+    const value = {
       engineKey: engine,
-      engine: ENGINE_VERSIONS[engine],
+      engine: result.engine,
       symbol,
       timeframe: '1m',
       days,
       source: 'binance-spot',
-      from: candles[0].time,
-      to: candles[endIndex].time,
+      from: rows[0][0],
+      to: rows[rows.length - 1][0],
       expectedBars: expected,
-      bars: candles.length,
-      gaps: Math.max(0, expected - candles.length),
-      totalZones: zonesRaw.length,
-      zonesCapped: zonesRaw.length > MAX_ZONES,
-      zones: zonesRaw.slice(0, MAX_ZONES).map((zone) => serializeZone(zone, engine)),
-      candles: candles.map((c) => [c.time, c.open, c.high, c.low, c.close, c.volume]),
-      computeMs
+      bars: rows.length,
+      gaps: Math.max(0, expected - rows.length),
+      totalZones: result.totalZones,
+      zonesCapped,
+      zones: result.zones.slice(0, MAX_ZONES).map((zone) => ({ ...zone, engine: result.engine })),
+      candles: rows,
+      computeMs: result.computeMs,   // زمن حساب المحرك داخل الخيط المنفصل
+      totalMs: now() - t0,           // الجلب + الحساب + التحويل
+      cached: false,
+      stale: false
     };
-  }
-
-  const evict = () => {
+    cache.set(key, { value, expiresAt: now() + ttlMs });
     while (cache.size > MAX_CACHE_ENTRIES) {
       const oldest = cache.keys().next().value;
       cache.delete(oldest);
     }
-  };
-
-  async function getHistory({ symbol, engine = 'legacy', days } = {}) {
-    const key = `${symbol}|${engine}|${days}`;
-    const cached = cache.get(key);
-    if (cached && cached.expiresAt > now()) return { ...cached.value, cached: true };
-    const pending = inflight.get(key);
-    if (pending) return pending;
-
-    const task = (async () => {
-      const value = await compute(key, { symbol, engine, days });
-      cache.set(key, { expiresAt: now() + ttlMs, value });
-      evict();
-      return { ...value, cached: false };
-    })().finally(() => inflight.delete(key));
-    inflight.set(key, task);
-    return task;
+    return value;
   }
 
-  /** تحقق المدخلات مفصول عن الكاش: خطأ 400 لا يُخزَّن ولا يُحسب */
+  /** دوران مهام متسلسل مع أولوية للعمق الصغير (طلبات المستخدم السريعة) */
+  async function pump() {
+    if (jobRunning) return;
+    jobRunning = true;
+    try {
+      while (queue.length) {
+        queue.sort((a, b) => a.priority - b.priority || a.enqueuedAt - b.enqueuedAt);
+        const job = queue.shift();
+        const { key, params, resolve, reject } = job;
+        try {
+          const value = await runJob(key, params);
+          resolve(value);
+        } catch (error) {
+          reject(error);
+        }
+      }
+    } finally {
+      jobRunning = false;
+    }
+  }
+
+  function enqueue(key, params) {
+    const pending = jobs.get(key);
+    if (pending) return pending;
+    const entry = {
+      key,
+      params,
+      priority: params.days <= 30 ? 0 : 1,
+      enqueuedAt: now(),
+      startedAt: now()
+    };
+    entry.promise = new Promise((resolve, reject) => {
+      entry.resolve = resolve;
+      entry.reject = reject;
+    }).finally(() => jobs.delete(key));
+    jobs.set(key, entry);
+    queue.push(entry);
+    void pump();
+    return entry;
+  }
+
+  /**
+   * نقطة الواجهة: جاهز → القيمة فوراً (cached). قيد الحساب → computing.
+   * خامل → يبدأ الحساب ويعيد computing. منتهي الصلاحية → القيمة فوراً مع
+   * stale:true وإعادة حساب خلفية.
+   */
+  function request({ symbol, engine, days }) {
+    const key = `${symbol}|${engine}|${days}`;
+    const cached = cache.get(key);
+    if (cached) {
+      if (cached.expiresAt > now()) return { kind: 'ready', value: { ...cached.value, cached: true } };
+      // stale-while-revalidate: قدّم القديم فوراً وحدّث في الخلفية
+      enqueue(key, { symbol, engine, days });
+      return { kind: 'ready', value: { ...cached.value, cached: true, stale: true } };
+    }
+    const job = enqueue(key, { symbol, engine, days });
+    return { kind: 'computing', startedAt: job.startedAt };
+  }
+
+  /** نسخة تنتظر الاكتمال — للتسخين الخلفي والاختبارات */
+  async function getHistory(params) {
+    const state = request(params);
+    if (state.kind === 'ready') return state.value;
+    const key = `${params.symbol}|${params.engine}|${params.days}`;
+    const job = jobs.get(key);
+    return job ? job.promise : Promise.reject(new Error('أُلغيت مهمة الحساب'));
+  }
+
   function validate({ symbol, engine, days }) {
     const s = String(symbol ?? '').toUpperCase();
     if (!SYMBOL_RE.test(s)) throw badRequest('صيغة الرمز غير صالحة');
@@ -167,5 +241,14 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     return { symbol: s, engine: e, days: d };
   }
 
-  return { getHistory, validate };
+  /** تسخين خلفي عند الإقلاع: legacy ثم v2 بالعمق الافتراضي، تسلسلياً */
+  function warmUpDefaults(symbol = 'BTCUSDT') {
+    if (!warmup) return;
+    setTimeout(() => {
+      void getHistory({ symbol, engine: 'legacy', days: DEFAULT_DAYS }).catch(() => {});
+      void getHistory({ symbol, engine: 'v2', days: DEFAULT_DAYS }).catch(() => {});
+    }, 3_000);
+  }
+
+  return { request, getHistory, validate, warmUpDefaults };
 }
