@@ -50,17 +50,22 @@ export function fetchLiquidityHistory(opts: {
   engine: LiquidityHistoryEngine;
   days?: number;
   signal?: AbortSignal;
-  /** مهلة الانتظار الكلية بالمللي ثانية (الحساب الأول لv2 على 90 يوماً يستغرق دقائق) */
+  /** مهلة الانتظار الكلية بالمللي ثانية (أول حساب لv2 على 90 يوماً يستغرق ~15 دقيقة على الخادم) */
   deadlineMs?: number;
 }): Promise<LiquidityHistoryResponse> {
   const q = new URLSearchParams({ symbol: opts.symbol, engine: opts.engine });
   if (opts.days != null) q.set('days', String(opts.days));
   const url = `/api/liquidity-history?${q}`;
-  const deadline = Date.now() + (opts.deadlineMs ?? 8 * 60_000);
+  const deadline = Date.now() + (opts.deadlineMs ?? 25 * 60_000);
 
   const once = async (): Promise<LiquidityHistoryResponse | 'computing'> => {
     const res = await fetch(url, { signal: opts.signal });
     if (res.status === 202) {
+      await res.json().catch(() => null);
+      return 'computing';
+    }
+    if (res.status === 503) {
+      // فشل حساب سابق وتهدئة قصيرة — استمر بالاستطلاع حتى المهلة الكلية
       await res.json().catch(() => null);
       return 'computing';
     }

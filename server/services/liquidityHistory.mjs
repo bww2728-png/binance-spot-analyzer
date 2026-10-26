@@ -27,7 +27,8 @@ const DEFAULT_DAYS = 90;
 const MAX_ZONES = 400;         // سقف عرض معلن — لا يقطع الحساب
 const MAX_CACHE_ENTRIES = 4;
 const SYMBOL_RE = /^[A-Z0-9]{1,20}$/;
-const JOB_TIMEOUT_MS = 12 * 60_000; // سقف مهمة الحساب الواحدة
+const JOB_TIMEOUT_MS = 25 * 60_000; // سقف مهمة الحساب: v2 على 90 يوماً يستغرق ~15 دقيقة على معالج الإنتاج
+const FAILURE_COOLDOWN_MS = 10 * 60_000; // بعد فشل: خطأ ظاهر وتهدئة بدل حلقة إعادة إدراج تستهلك المعالج
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'liquidityHistoryCompute.worker.mjs');
@@ -41,6 +42,7 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
 
   const cache = new Map();      // key → { value, expiresAt }
   const jobs = new Map();       // key → { startedAt, promise }
+  const cooldown = new Map();   // key → failedUntil (منع حلقة فشل↔إعادة إدراج)
   const queue = [];             // مهام بانتظار دوران العامل (تسلسلي لتفادي تنافس CPU)
   let jobRunning = false;
 
@@ -172,8 +174,10 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
         const { key, params, resolve, reject } = job;
         try {
           const value = await runJob(key, params);
+          cooldown.delete(key);
           resolve(value);
         } catch (error) {
+          cooldown.set(key, now() + FAILURE_COOLDOWN_MS);
           reject(error);
         }
       }
@@ -209,6 +213,10 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
    */
   function request({ symbol, engine, days }) {
     const key = `${symbol}|${engine}|${days}`;
+    const failedUntil = cooldown.get(key);
+    if (failedUntil && failedUntil > now()) {
+      return { kind: 'error', message: `تعذر إكمال الحساب لهذا العمق — يعاد المحاولة تلقائياً بعد دقائق، أو جرّب عمقاً أصغر` };
+    }
     const cached = cache.get(key);
     if (cached) {
       if (cached.expiresAt > now()) return { kind: 'ready', value: { ...cached.value, cached: true } };
@@ -224,6 +232,7 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
   async function getHistory(params) {
     const state = request(params);
     if (state.kind === 'ready') return state.value;
+    if (state.kind === 'error') return Promise.reject(new Error(state.message));
     const key = `${params.symbol}|${params.engine}|${params.days}`;
     const job = jobs.get(key);
     return job ? job.promise : Promise.reject(new Error('أُلغيت مهمة الحساب'));

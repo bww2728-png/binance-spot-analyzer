@@ -1844,6 +1844,9 @@ app.get('/api/liquidity-history', handle(async (req, res) => {
     // الحساب يجري في خيط منفصل (v2 على 90 يوماً يستغرق دقائق): استطلع بعد قليل
     return res.status(202).json({ status: 'computing', ...params, startedAt: state.startedAt });
   }
+  if (state.kind === 'error') {
+    return res.status(503).json({ error: state.message, retryable: true, ...params });
+  }
   const value = state.value;
   // الحمولة كبيرة (~مئات آلاف الأرقام): gzip عند توفره في Accept-Encoding
   const acceptsGzip = String(req.headers['accept-encoding'] || '').includes('gzip');

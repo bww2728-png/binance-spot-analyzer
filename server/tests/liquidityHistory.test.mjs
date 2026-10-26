@@ -100,20 +100,27 @@ test('in-flight lock: concurrent calls for the same key share one computation', 
   assert.equal(calls.length, Math.ceil((7 * 1440) / 1000), 'دفعة واحدة لكل نطاق زمني رغم التوازي');
 });
 
-test('a failing Binance batch propagates a clean error and is not cached', async () => {
+test('a failing Binance batch propagates a clean error, cools down, then recovers', async () => {
   let shouldFail = true;
+  let clock = 1_800_000_000_000;
   const svc = createLiquidityHistoryService({
     klines: async (...args) => {
       if (shouldFail) throw new Error('binance offline');
       return makeRawCandles(args[3], args[2]);
     },
-    now: fixedNow
+    now: () => clock
   });
   await assert.rejects(
     () => svc.getHistory(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 })),
     /binance offline/
   );
-  shouldFail = false; // التعافي بعد زوال العطل: المحاولة التالية تعيد الجلب فعلياً
+  // خلال التهدئة: خطأ واضح بلا إعادة إدراج فورية (لا حلقة فشل تستهلك المعالج)
+  await assert.rejects(
+    () => svc.getHistory(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 })),
+    /تعذر إكمال الحساب/
+  );
+  shouldFail = false;
+  clock += 11 * 60_000; // انقضت التهدئة: التعافي يعيد الجلب فعلياً
   const result = await svc.getHistory(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 }));
   assert.ok(result.bars > 9000);
 });
