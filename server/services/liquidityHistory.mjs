@@ -47,8 +47,10 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
   const cache = new Map();      // key → { value, expiresAt }
   const jobs = new Map();       // key → { startedAt, promise }
   const cooldown = new Map();   // key → failedUntil (منع حلقة فشل↔إعادة إدراج)
-  const queue = [];             // مهام بانتظار دوران العامل (تسلسلي لتفادي تنافس CPU)
-  let jobRunning = false;
+  const lightQueue = [];        // مهام العمق ≤30 يوماً — عامل مستقل
+  const heavyQueue = [];        // مهام العمق >30 يوماً — عامل مستقل
+  let lightRunning = false;
+  let heavyRunning = false;
 
   /** جلب شموع 1m بعمق `days` يوماً — دفعات ثابتة البداية بتزامن محدود */
   async function fetchCandles(symbol, days) {
@@ -167,13 +169,15 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     return value;
   }
 
-  /** دوران مهام متسلسل مع أولوية للعمق الصغير (طلبات المستخدم السريعة) */
-  async function pump() {
-    if (jobRunning) return;
-    jobRunning = true;
+  /** عاملان متوازيان (خفيف/ثقيل): طلب العمق الصغير لا ينتظر خلف حساب ساعة كاملة */
+  async function pump(kind) {
+    const isHeavy = kind === 'heavy';
+    if (isHeavy ? heavyRunning : lightRunning) return;
+    if (isHeavy) heavyRunning = true; else lightRunning = true;
+    const queue = isHeavy ? heavyQueue : lightQueue;
     try {
       while (queue.length) {
-        queue.sort((a, b) => a.priority - b.priority || a.enqueuedAt - b.enqueuedAt);
+        queue.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
         const job = queue.shift();
         const { key, params, resolve, reject } = job;
         try {
@@ -186,7 +190,7 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
         }
       }
     } finally {
-      jobRunning = false;
+      if (isHeavy) heavyRunning = false; else lightRunning = false;
     }
   }
 
@@ -196,7 +200,6 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     const entry = {
       key,
       params,
-      priority: params.days <= 30 ? 0 : 1,
       enqueuedAt: now(),
       startedAt: now()
     };
@@ -205,8 +208,8 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       entry.reject = reject;
     }).finally(() => jobs.delete(key));
     jobs.set(key, entry);
-    queue.push(entry);
-    void pump();
+    (params.days <= 30 ? lightQueue : heavyQueue).push(entry);
+    void pump(params.days <= 30 ? 'light' : 'heavy');
     return entry;
   }
 
