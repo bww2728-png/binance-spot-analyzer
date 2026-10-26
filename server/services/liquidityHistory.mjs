@@ -20,15 +20,18 @@ import { fileURLToPath } from 'node:url';
 const MINUTE_MS = 60_000;
 const BATCH = 1000;            // سقف Binance لكل نداء klines
 const FETCH_CONCURRENCY = 6;   // نداءات متوازية محدودة
-const TTL_MS = 30 * 60_000;    // صلاحية الكاش
+const TTL_MS = 30 * 60_000;    // صلاحية الكاش الافتراضية (legacy)
 const MIN_DAYS = 7;
 const MAX_DAYS = 120;
 const DEFAULT_DAYS = 90;
 const MAX_ZONES = 400;         // سقف عرض معلن — لا يقطع الحساب
 const MAX_CACHE_ENTRIES = 4;
 const SYMBOL_RE = /^[A-Z0-9]{1,20}$/;
-const JOB_TIMEOUT_MS = 25 * 60_000; // سقف مهمة الحساب: v2 على 90 يوماً يستغرق ~15 دقيقة على معالج الإنتاج
-const FAILURE_COOLDOWN_MS = 10 * 60_000; // بعد فشل: خطأ ظاهر وتهدئة بدل حلقة إعادة إدراج تستهلك المعالج
+// مهلة الحساب تتناسب مع حجم المهمة: القياس على الإنتاج ≈ 11× المحلي،
+// فv2 على 90 يوماً يحتاج نحو ساعة. التاريخ الثابت لا يبرر حرق إعادة حساب متكرر:
+// نتائج v2 تُخزَّن يوماً كاملاً (وstale-while-revalidate يخدم القديم أثناء التحديث).
+const jobTimeoutMs = (engine, days) => (engine === 'v2' ? Math.max(120, days) * 60_000 : 25 * 60_000);
+const FAILURE_COOLDOWN_MS = 30 * 60_000; // بعد فشل: خطأ ظاهر وتهدئة بدل حلقة إعادة إدراج تستهلك المعالج
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'liquidityHistoryCompute.worker.mjs');
@@ -37,8 +40,9 @@ const ENGINE_VERSIONS = { legacy: 'liquidity-engine-v1', v2: 'liquidity-engine-v
 
 const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
 
-export function createLiquidityHistoryService({ klines, now = () => Date.now(), ttlMs = TTL_MS, warmup = true } = {}) {
+export function createLiquidityHistoryService({ klines, now = () => Date.now(), ttlMs: ttlOverride, warmup = true } = {}) {
   if (typeof klines !== 'function') throw new Error('liquidity-history: klines is required');
+  const ttlFor = (engine) => (engine === 'v2' ? 24 * 60 * 60_000 : (ttlOverride ?? TTL_MS));
 
   const cache = new Map();      // key → { value, expiresAt }
   const jobs = new Map();       // key → { startedAt, promise }
@@ -92,7 +96,7 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
   }
 
   /** حساب المحرك في worker — الوعد يُحسم عند انتهاء الخيط (نجاح أو فشل) */
-  function computeInWorker(engineKey, symbol, timeframe, rows) {
+  function computeInWorker(engineKey, symbol, timeframe, rows, timeoutMs) {
     const bars = rows.length;
     const flat = new Float64Array(bars * 6);
     for (let i = 0; i < bars; i += 1) {
@@ -105,8 +109,8 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       });
       const timer = setTimeout(() => {
         worker.terminate();
-        reject(new Error(`تجاوز حساب المحرك ${engineKey} المهلة (${Math.round(JOB_TIMEOUT_MS / 60000)} دقائق)`));
-      }, JOB_TIMEOUT_MS);
+        reject(new Error(`تجاوز حساب المحرك ${engineKey} المهلة (${Math.round(timeoutMs / 60000)} دقائق)`));
+      }, timeoutMs);
       worker.on('message', (msg) => {
         clearTimeout(timer);
         worker.terminate();
@@ -132,7 +136,7 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     if (rows.length < 40) {
       throw new Error(`شموع تاريخية غير كافية للرمز ${symbol}: ${rows.length}`);
     }
-    const result = await computeInWorker(engine, symbol, '1m', rows);
+    const result = await computeInWorker(engine, symbol, '1m', rows, jobTimeoutMs(engine, days));
     const zonesCapped = result.totalZones > MAX_ZONES;
     const value = {
       engineKey: engine,
@@ -155,7 +159,7 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       cached: false,
       stale: false
     };
-    cache.set(key, { value, expiresAt: now() + ttlMs });
+    cache.set(key, { value, expiresAt: now() + ttlFor(engine) });
     while (cache.size > MAX_CACHE_ENTRIES) {
       const oldest = cache.keys().next().value;
       cache.delete(oldest);

@@ -120,7 +120,7 @@ test('a failing Binance batch propagates a clean error, cools down, then recover
     /تعذر إكمال الحساب/
   );
   shouldFail = false;
-  clock += 11 * 60_000; // انقضت التهدئة: التعافي يعيد الجلب فعلياً
+  clock += 31 * 60_000; // انقضت التهدئة: التعافي يعيد الجلب فعلياً
   const result = await svc.getHistory(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 }));
   assert.ok(result.bars > 9000);
 });

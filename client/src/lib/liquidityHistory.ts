@@ -56,7 +56,7 @@ export function fetchLiquidityHistory(opts: {
   const q = new URLSearchParams({ symbol: opts.symbol, engine: opts.engine });
   if (opts.days != null) q.set('days', String(opts.days));
   const url = `/api/liquidity-history?${q}`;
-  const deadline = Date.now() + (opts.deadlineMs ?? 25 * 60_000);
+  const deadline = Date.now() + (opts.deadlineMs ?? (opts.engine === 'v2' ? 95 * 60_000 : 25 * 60_000));
 
   const once = async (): Promise<LiquidityHistoryResponse | 'computing'> => {
     const res = await fetch(url, { signal: opts.signal });
