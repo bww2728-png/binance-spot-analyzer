@@ -73,7 +73,7 @@ export default function LiveOpportunitiesScreen() {
   const [showFailedWatch, setShowFailedWatch] = useState(false);
   const [closed, setClosed] = useState<BuyHistoryEvent[] | null>(null);
   const [closedError, setClosedError] = useState<string | null>(null);
-  const [busyMsg, setBusyMsg] = useState<string | null>(null);
+  const [lastSyncAt, setLastSyncAt] = useState<number>(Date.now());
   const [controlBusy, setControlBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
   const lastRecoveryState = useRef<string | null>(null);
@@ -83,6 +83,7 @@ export default function LiveOpportunitiesScreen() {
     try {
       const data = await api.getBuyFeed({ timeframe: tfFilter || undefined });
       setFeed(data);
+      setLastSyncAt(Date.now());
       setError(data.error ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذر جلب الفرص الحية');
@@ -117,28 +118,6 @@ export default function LiveOpportunitiesScreen() {
 
   // ساعة محلية للعرض النسبي («منذ …») — واعية بالإخفاء فلا تعمل في الخلفية
   useVisiblePoll(() => setNow(Date.now()), { intervalMs: 1000 });
-
-  const runScan = async () => {
-    setBusyMsg('جارٍ تشغيل دورة مسح الآن…');
-    try {
-      await api.runBuyScan();
-      window.setTimeout(() => { void load(); setBusyMsg(null); }, 4000);
-    } catch (e) {
-      setBusyMsg(null);
-      setError(e instanceof Error ? e.message : 'تعذر تشغيل الدورة');
-    }
-  };
-
-  const runCalibration = async () => {
-    setBusyMsg('بدأت المعايرة التاريخية — ستُحدَّث الشرائح تدريجياً…');
-    try {
-      await api.runBuyCalibration();
-      window.setTimeout(() => { void load(); setBusyMsg(null); }, 6000);
-    } catch (e) {
-      setBusyMsg(null);
-      setError(e instanceof Error ? e.message : 'تعذر تشغيل المعايرة');
-    }
-  };
 
   const togglePause = async () => {
     if (controlBusy || !feed) return;
@@ -226,6 +205,18 @@ export default function LiveOpportunitiesScreen() {
           >
             {socketLabel}
           </span>
+          <span
+            className="px-3 py-1.5 rounded-full text-[11px] font-bold num"
+            style={{
+              background: feed?.busy ? 'var(--accent-soft)' : 'var(--surface-1)',
+              color: feed?.busy ? 'var(--accent)' : 'var(--text-2)',
+              border: '1px solid var(--border-1)'
+            }}
+            title="المحرك ذاتي بالكامل: يجري دورات المسح والمعايرة تلقائياً — آخر مزامنة للواجهة"
+          >
+            {feed?.busy ? 'جولة مسح تلقائية جارية…' : `تشغيل ذاتي · الدورة ${feed?.cycle ?? 0}`}
+            <span className="text-[10px] font-normal" style={{ color: 'var(--text-3)' }}> · مزامنة قبل {ago(lastSyncAt, now)}</span>
+          </span>
           <button
             onClick={() => void togglePause()}
             disabled={controlBusy || !feed || (!feed.paused && feed.recovery?.state !== 'ready')}
@@ -235,8 +226,6 @@ export default function LiveOpportunitiesScreen() {
           >
             {controlBusy ? 'جارٍ التحديث…' : feed?.paused ? 'استئناف إنشاء الفرص' : 'إيقاف طارئ للفرص الجديدة'}
           </button>
-          <button onClick={() => void runScan()} disabled={feed?.paused} className="px-4 py-2 rounded-lg text-[12px] font-bold disabled:opacity-50" style={{ background: 'var(--accent)', color: '#fff' }}>دورة مسح الآن</button>
-          <button onClick={() => void runCalibration()} disabled={feed?.paused} className="px-4 py-2 rounded-lg text-[12px] font-bold disabled:opacity-50" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}>تشغيل المعايرة</button>
         </div>
       </div>
 
@@ -297,7 +286,6 @@ export default function LiveOpportunitiesScreen() {
         </div>
       </div>
 
-      {busyMsg && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>{busyMsg}</div>}
       {error && <div className="rounded-lg px-3 py-2 text-[12px]" role="alert" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{error} <button className="underline" onClick={() => void load()}>إعادة المحاولة</button></div>}
       {!opportunities.length && feed?.funnel && (
         <div className="rounded-xl p-3 text-[11px] space-y-1" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
@@ -461,7 +449,7 @@ export default function LiveOpportunitiesScreen() {
           })()}
           {!segments.length && (
             <div className="rounded-xl py-16 text-center text-sm" style={{ background: 'var(--surface-1)', color: 'var(--text-3)' }}>
-              لا شرائح بعد — شغّل المعايرة لتوليد إحصاء تاريخي بنفس منطق الفرص
+              لا شرائح بعد — المعايرة التاريخية تجري تلقائياً وتولّد الإحصاء بنفس منطق الفرص
             </div>
           )}
           {segments.length > 0 && (
