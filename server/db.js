@@ -16,7 +16,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-const keyAuthHeaders = (key) => key.split('.').length === 3 ? { Authorization: `Bearer ${key}` } : {};
+const keyAuthHeaders = (key) => key.startsWith('sb_publishable_') || key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` };
 const baseHeaders = {
   apikey: SUPABASE_KEY,
   ...keyAuthHeaders(SUPABASE_KEY),
