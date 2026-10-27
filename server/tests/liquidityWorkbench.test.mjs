@@ -184,6 +184,26 @@ test('point ledger preserves source anchors and leaves missing timestamps unknow
   assert.equal(new Set(points.map((point) => point.point_id)).size, points.length);
 });
 
+test('point ledger collapses pooled duplicates and window-wide structure events across zones', () => {
+  const candles = Array.from({ length: 6 }, (_, i) => ({ time: 1_700_000_000 + i * 3_600 }));
+  const structureEvents = [
+    { type: 'BOS_up', index: 2, price: 106 },
+    { type: 'IDM', index: 1, price: 104 }
+  ];
+  const clusterZone = (id, price) => ({
+    id, symbol: 'BTCUSDT', timeframe: '1h', kind: 'horizontal_bsl', state: 'confirmed',
+    touchPoints: [{ index: 2, price }, { index: 2, price }, { index: 2, price }],
+    structureEvents
+  });
+  const points = deriveZonePoints('liquidity-engine-v2', [clusterZone('z-a', 105), clusterZone('z-b', 105)], candles, 1_800_000_000_000);
+  assert.equal(new Set(points.map((point) => point.point_id)).size, points.length);
+  // كل منطقة: أول لمسة + لمسة عنقودية واحدة بعد انهيار القمة المجمّعة المكررة.
+  assert.equal(points.filter((point) => point.point_type === 'liquidity_touch').length, 4);
+  assert.equal(points.filter((point) => point.role === 'cluster_touch' && point.zone_id === 'z-a').length, 1);
+  assert.equal(points.filter((point) => point.point_type === 'structure_BOS_up').length, 1);
+  assert.equal(points.filter((point) => point.point_type === 'structure_IDM').length, 1);
+});
+
 test('zone matching reports candidate only within one tick, timeframe, direction, and bar', () => {
   const legacy = [{ id: 'old-a', symbol: 'BTCUSDT', timeframe: '1m', kind: 'horizontal_bsl', referenceLevel: 100, createdAt: 1700000000 }];
   const v2 = [{ id: 'new-a', symbol: 'BTCUSDT', timeframe: '1m', kind: 'horizontal_bsl', direction: 'down', referenceLevel: 100.01, createdAt: 1700000000 }];

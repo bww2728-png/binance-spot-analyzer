@@ -17,15 +17,22 @@ const asMillis = (value) => {
   return n < 1e12 ? n * 1000 : n;
 };
 const stableKey = (...values) => createHash('sha256').update(values.map(String).join('|')).digest('hex');
-export const deriveZonePoints = (engine, zones, candles, reviewedAt) => zones.flatMap((zone) => {
+const buildZonePoints = (engine, zone, candles, reviewedAt) => {
   const points = [];
+  const seenIds = new Set();
   const add = ({ type, role, time, index, price, low, high, payload }) => {
     const normalizedTime = asMillis(time);
     const numericPrice = Number(price);
     const numericLow = Number(low);
     const numericHigh = Number(high);
     const pointPayload = { ...(payload ?? {}), zoneKind: zone.kind, zoneState: zone.state ?? null, zoneConfidence: zone.confidence ?? null };
-    const pointId = stableKey(engine, zone.symbol, zone.timeframe, zone.id, type, role, normalizedTime ?? '', index ?? '', Number.isFinite(numericPrice) ? numericPrice : '', Number.isFinite(numericLow) ? numericLow : '', Number.isFinite(numericHigh) ? numericHigh : '');
+    // أحداث البنية سياق مشترك للنافذة كاملة (المحرك يرفق نفس القائمة بكل منطقة)،
+    // فمعرّفها بلا هوية المنطقة وتُسند لأول منطقة تُظهرها؛ بقية النقاط خاصة بالمنطقة.
+    const shared = type.startsWith('structure_');
+    const pointId = stableKey(engine, zone.symbol, zone.timeframe, shared ? 'window' : zone.id, type, role, normalizedTime ?? '', index ?? '', Number.isFinite(numericPrice) ? numericPrice : '', Number.isFinite(numericLow) ? numericLow : '', Number.isFinite(numericHigh) ? numericHigh : '');
+    // القمم/القيعان المجمّعة قد تتكرر حرفيًا داخل المنطقة نفسها؛ النقطة الواحدة تُحفظ مرة واحدة.
+    if (seenIds.has(pointId)) return;
+    seenIds.add(pointId);
     points.push({
       point_id: pointId,
       engine,
@@ -73,7 +80,19 @@ export const deriveZonePoints = (engine, zones, candles, reviewedAt) => zones.fl
     add({ type: `structure_${event.type}`, role: 'confirmation_or_structure', time: event.time ?? candle?.time, index: event.index, price: event.price ?? event.brokenLevel, payload: event });
   }
   return points;
-});
+};
+export const deriveZonePoints = (engine, zones, candles, reviewedAt) => {
+  const seen = new Set();
+  const rows = [];
+  for (const zone of zones) {
+    for (const point of buildZonePoints(engine, zone, candles, reviewedAt)) {
+      if (seen.has(point.point_id)) continue;
+      seen.add(point.point_id);
+      rows.push(point);
+    }
+  }
+  return rows;
+};
 const directionOf = (zone) => {
   const direction = String(zone?.direction ?? '').toLowerCase();
   if (direction === 'up') return 'up';
