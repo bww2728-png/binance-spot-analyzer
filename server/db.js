@@ -42,13 +42,10 @@ async function rest(path, { method = 'GET', body, prefer } = {}) {
 }
 
 async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
+  // القراءة بمفتاح النشر دائمًا؛ الكتابة بمفتاح الخدمة إن توفر، وإلا بمفتاح النشر
+  // وفق عرف المشروع (نفس rest()) وتحت سياسات RLS الخاصة بجداول المختبر.
   const readOnly = method === 'GET' || method === 'HEAD';
-  if (!readOnly && !SUPABASE_SERVICE_ROLE_KEY) {
-    const error = new Error('Supabase configuration error: SUPABASE_SERVICE_ROLE_KEY is required for liquidity workbench writes');
-    error.code = 'LIQUIDITY_WORKBENCH_SERVICE_ROLE_REQUIRED';
-    throw error;
-  }
-  const key = readOnly ? SUPABASE_KEY : SUPABASE_SERVICE_ROLE_KEY;
+  const key = readOnly || !SUPABASE_SERVICE_ROLE_KEY ? SUPABASE_KEY : SUPABASE_SERVICE_ROLE_KEY;
   const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
     method,
     headers: {
