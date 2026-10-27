@@ -16,9 +16,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
+const keyAuthHeaders = (key) => key.startsWith('sb_') ? {} : { Authorization: `Bearer ${key}` };
 const baseHeaders = {
   apikey: SUPABASE_KEY,
-  Authorization: `Bearer ${SUPABASE_KEY}`,
+  ...keyAuthHeaders(SUPABASE_KEY),
   'Content-Type': 'application/json'
 };
 
@@ -53,7 +54,7 @@ async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
     method,
     headers: {
       apikey: key,
-      Authorization: `Bearer ${key}`,
+      ...keyAuthHeaders(key),
       'Content-Type': 'application/json',
       ...(prefer ? { Prefer: prefer } : {})
     },
