@@ -14,7 +14,6 @@ export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 // تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 const keyAuthHeaders = (key) => key.startsWith('sb_publishable_') || key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` };
 const baseHeaders = {
@@ -42,19 +41,14 @@ async function rest(path, { method = 'GET', body, prefer } = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+// اصطلاح المشروع: قراءة وكتابة جداول المختبر الآلية بمفتاح النشر العام عبر RLS
+// (منصة Verdent المُدارة لا تتيح مفتاح service-role، والجداول بيانات سوق آلية بلا بيانات مستخدمين)
 async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
-  const readOnly = method === 'GET' || method === 'HEAD';
-  if (!readOnly && !SUPABASE_SERVICE_ROLE_KEY) {
-    const error = new Error('SUPABASE_SERVICE_ROLE_KEY is required for Liquidity Workbench writes');
-    error.status = 503;
-    throw error;
-  }
-  const key = readOnly ? SUPABASE_KEY : SUPABASE_SERVICE_ROLE_KEY;
   const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
     method,
     headers: {
-      apikey: key,
-      ...keyAuthHeaders(key),
+      apikey: SUPABASE_KEY,
+      ...keyAuthHeaders(SUPABASE_KEY),
       'Content-Type': 'application/json',
       ...(prefer ? { Prefer: prefer } : {})
     },
