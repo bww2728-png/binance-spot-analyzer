@@ -16,7 +16,7 @@ export interface LiquidityWorkbenchZone {
   touchPoints?: Array<{ index?: number; time?: number; price?: number }>;
   trendline?: { points?: Array<{ index?: number; time?: number; price?: number }> } | null;
   fvgs?: Array<{ index?: number; kind?: string; top?: number; bottom?: number }>;
-  structureEvents?: Array<{ type?: string; index?: number; time?: number; price?: number }>;
+  structureEvents?: Array<{ type?: string; index?: number; time?: number; price?: number; brokenLevel?: number }>;
   reasons?: string[];
   engine: string;
   observation: {
@@ -46,6 +46,16 @@ export interface LiquidityWorkbenchPoint {
   last_reviewed_at: number;
   rules_version: string;
   payload: Record<string, unknown>;
+  zone_links?: Array<{
+    engine: string;
+    symbol: string;
+    timeframe: string;
+    zone_id: string;
+    relation_role: string;
+    zone_kind: string;
+    zone_state: string | null;
+    last_seen_at: number;
+  }>;
 }
 
 export interface LiquidityWorkbenchStatus {
@@ -108,6 +118,31 @@ export async function fetchLiquidityWorkbench(timeframe: string, signal?: AbortS
     throw new Error(String(body.error ?? `تعذر تحميل مقارنة السيولة (${response.status})`));
   }
   return response.json() as Promise<LiquidityWorkbenchSnapshot>;
+}
+
+export interface LiquidityWorkbenchContext {
+  available: boolean;
+  reason?: string;
+  contextOnly?: boolean;
+  affectsOpportunityDecisions?: boolean;
+  symbol: string;
+  timeframe: string;
+  recovery?: string;
+  persistence?: string;
+  latestScan?: number | null;
+  currentPriceAt?: number | null;
+  legacy?: LiquidityWorkbenchZone[];
+  v2?: LiquidityWorkbenchZone[];
+}
+
+export async function fetchLiquidityWorkbenchContext(symbol: string, timeframe: string, signal?: AbortSignal): Promise<LiquidityWorkbenchContext> {
+  const query = new URLSearchParams({ symbol, timeframe });
+  const response = await fetch(`/api/liquidity-workbench/context?${query}`, { signal });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(String(body.error ?? `تعذر تحميل سياق مناطق السيولة (${response.status})`));
+  }
+  return response.json() as Promise<LiquidityWorkbenchContext>;
 }
 
 export async function fetchLiquidityWorkbenchPoints(timeframe: string, engine: string, zoneId: string, signal?: AbortSignal): Promise<LiquidityWorkbenchPoint[]> {

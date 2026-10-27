@@ -12,8 +12,9 @@ import { attachZonePrimitive } from './ZoneBoxesPrimitive';
 import type { LiquidityWorkbenchZone } from '../lib/liquidityWorkbench';
 
 type WorkbenchCandle = { time: number; open: number; high: number; low: number; close: number; volume: number };
-type ChartData = { candles: WorkbenchCandle[]; zones: LiquidityWorkbenchZone[] };
+type ChartData = { candles: WorkbenchCandle[]; zones: LiquidityWorkbenchZone[]; pointsVisible: boolean };
 type Coordinate = { tx: (time: number) => number | null; py: (price: number) => number | null };
+type DrawPoint = { type: string; time?: number; index?: number; price?: number; low?: number; high?: number };
 
 const timestampSeconds = (value: number | null | undefined) => {
   const time = Number(value);
@@ -62,17 +63,61 @@ function drawZones(ctx: CanvasRenderingContext2D, coordinate: Coordinate, data: 
   }
 }
 
-export default function LiquidityWorkbenchChart({ candles, zones, dataSource, height = 460 }: {
+function drawPoints(ctx: CanvasRenderingContext2D, coordinate: Coordinate, data: ChartData) {
+  if (!data.pointsVisible || !data.candles.length) return;
+  const candlesByIndex = data.candles;
+  for (const zone of data.zones) {
+    const points: DrawPoint[] = [
+      ...(zone.touchPoints ?? []).map((point) => ({ type: zone.kind.startsWith('trendline_') ? 'trendline_anchor' : zone.kind === 'supply' || zone.kind === 'demand' ? 'origin_candle' : 'liquidity_touch', time: point.time, index: point.index, price: point.price })),
+      ...(zone.trendline?.points ?? []).map((point) => ({ type: 'trendline_anchor', time: point.time, index: point.index, price: point.price })),
+      ...(zone.fvgs ?? []).map((point) => ({ type: 'fvg', index: point.index, price: (Number(point.top) + Number(point.bottom)) / 2, low: point.bottom, high: point.top })),
+      ...(zone.structureEvents ?? []).map((point) => ({ type: `structure_${point.type}`, time: point.time, index: point.index, price: point.price ?? point.brokenLevel }))
+    ];
+    const color = zone.engine === 'liquidity-engine-v2' ? '#2563eb' : '#089981';
+    for (const point of points) {
+      const sourceTime = timestampSeconds(point.time) ?? candlesByIndex[Number(point.index)]?.time;
+      if (sourceTime == null || point.price == null || !Number.isFinite(Number(point.price))) continue;
+      const x = coordinate.tx(sourceTime);
+      const y = coordinate.py(Number(point.price));
+      if (x == null || y == null) continue;
+      if (point.type === 'fvg' && Number.isFinite(Number(point.high)) && Number.isFinite(Number(point.low))) {
+        const yHigh = coordinate.py(Number(point.high));
+        const yLow = coordinate.py(Number(point.low));
+        if (yHigh == null || yLow == null) continue;
+        ctx.fillStyle = zone.engine === 'liquidity-engine-v2' ? 'rgba(217,119,6,.15)' : 'rgba(8,153,129,.12)';
+        ctx.strokeStyle = zone.engine === 'liquidity-engine-v2' ? 'rgba(217,119,6,.75)' : 'rgba(8,153,129,.65)';
+        ctx.fillRect(x - 3, yHigh, 6, Math.max(2, yLow - yHigh));
+        ctx.strokeRect(x - 3, yHigh, 6, Math.max(2, yLow - yHigh));
+      } else if (point.type.startsWith('structure_')) {
+        ctx.fillStyle = '#f59e0b';
+        ctx.beginPath();
+        ctx.moveTo(x, y - 5);
+        ctx.lineTo(x - 4, y + 3);
+        ctx.lineTo(x + 4, y + 3);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(x, y, point.type === 'origin_candle' ? 4 : 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+export default function LiquidityWorkbenchChart({ candles, zones, dataSource, height = 460, pointsVisible = false }: {
   candles: WorkbenchCandle[];
   zones: LiquidityWorkbenchZone[];
   dataSource: string;
   height?: number;
+  pointsVisible?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
-  const dataRef = useRef<ChartData>({ candles: [], zones: [] });
+  const dataRef = useRef<ChartData>({ candles: [], zones: [], pointsVisible: false });
   const hasFittedRef = useRef(false);
   const isSynthetic = /synthetic|fixture|mock|test/i.test(dataSource);
   const sourceLabel = isSynthetic
@@ -101,7 +146,10 @@ export default function LiquidityWorkbenchChart({ candles, zones, dataSource, he
       priceLineVisible: false
     });
     chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-    attachZonePrimitive(candleSeries, 'bottom', (context, coordinate) => drawZones(context, coordinate, dataRef.current));
+    attachZonePrimitive(candleSeries, 'bottom', (context, coordinate) => {
+      drawZones(context, coordinate, dataRef.current);
+      drawPoints(context, coordinate, dataRef.current);
+    });
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
@@ -120,7 +168,7 @@ export default function LiquidityWorkbenchChart({ candles, zones, dataSource, he
   }, [height]);
 
   useEffect(() => {
-    dataRef.current = { candles, zones };
+    dataRef.current = { candles, zones, pointsVisible };
     const candleSeries = candleSeriesRef.current;
     const volumeSeries = volumeSeriesRef.current;
     const chart = chartRef.current;
@@ -135,7 +183,7 @@ export default function LiquidityWorkbenchChart({ candles, zones, dataSource, he
       chart.timeScale().fitContent();
       hasFittedRef.current = true;
     }
-  }, [candles, zones]);
+  }, [candles, zones, pointsVisible]);
 
   return (
     <div className="relative overflow-hidden rounded-xl" style={{ background: 'var(--surface-0)' }}>
@@ -149,6 +197,7 @@ export default function LiquidityWorkbenchChart({ candles, zones, dataSource, he
         <span><b style={{ color: '#089981' }}>▬</b> المحرك الحالي</span>
         <span><b style={{ color: '#2563eb' }}>▬</b> v2</span>
         <span><b style={{ color: '#94a3b8' }}>┄</b> مستوى المرجع</span>
+        {pointsVisible && <span><b style={{ color: '#f59e0b' }}>▲</b> بنية · <b style={{ color: '#089981' }}>●</b> نقاط · <b style={{ color: '#d97706' }}>▧</b> فجوات</span>}
       </div>
       <div className="absolute top-2 left-2 z-10 rounded px-2 py-1 text-[10px] font-semibold" style={{ background: isSynthetic ? 'rgba(180,83,9,.92)' : 'rgba(10,14,22,.8)', color: '#fff' }}>{sourceLabel}</div>
       <div className="absolute bottom-1 left-2 z-10 text-[9px]" style={{ color: 'var(--text-3)' }}>{isSynthetic ? 'معاينة ببيانات اختبار اصطناعية · لا تمثل أسعار السوق' : `${sourceLabel} · للعرض والتحقق اليدوي فقط`}</div>

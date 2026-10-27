@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import LiquidityContextPanel from './LiquidityContextPanel';
 import { useStore } from '../store/useStore';
 import type { ChartLevel, Strategy2DirectionRow, Strategy2Opportunity } from '../lib/types';
 
@@ -175,6 +176,8 @@ export default function OppDrawer({ opps, index, onClose, onSelect, dirBySymbol,
             </div>
           )}
         </div>
+
+        <LiquidityContextPanel symbol={o.symbol} timeframe={o.tf} />
 
         {/* تعليق بشري — توثيق فقط */}
         <div className="card p-3">

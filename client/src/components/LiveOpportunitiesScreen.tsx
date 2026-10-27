@@ -9,6 +9,7 @@ import { TIMEFRAMES } from '../lib/types';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
 import PersistedOpportunityHistory from './PersistedOpportunityHistory';
+import LiquidityContextPanel from './LiquidityContextPanel';
 import { useScreenState } from '../lib/useScreenState';
 import { formatPrice } from '../lib/formatPrice';
 
@@ -719,6 +720,8 @@ function OpportunityCard({ op, now, targetRate, onChart, tick, seg }: { op: BuyO
       <ul className="text-[11px] space-y-0.5 list-disc pr-4" style={{ color: 'var(--text-2)' }}>
         {op.reasons.slice(0, 5).map((r, i) => <li key={i}>{r}</li>)}
       </ul>
+
+      <LiquidityContextPanel symbol={op.symbol} timeframe={op.timeframe} />
 
       <div className="flex items-center justify-between gap-2 pt-1">
         <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>اكتُشفت قبل {ago(op.detectedAt, now)}</span>

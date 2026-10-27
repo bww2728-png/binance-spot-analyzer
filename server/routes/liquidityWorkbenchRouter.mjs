@@ -6,6 +6,15 @@ export function createLiquidityWorkbenchRouter({ getWorkbench, timeframes }) {
     const workbench = getWorkbench();
     res.json(workbench?.status() ?? { enabled: false, recovery: 'pending', error: 'الخدمة لم تتهيأ بعد' });
   });
+  router.get('/context', (req, res) => {
+    const timeframe = String(req.query.timeframe ?? '');
+    const symbol = String(req.query.symbol ?? '').toUpperCase();
+    if (!timeframes.includes(timeframe)) return res.status(400).json({ error: 'فريم غير صالح' });
+    if (!/^[A-Z0-9]{3,20}$/.test(symbol)) return res.status(400).json({ error: 'رمز غير صالح' });
+    const workbench = getWorkbench();
+    if (!workbench) return res.status(503).json({ error: 'الخدمة لم تتهيأ بعد' });
+    return res.json(workbench.context(symbol, timeframe));
+  });
   router.get('/points', async (req, res) => {
     const timeframe = String(req.query.timeframe ?? '');
     const engine = String(req.query.engine ?? '');

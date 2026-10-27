@@ -34,6 +34,8 @@ test('منظومة السيولة تستعيد الشموع والمسوح وا�
     assert.equal(recovered.scanRows, 2);
     assert.equal(recovered.candleRows, 1000);
     assert.equal(recovered.restoredEventKeys.includes('process-recovery-fixture-event'), true);
+    assert.deepEqual(recovered.restoredPointIds, ['b'.repeat(64)]);
+    assert.deepEqual(recovered.restoredPointZoneIds, ['process-recovery-zone-a', 'process-recovery-zone-b']);
     assert.equal(recoveredAgain.eventRows, recovered.eventRows);
     assert.deepEqual(recoveredAgain.restoredEventKeys, recovered.restoredEventKeys);
   } finally {

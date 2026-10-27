@@ -42,10 +42,13 @@ async function rest(path, { method = 'GET', body, prefer } = {}) {
 }
 
 async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
-  // القراءة بمفتاح النشر دائمًا؛ الكتابة بمفتاح الخدمة إن توفر، وإلا بمفتاح النشر
-  // وفق عرف المشروع (نفس rest()) وتحت سياسات RLS الخاصة بجداول المختبر.
   const readOnly = method === 'GET' || method === 'HEAD';
-  const key = readOnly || !SUPABASE_SERVICE_ROLE_KEY ? SUPABASE_KEY : SUPABASE_SERVICE_ROLE_KEY;
+  if (!readOnly && !SUPABASE_SERVICE_ROLE_KEY) {
+    const error = new Error('SUPABASE_SERVICE_ROLE_KEY is required for Liquidity Workbench writes');
+    error.status = 503;
+    throw error;
+  }
+  const key = readOnly ? SUPABASE_KEY : SUPABASE_SERVICE_ROLE_KEY;
   const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
     method,
     headers: {
@@ -412,10 +415,28 @@ const db = {
     upsertScan: (row) => restWorkbench('/liquidity_workbench_scans?on_conflict=engine,symbol,timeframe', {
       method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=minimal'
     }),
-    upsertPoints: (rows) => restWorkbench('/liquidity_workbench_points?on_conflict=point_id', {
+    upsertPoints: async (rows) => {
+      const links = rows.flatMap(({ zone_links = [] }) => zone_links);
+      const pointRows = rows.map(({ zone_links, ...row }) => row);
+      await restWorkbench('/liquidity_workbench_points?on_conflict=point_id', {
+        method: 'POST', body: pointRows, prefer: 'resolution=merge-duplicates,return=minimal'
+      });
+      if (links.length) await db.liquidityWorkbench.upsertPointLinks(links);
+    },
+    upsertPointLinks: (rows) => restWorkbench('/liquidity_workbench_point_zone_links?on_conflict=point_id,engine,symbol,timeframe,zone_id,relation_role', {
       method: 'POST', body: rows, prefer: 'resolution=merge-duplicates,return=minimal'
     }),
-    listPoints: ({ symbol, timeframe, engine, zoneId, limit = 500 }) => {
+    listPointLinks: ({ symbol, timeframe, engine, zoneId, pointIds, limit = 2000 }) => {
+      const q = new URLSearchParams({
+        select: '*', symbol: `eq.${symbol}`, timeframe: `eq.${timeframe}`,
+        order: 'last_seen_at.desc', limit: String(Math.min(Math.max(Number(limit) || 2000, 1), 2000))
+      });
+      if (engine) q.set('engine', `eq.${engine}`);
+      if (zoneId) q.set('zone_id', `eq.${zoneId}`);
+      if (pointIds?.length) q.set('point_id', `in.(${pointIds.join(',')})`);
+      return restWorkbench(`/liquidity_workbench_point_zone_links?${q}`);
+    },
+    listPoints: ({ symbol, timeframe, engine, zoneId, pointIds, limit = 500 }) => {
       const q = new URLSearchParams({
         select: '*',
         symbol: `eq.${symbol}`,
@@ -425,6 +446,7 @@ const db = {
       });
       if (engine) q.set('engine', `eq.${engine}`);
       if (zoneId) q.set('zone_id', `eq.${zoneId}`);
+      if (pointIds?.length) q.set('point_id', `in.(${pointIds.join(',')})`);
       return restWorkbench(`/liquidity_workbench_points?${q}`);
     },
     insertZoneEvent: (row) => restWorkbench('/liquidity_workbench_events?on_conflict=idempotency_key', {

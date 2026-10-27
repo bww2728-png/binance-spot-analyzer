@@ -91,7 +91,11 @@ function ZoneList({ title, zones, color, selectedKey, points, pointsLoading, poi
                     {pointsLoading && <div role="status" className="text-[10px]" style={{ color: 'var(--text-2)' }}>جارٍ تحميل سجل النقاط من التخزين الدائم…</div>}
                     {pointsError && <div role="alert" className="text-[10px]" style={{ color: '#b91c1c' }}>{pointsError}</div>}
                     {!pointsLoading && !pointsError && !points.length && <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>لا توجد نقاط محفوظة لهذه المنطقة؛ لا يُستنتج من ذلك أن المنطقة لم تكن لها نقاط تكوين.</div>}
-                    {!!points.length && <ol className="max-h-48 space-y-1 overflow-auto text-[10px]">{points.map((point) => <li key={point.point_id} className="flex flex-wrap justify-between gap-2 rounded border p-1.5" style={{ borderColor: 'var(--border-1)', color: 'var(--text-2)' }}><span>{pointTypeLabel(point.point_type)} · {pointRoleLabel(point.role)} · {asDate(point.point_time)}</span><span className="font-mono" dir="ltr">{point.price == null ? `${money(point.price_low)}–${money(point.price_high)}` : money(point.price)}</span></li>)}</ol>}
+                    {!!points.length && <ol className="max-h-48 space-y-1 overflow-auto text-[10px]">{points.map((point) => {
+                      const selectedLink = point.zone_links?.find((link) => link.zone_id === zone.id);
+                      const otherZones = point.zone_links?.filter((link) => link.zone_id !== zone.id) ?? [];
+                      return <li key={point.point_id} className="flex flex-wrap justify-between gap-2 rounded border p-1.5" style={{ borderColor: 'var(--border-1)', color: 'var(--text-2)' }}><span>{pointTypeLabel(point.point_type)} · {pointRoleLabel(selectedLink?.relation_role ?? point.role)} · {asDate(point.point_time)}{otherZones.length > 0 && <span className="block text-[9px]" style={{ color: 'var(--accent)' }}>نقطة مشتركة مرتبطة أيضًا بـ {otherZones.map((link) => `${link.zone_kind} (${link.zone_id})`).join('، ')}</span>}</span><span className="font-mono" dir="ltr">{point.price == null ? `${money(point.price_low)}–${money(point.price_high)}` : money(point.price)}</span></li>;
+                    })}</ol>}
                   </div>
                 )}
               </article>
@@ -105,6 +109,7 @@ function ZoneList({ title, zones, color, selectedKey, points, pointsLoading, poi
 
 export default function LiquidityWorkbenchScreen() {
   const [timeframe, setTimeframe] = useState('1h');
+  const [pointsVisible, setPointsVisible] = useState(false);
   const [snapshot, setSnapshot] = useState<LiquidityWorkbenchSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<ManualNote[]>(() => readNotes('1h'));
@@ -174,6 +179,7 @@ export default function LiquidityWorkbenchScreen() {
   const { busy, refresh } = useVisiblePoll(refreshSnapshot, { intervalMs: 5000, immediate: true });
 
   const allZones = useMemo(() => [...(snapshot?.legacy ?? []), ...(snapshot?.v2 ?? [])], [snapshot]);
+  const sourcePointCount = allZones.reduce((total, zone) => total + (zone.touchPoints?.length ?? 0) + (zone.trendline?.points?.length ?? 0) + (zone.fvgs?.length ?? 0) + (zone.structureEvents?.length ?? 0), 0);
   const loadedFrames = snapshot?.status.timeframes.length ? snapshot.status.timeframes : TIMEFRAMES;
 
   const addNote = () => {
@@ -216,7 +222,11 @@ export default function LiquidityWorkbenchScreen() {
       {snapshot?.status.persistence === 'unavailable' && <div role="alert" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#ef444455', background: '#ef444412', color: '#b91c1c' }}>التخزين الدائم غير متاح؛ أوقف الخادم المسح بدل عرض نتائج غير محفوظة على أنها موثوقة. لا توجد ضمانة لاستعادة الحالة حتى يعود التخزين.</div>}
       {priceOld && <div role="status" className="rounded-lg border px-3 py-2 text-xs" style={{ borderColor: '#f59e0b55', background: '#f59e0b12', color: '#b45309' }}>لا يوجد سعر حديث مثبت الآن؛ ستظل المناطق معروضة، لكن قياس المسافة موسوم بأنه قديم أو غير متاح.</div>}
 
-      <LiquidityWorkbenchChart candles={snapshot?.candles ?? []} zones={allZones} dataSource={snapshot?.dataSource ?? 'unknown'} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>نقاط/أحداث المصدر المتاحة في بيانات الشارت: {sourcePointCount}؛ قد تتكرر بين المحركين والمناطق.</div>
+        <button type="button" aria-pressed={pointsVisible} className="btn btn-secondary text-xs" onClick={() => setPointsVisible((visible) => !visible)}>{pointsVisible ? 'إخفاء نقاط التكوين' : 'إظهار نقاط التكوين'}</button>
+      </div>
+      <LiquidityWorkbenchChart candles={snapshot?.candles ?? []} zones={allZones} dataSource={snapshot?.dataSource ?? 'unknown'} pointsVisible={pointsVisible} />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ZoneList title="نتائج المحرك الحالي — دون تعديل" zones={snapshot?.legacy ?? []} color="#089981" selectedKey={selectedPointZone} points={storedPoints} pointsLoading={pointsLoading} pointsError={pointsError} onTogglePoints={toggleZonePoints} />

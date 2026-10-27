@@ -29,6 +29,8 @@ export function withDurablePersistence(base) {
     upsertCandles: (...args) => call(() => base.upsertCandles(...args)),
     upsertScan: (...args) => call(() => base.upsertScan(...args)),
     upsertPoints: (...args) => call(() => base.upsertPoints(...args)),
+    ...(typeof base.upsertPointLinks === 'function' ? { upsertPointLinks: (...args) => call(() => base.upsertPointLinks(...args)) } : {}),
+    ...(typeof base.listPointLinks === 'function' ? { listPointLinks: (...args) => call(() => base.listPointLinks(...args)) } : {}),
     listPoints: (...args) => call(() => base.listPoints(...args)),
     insertZoneEvent: (...args) => call(() => base.insertZoneEvent(...args)),
     insertSample: (...args) => call(() => base.insertSample(...args)),

@@ -17,23 +17,40 @@ const asMillis = (value) => {
   return n < 1e12 ? n * 1000 : n;
 };
 const stableKey = (...values) => createHash('sha256').update(values.map(String).join('|')).digest('hex');
+const candleTimeAt = (candles, index) => {
+  if (!Number.isInteger(Number(index))) return null;
+  const candle = candles?.[Number(index)];
+  return Array.isArray(candle) ? asMillis(candle[0]) : asMillis(candle?.time);
+};
 const buildZonePoints = (engine, zone, candles, reviewedAt) => {
-  const points = [];
-  const seenIds = new Set();
-  const add = ({ type, role, time, index, price, low, high, payload }) => {
-    const normalizedTime = asMillis(time);
+  const points = new Map();
+  const add = ({ type, role, time, index, price, low, high, payload, identity = '' }) => {
+    const normalizedTime = asMillis(time) ?? candleTimeAt(candles, index);
     const numericPrice = Number(price);
     const numericLow = Number(low);
     const numericHigh = Number(high);
-    const pointPayload = { ...(payload ?? {}), zoneKind: zone.kind, zoneState: zone.state ?? null, zoneConfidence: zone.confidence ?? null };
-    // أحداث البنية سياق مشترك للنافذة كاملة (المحرك يرفق نفس القائمة بكل منطقة)،
-    // فمعرّفها بلا هوية المنطقة وتُسند لأول منطقة تُظهرها؛ بقية النقاط خاصة بالمنطقة.
-    const shared = type.startsWith('structure_');
-    const pointId = stableKey(engine, zone.symbol, zone.timeframe, shared ? 'window' : zone.id, type, role, normalizedTime ?? '', index ?? '', Number.isFinite(numericPrice) ? numericPrice : '', Number.isFinite(numericLow) ? numericLow : '', Number.isFinite(numericHigh) ? numericHigh : '');
-    // القمم/القيعان المجمّعة قد تتكرر حرفيًا داخل المنطقة نفسها؛ النقطة الواحدة تُحفظ مرة واحدة.
-    if (seenIds.has(pointId)) return;
-    seenIds.add(pointId);
-    points.push({
+    const finitePrice = Number.isFinite(numericPrice) ? numericPrice : '';
+    const finiteLow = Number.isFinite(numericLow) ? numericLow : '';
+    const finiteHigh = Number.isFinite(numericHigh) ? numericHigh : '';
+    const sourcePosition = normalizedTime ?? `index:${index ?? ''}`;
+    const pointId = stableKey(engine, zone.symbol, zone.timeframe, type, role, sourcePosition, finitePrice, finiteLow, finiteHigh, identity);
+    const relation = {
+      point_id: pointId,
+      engine,
+      symbol: zone.symbol,
+      timeframe: zone.timeframe,
+      zone_id: String(zone.id),
+      relation_role: role,
+      zone_kind: zone.kind,
+      zone_state: zone.state ?? null,
+      last_seen_at: reviewedAt
+    };
+    const existing = points.get(pointId);
+    if (existing) {
+      if (!existing.zone_links.some((link) => link.zone_id === relation.zone_id && link.relation_role === relation.relation_role)) existing.zone_links.push(relation);
+      return;
+    }
+    points.set(pointId, {
       point_id: pointId,
       engine,
       symbol: zone.symbol,
@@ -50,7 +67,8 @@ const buildZonePoints = (engine, zone, candles, reviewedAt) => {
       confirmed_at: asMillis(zone.confirmedAt),
       last_reviewed_at: reviewedAt,
       rules_version: engine,
-      payload: pointPayload
+      payload: { ...(payload ?? {}), zoneKind: zone.kind, zoneState: zone.state ?? null, zoneConfidence: zone.confidence ?? null },
+      zone_links: [relation]
     });
   };
   for (const [pointIndex, point] of (zone.touchPoints ?? []).entries()) {
@@ -58,40 +76,45 @@ const buildZonePoints = (engine, zone, candles, reviewedAt) => {
     add({
       type: isOrigin ? 'origin_candle' : zone.kind.startsWith('trendline_') ? 'trendline_anchor' : 'liquidity_touch',
       role: isOrigin ? 'zone_origin' : pointIndex === 0 ? 'first_touch' : 'cluster_touch',
-      time: point.time ?? candles?.[point.index]?.time,
+      time: point.time,
       index: point.index,
       price: point.price,
       payload: { form: zone.form ?? null }
     });
   }
-  for (const [pointIndex, point] of (zone.trendline?.points ?? []).entries()) {
-    add({ type: 'trendline_anchor', role: `anchor_${pointIndex + 1}`, time: point.time ?? candles?.[point.index]?.time, index: point.index, price: point.price });
+  for (const point of zone.trendline?.points ?? []) {
+    add({ type: 'trendline_anchor', role: 'anchor', time: point.time, index: point.index, price: point.price });
   }
   for (const gap of zone.fvgs ?? []) {
-    const candle = candles?.[gap.index];
     add({
-      type: 'fvg', role: 'zone_gap', time: candle?.time ?? gap.time, index: gap.index,
+      type: 'fvg', role: 'zone_gap', time: gap.time, index: gap.index,
       price: (Number(gap.top) + Number(gap.bottom)) / 2, low: gap.bottom, high: gap.top,
-      payload: { kind: gap.kind }
+      payload: { kind: gap.kind }, identity: gap.kind ?? ''
     });
   }
   for (const event of zone.structureEvents ?? []) {
-    const candle = candles?.[event.index];
-    add({ type: `structure_${event.type}`, role: 'confirmation_or_structure', time: event.time ?? candle?.time, index: event.index, price: event.price ?? event.brokenLevel, payload: event });
+    add({
+      type: `structure_${event.type}`, role: 'confirmation_or_structure', time: event.time, index: event.index,
+      price: event.price ?? event.brokenLevel, payload: event
+    });
   }
-  return points;
+  return [...points.values()];
 };
 export const deriveZonePoints = (engine, zones, candles, reviewedAt) => {
-  const seen = new Set();
-  const rows = [];
+  const points = new Map();
   for (const zone of zones) {
     for (const point of buildZonePoints(engine, zone, candles, reviewedAt)) {
-      if (seen.has(point.point_id)) continue;
-      seen.add(point.point_id);
-      rows.push(point);
+      const existing = points.get(point.point_id);
+      if (!existing) {
+        points.set(point.point_id, point);
+        continue;
+      }
+      for (const relation of point.zone_links) {
+        if (!existing.zone_links.some((link) => link.zone_id === relation.zone_id && link.relation_role === relation.relation_role)) existing.zone_links.push(relation);
+      }
     }
   }
-  return rows;
+  return [...points.values()];
 };
 const directionOf = (zone) => {
   const direction = String(zone?.direction ?? '').toLowerCase();
@@ -725,5 +748,60 @@ export function createLiquidityWorkbench({
     };
   };
 
-  return { start, stop, snapshot, listPoints: ({ timeframe, engine, zoneId }) => repository.listPoints({ symbol, timeframe, engine, zoneId, limit: 2000 }), status: () => ({ ...state, persistence: repository.persistenceMode ?? 'supabase', persistenceDetails: repository.persistenceStatus?.() ?? null }), get started() { return started; } };
+  const listPoints = async ({ timeframe, engine, zoneId }) => {
+    const filters = { symbol, timeframe, engine, limit: 2000 };
+    const legacyRows = await repository.listPoints({ ...filters, zoneId });
+    if (!repository.listPointLinks || !repository.listPoints || !zoneId) return legacyRows;
+    const directLinks = await repository.listPointLinks({ ...filters, zoneId, limit: 2000 });
+    const pointIds = [...new Set(directLinks.map((link) => link.point_id).filter((id) => /^[a-f0-9]{64}$/i.test(String(id))))];
+    if (!pointIds.length) return legacyRows;
+    const [linkedRows, allLinks] = await Promise.all([
+      repository.listPoints({ ...filters, pointIds, limit: 2000 }),
+      repository.listPointLinks({ ...filters, pointIds, limit: 2000 })
+    ]);
+    const linksByPoint = new Map();
+    for (const link of allLinks) {
+      const links = linksByPoint.get(link.point_id) ?? [];
+      links.push(link);
+      linksByPoint.set(link.point_id, links);
+    }
+    const relationRows = new Map([...legacyRows, ...linkedRows].map((point) => [point.point_id, linksByPoint.get(point.point_id) ?? []]));
+    const logicalPoints = new Map();
+    for (const point of new Map([...legacyRows, ...linkedRows].map((row) => [row.point_id, row])).values()) {
+      const sourcePosition = point.point_time ?? `index:${point.candle_index ?? ''}`;
+      const logicalKey = [point.engine, point.symbol, point.timeframe, point.point_type, sourcePosition, point.price ?? '', point.price_low ?? '', point.price_high ?? ''].join('|');
+      const zoneLinks = relationRows.get(point.point_id) ?? [];
+      const existing = logicalPoints.get(logicalKey);
+      if (!existing) {
+        logicalPoints.set(logicalKey, { ...point, zone_links: zoneLinks });
+        continue;
+      }
+      const selected = Number(point.last_reviewed_at ?? 0) > Number(existing.last_reviewed_at ?? 0) ? point : existing;
+      const mergedLinks = [...existing.zone_links, ...zoneLinks];
+      const uniqueLinks = new Map(mergedLinks.map((link) => [`${link.zone_id}|${link.relation_role}`, link]));
+      logicalPoints.set(logicalKey, { ...selected, zone_links: [...uniqueLinks.values()] });
+    }
+    return [...logicalPoints.values()];
+  };
+
+  const context = (requestedSymbol, timeframe) => {
+    if (!state.timeframes.includes(timeframe)) return { available: false, reason: 'unsupported_timeframe', symbol: requestedSymbol, timeframe };
+    if (String(requestedSymbol).toUpperCase() !== symbol) return { available: false, reason: 'symbol_not_monitored', symbol: requestedSymbol, timeframe };
+    const current = snapshot(timeframe);
+    return {
+      available: true,
+      contextOnly: true,
+      affectsOpportunityDecisions: false,
+      symbol,
+      timeframe,
+      recovery: current.status.recovery,
+      persistence: current.status.persistence,
+      latestScan: current.latestScan,
+      currentPriceAt: current.currentPriceAt,
+      legacy: current.legacy,
+      v2: current.v2
+    };
+  };
+
+  return { start, stop, snapshot, context, listPoints, status: () => ({ ...state, persistence: repository.persistenceMode ?? 'supabase', persistenceDetails: repository.persistenceStatus?.() ?? null }), get started() { return started; } };
 }
