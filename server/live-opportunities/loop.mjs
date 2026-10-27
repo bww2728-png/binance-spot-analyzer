@@ -1485,6 +1485,16 @@ export function createLiveOpportunityEngine(deps) {
         status.error = `فشل تحميل المعايرة: ${error?.message ?? error}`;
         log.error?.('[live-opp] calibration restore failed:', status.error);
       });
+    } else {
+      // الإنتاج أيضاً: تُحمَّل المعايرة المحفوظة عند البدء، وإن لم توجد محفوظة تُشغَّل
+      // أول معايرة تلقائياً بدل انتظار أول مجدول (6 ساعات) — المحرك ذاتي بلا أزرار.
+      void loadCalibration().then(() => {
+        if (!calibration.at) return runCalibration().catch(() => undefined);
+        return undefined;
+      }).catch(error => {
+        status.error = `فشل تحميل المعايرة: ${error?.message ?? error}`;
+        log.error?.('[live-opp] calibration restore failed:', status.error);
+      });
     }
     cycleTimer = setInterval(() => { void runCycle(); }, cfg.cycleMs);
     tickTimer = setInterval(tickPublished, cfg.tickMs);
