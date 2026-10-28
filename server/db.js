@@ -402,15 +402,16 @@ const db = {
     },
     /** السجل العميق للقطات الآلية: صفحات تنازلية بلا سقف الـ60 (للتبويب التاريخي)
      * جلب مصغر: ts,symbol,meta فقط — meta الضخم هو المطلوب والباقي حشو يضخم النقل */
-    autoHistory: async ({ symbol, from, to, limit, offset } = {}) => {
+    autoHistory: async ({ symbol, from, to, limit, offset, beforeId, orderById = false } = {}) => {
       const q = new URLSearchParams({
-        type: 'eq.auto_zones_snapshot', select: 'id,ts,symbol,meta', order: 'ts.desc,id.desc',
+        type: 'eq.auto_zones_snapshot', select: 'id,ts,symbol,meta', order: orderById ? 'id.desc' : 'ts.desc,id.desc',
         limit: String(Math.min(Number(limit) || 200, 500))
       });
       if (symbol) q.set('symbol', `eq.${String(symbol).toUpperCase()}`);
       if (from) q.set('ts', `gte.${Number(from)}`);
       if (to) q.set('ts', `lte.${Number(to)}`);
       if (offset) q.set('offset', String(Number(offset)));
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
       return rest(`/events_log?${q}`);
     },
     /** صورة شارت محفوظة لحظة التحديد الآلي — حدث إلحاقي (نفس نمط case_images) */
@@ -699,9 +700,10 @@ const db = {
       },
       prefer: 'return=representation'
     }),
-    list: async ({ symbol, limit } = {}) => {
-      const q = new URLSearchParams({ type: 'like.decision_*', select: '*', order: 'ts.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
+    list: async ({ symbol, limit, beforeId, orderById = false } = {}) => {
+      const q = new URLSearchParams({ type: 'like.decision_*', select: '*', order: orderById ? 'id.desc' : 'ts.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
       const rows = await rest(`/events_log?${q}`);
       return rows.map(toCardRow);
     },

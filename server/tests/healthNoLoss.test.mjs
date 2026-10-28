@@ -9,9 +9,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compactSample } from '../health.mjs';
 
-/** المحركات المسجَّلة فعلاً في التشغيل (أسماؤها كما تظهر في الصحة) */
+/** المحركات المسجَّلة فعلاً في التشغيل (أسماؤها كما تظهر في الصحة) — محرك الباك تيست أُوقف بعد حذف واجهته */
 const REAL_ENGINES = [
-  'shariah-resolver', 'liquidity-zones', 'live-opportunities', 'backtest',
+  'shariah-resolver', 'liquidity-zones', 'live-opportunities',
   'strategy2', 'market-streams', 'retention', 'storage-watcher', 'workers'
 ];
 

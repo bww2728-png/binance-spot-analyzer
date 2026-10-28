@@ -14,36 +14,23 @@ import Skeleton from './ui/Skeleton';
  */
 
 const SCREEN_LABELS: Record<Screen, string> = {
-  board: 'لوحة التحليل',
-  cases: 'الأرشيف الكامل',
-  autoHistory: 'السجل الآلي',
-  backtest: 'الباك تيست والفرص',
   liveOpportunities: 'الفرص الحية',
   strategy2: 'الفرص الحية — استراتيجيتي',
-  notifications: 'الإشعارات',
   liquidityZones: 'مناطق السيولة القديمة',
   liquidityV2: 'محرك السيولة الجديد',
-  liquidityWorkbench: 'مختبر السيولة الموحد',
   customLiquidity: 'جولة مخصصة',
-  dashboard: 'لوحة التحكم',
-  settings: 'الإعدادات والفلاتر'
+  /* صفحة الفحص المخفي — تُفتح برابط #/syscheck فقط ولا تظهر في القوائم */
+  dashboard: 'فحص النظام (مخفي)'
 };
 
 /* استيراد كسول لكل شاشة — يقسّم الحزمة ويُحمّل الشاشة عند أول زيارة فقط */
 const LOADERS: Record<Screen, () => Promise<{ default: ComponentType }>> = {
-  board: () => import('./AnalysisBoard'),
-  cases: () => import('./CaseLedger'),
-  autoHistory: () => import('./AutoHistory'),
-  backtest: () => import('./BacktestScreen'),
   liveOpportunities: () => import('./LiveOpportunitiesScreen'),
   strategy2: () => import('./StrategyScreen'),
-  notifications: () => import('./NotificationCenter'),
   liquidityZones: () => import('./LiquidityZonesScreen'),
   liquidityV2: () => import('./LiquidityV2Screen'),
-  liquidityWorkbench: () => import('./LiquidityWorkbenchScreen'),
   customLiquidity: () => import('./CustomLiquidityScreen'),
-  dashboard: () => import('./Dashboard'),
-  settings: () => import('./SettingsPanel')
+  dashboard: () => import('./Dashboard')
 };
 
 const LazyScreens = Object.fromEntries(

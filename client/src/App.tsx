@@ -3,6 +3,7 @@ import { useStore } from './store/useStore';
 import ChartModal from './components/ChartModal';
 import ServerBadge from './components/ServerStatusBadge';
 import ScreensHost from './components/ScreensHost';
+import TopStatusBar from './components/TopStatusBar';
 import { useVisiblePoll } from './lib/useVisiblePoll';
 
 export default function App() {
@@ -10,22 +11,18 @@ export default function App() {
   const setScreen = useStore(s => s.setScreen);
 
   // زر الرجوع/التقدم في المتصفح يبدل التبويب (الرابط مرآة للشاشة)
+  // «#/syscheck» هو الفحص المخفي: صفحة صحة النظام بلا تبويب في القوائم
   useEffect(() => {
     const onHash = () => {
       const h = location.hash.replace('#/', '');
-      const target = h === 'history' ? 'autoHistory' : h;
-      if ((['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'liquidityWorkbench', 'liquidityV2', 'customLiquidity', 'liveOpportunities', 'notifications', 'strategy2'] as const).includes(target as never) && target !== screen) {
+      const target = h === 'syscheck' ? 'dashboard' : h;
+      if ((['liquidityZones', 'liquidityV2', 'customLiquidity', 'liveOpportunities', 'strategy2', 'dashboard'] as const).includes(target as never) && target !== screen) {
         setScreen(target as never);
       }
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, [screen, setScreen]);
-  const chartModal = useStore(s => s.chartModal);
-  const analyses = useStore(s => s.analyses);
-  const cases = useStore(s => s.cases);
-  const refreshCases = useStore(s => s.refreshCases);
-  const unreadNotifications = useStore(s => s.unreadNotifications);
 
   // حالة اتصال السوق الحية: هل وصل أي سعر خلال آخر 10 ثوانٍ؟
   const prices = useStore(s => s.prices);
@@ -41,20 +38,14 @@ export default function App() {
   useVisiblePoll(() => { setLive(Date.now() - lastTick < 10000); }, { intervalMs: 3000 });
 
   const tabs = [
-    { id: 'board', label: 'لوحة التحليل', shortLabel: 'اللوحة', count: analyses.length },
-    { id: 'cases', label: 'الأرشيف الكامل', shortLabel: 'الأرشيف', count: cases.length },
-    { id: 'autoHistory', label: 'السجل الآلي', shortLabel: 'السجل', count: null },
-    { id: 'backtest', label: 'الباك تيست والفرص', shortLabel: 'الباك', count: null },
     { id: 'liveOpportunities', label: 'الفرص الحية', shortLabel: 'حية', count: null },
     { id: 'strategy2', label: 'الفرص الحية — استراتيجيتي', shortLabel: 'استراتيجيتي', count: null },
-    { id: 'notifications', label: 'الإشعارات', shortLabel: 'الإشعارات', count: unreadNotifications },
-    { id: 'liquidityWorkbench', label: 'مختبر السيولة الموحد', shortLabel: 'السيولة الموحدة', count: null },
     { id: 'liquidityZones', label: 'مناطق السيولة القديمة', shortLabel: 'القديم', count: null },
     { id: 'liquidityV2', label: 'محرك السيولة الجديد (عرض)', shortLabel: 'الجديد', count: null },
-    { id: 'customLiquidity', label: 'جولة مخصصة', shortLabel: 'جولة', count: null },
-    { id: 'dashboard', label: 'لوحة التحكم', shortLabel: 'التحكم', count: null },
-    { id: 'settings', label: 'الإعدادات والفلاتر', shortLabel: 'الإعدادات', count: null }
+    { id: 'customLiquidity', label: 'جولة مخصصة', shortLabel: 'جولة', count: null }
   ] as const;
+
+  const chartModal = useStore(s => s.chartModal);
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--surface-0)' }}>
@@ -84,7 +75,7 @@ export default function App() {
             return (
               <button
                 key={t.id}
-                onClick={() => { setScreen(t.id); if (t.id === 'cases') void refreshCases(); }}
+                onClick={() => setScreen(t.id)}
                 className="relative px-2.5 sm:px-4 py-2.5 text-[12px] sm:text-[13px] font-semibold whitespace-nowrap flex-shrink-0"
                 style={{ color: active ? 'var(--accent)' : 'var(--text-2)', transition: 'color var(--transition)' }}
                 onMouseEnter={e => { if (!active) (e.currentTarget as HTMLElement).style.color = 'var(--text-1)'; }}
@@ -128,6 +119,9 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* شريط الحالة العلوي: صحة النظام + آخر تحديث + الفرص + الاقتباس + الصوت */}
+      <TopStatusBar />
 
       <ScreensHost />
       {chartModal && <ChartModal />}

@@ -9,10 +9,6 @@ import db from './db.js';
 import { researchSymbol } from './research.mjs';
 import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES, bookSignals } from './liquidity/engine.mjs';
 import { matchZones, adaptCalibration, latestCalibration, DEFAULT_CALIBRATION } from './liquidity/calibrate.mjs';
-import { runPairBacktest, learnOnTrades, loadKlinesPaginated } from './backtest/engine.mjs';
-import { regimeGate } from './backtest/regime.mjs';
-import { buildPlan, checkPlan, kellyF, fractionalKelly, positionUnits } from './backtest/risk.mjs';
-import { assembleCase, DECISION_ACTORS } from './cases.mjs';
 import { groupZoneHistory } from './archive.mjs';
 import {
   normalizeCandles,
@@ -40,7 +36,7 @@ import { createWorkerPool } from './services/workerPool.mjs';
 import { startRetention } from './services/retention.mjs';
 import { createTwoTierCache } from './services/twoTierCache.mjs';
 import {
-  startInventorySaver, loadInventory, loadBacktestRun, saveBacktestRun
+  startInventorySaver, loadInventory, loadBacktestRun
 } from './services/inventoryStore.mjs';
 import { createShadow } from './services/shadow.mjs';
 import {
@@ -380,84 +376,6 @@ const handle = (fn) => (req, res) => {
 };
 
 // ---- analyses CRUD ----
-app.get('/api/analyses', handle(async (_req, res) => {
-  const rows = await db.analyses.list();
-  res.json(rows.map(serializeAnalysis));
-}));
-
-app.post('/api/analyses', handle(async (req, res) => {
-  const symbol = assertSymbol(req.body?.symbol, res);
-  if (!symbol) return;
-  const a = normalizeAnalysis(req.body, { forCreate: true });
-  const now = Date.now();
-  const rows = await db.analyses.create({ symbol, ...a, created_at: now, updated_at: now });
-  res.json(serializeAnalysis(rows[0]));
-}));
-
-app.put('/api/analyses/:id', handle(async (req, res) => {
-  const id = Number(req.params.id);
-  const existing = (await db.analyses.list()).find(r => r.id === id);
-  if (!existing) return res.status(404).json({ error: 'not found' });
-  const a = normalizeAnalysis({ ...serializeAnalysis(existing), ...req.body });
-  const rows = await db.analyses.update(id, a);
-  if (!rows.length) return res.status(404).json({ error: 'not found' });
-  res.json(serializeAnalysis(rows[0]));
-}));
-
-app.delete('/api/analyses/:id', handle(async (req, res) => {
-  await db.analyses.remove(Number(req.params.id));
-  res.json({ ok: true });
-}));
-
-// ---- فحص الباركود الآلي على شموع الدقيقة ----
-const analyzeBarcode = (raw, threshold = 35) => {
-  let gapCount = 0;
-  let bigWick = 0;
-  for (let i = 0; i < raw.length; i += 1) {
-    const o = Number(raw[i][1]);
-    const h = Number(raw[i][2]);
-    const l = Number(raw[i][3]);
-    const c = Number(raw[i][4]);
-    if (i > 0) {
-      const prevC = Number(raw[i - 1][4]);
-      if (Math.min(o, c) > prevC * 1.001 || Math.max(o, c) < prevC * 0.999) gapCount += 1;
-    }
-    const range = h - l;
-    const body = Math.abs(c - o);
-    if (range > 0 && body / range < 0.2) bigWick += 1;
-  }
-  const candlesCount = raw.length;
-  const score = candlesCount
-    ? (gapCount / candlesCount) * 60 + (bigWick / candlesCount) * 40
-    : 0;
-  return {
-    is_barcode: score >= threshold,
-    score: Math.round(score),
-    gap_count: gapCount,
-    big_wick_count: bigWick,
-    candles_count: candlesCount,
-    threshold,
-    reason: score >= threshold
-      ? 'تكررت فجوات أو ظلال غير طبيعية في شموع الدقيقة'
-      : 'شموع الدقيقة ضمن النمط الطبيعي وفق معيار الفحص الحالي'
-  };
-};
-
-const scanBarcode = async (symbol) => {
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const raw = await db.binance.klines(symbol, '1m', 100);
-      if (!Array.isArray(raw) || raw.length < 20) throw new Error('بيانات شموع غير كافية');
-      return analyzeBarcode(raw);
-    } catch (e) {
-      lastError = e;
-      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-    }
-  }
-  throw lastError ?? new Error('تعذر فحص الباركود');
-};
-
 app.get('/api/barcode-scans', handle(async (_req, res) => {
   const rows = await db.barcodeScans.list();
   res.json(rows.map(serializeBarcodeScan));
@@ -468,39 +386,6 @@ app.get('/api/barcode-scans/:symbol', handle(async (req, res) => {
   res.json(rows[0] ? serializeBarcodeScan(rows[0]) : null);
 }));
 
-app.post('/api/barcode-scans/:symbol/scan', handle(async (req, res) => {
-  const symbol = assertSymbol(req.params.symbol, res);
-  if (!symbol) return;
-  let row;
-  try {
-    const result = await scanBarcode(symbol);
-    row = {
-      symbol,
-      ...result,
-      status: 'success',
-      source: 'Binance REST klines 1m',
-      scanned_at: Date.now()
-    };
-  } catch (error) {
-    row = {
-      symbol,
-      is_barcode: false,
-      score: 0,
-      gap_count: 0,
-      big_wick_count: 0,
-      candles_count: 0,
-      threshold: 35,
-      reason: `تعذر جلب شموع الدقيقة: ${error.message}`,
-      status: 'failed',
-      source: 'Binance REST klines 1m',
-      scanned_at: Date.now()
-    };
-  }
-  const rows = await db.barcodeScans.upsert(row);
-  res.json(serializeBarcodeScan(rows[0]));
-}));
-
-// ---- coin shariah (التصنيف الشرعي) ----
 app.get('/api/shariah', handle(async (_req, res) => {
   const rows = await db.coinShariah.list();
   res.json(rows.map(r => ({
@@ -741,14 +626,6 @@ const readCalibration = async () => {
 };
 
 // ---- أرشيف المناطق: يجب قبل /:symbol وإلا يبتلعه Express كرمز history (إصلاح ظل التوجيه) ----
-app.get('/api/zones/history', handle(async (req, res) => {
-  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
-  const limit = Math.min(Number(req.query.limit) || 2000, 5000);
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  const raw = await db.zones.history({ symbol, limit, offset });
-  res.json({ events: raw, groups: groupZoneHistory(raw), total: raw.length, limit, offset });
-}));
-
 app.get('/api/zones/:symbol', handle(async (req, res) => {
   res.json({ zones: await db.zones.listAll(req.params.symbol) });
 }));
@@ -2071,228 +1948,6 @@ app.get('/api/market-read', handle(async (req, res) => {
 }));
 
 // حالة الباك تيست في الذاكرة (النمط نفسه: حالة خادم بسيطة)
-const backtestState = {
-  busy: false, startedAt: null, lastRunAt: null, pairsDone: 0, pairsTotal: 0,
-  lastRun: null, error: null, cycle: 0,
-  customBusy: false, customRun: null, customError: null
-};
-
-app.get('/api/backtest/status', handle(async (_req, res) => {
-  const targets = await resolveTargets();
-  res.json({
-    busy: backtestState.busy,
-    continuous: true,
-    cycle: backtestState.cycle,
-    startedAt: backtestState.startedAt,
-    lastRunAt: backtestState.lastRunAt,
-    pairsDone: backtestState.pairsDone,
-    pairsTotal: backtestState.pairsTotal,
-    targetsCount: targets.length,
-    targets: targets.slice(0, 20),
-    customBusy: backtestState.customBusy,
-    error: backtestState.error,
-    // اللفة القديمة أُزيلت — المحرك الحي البديل هو liveOppEngine (إصلاح عطل liveState 500)
-    liveRotation: liveOppEngine?.getStatus?.().cycle ?? null,
-    livePairsDone: liveOppEngine?.getFeed?.().pairsTotal ?? null,
-    livePairsTotal: liveOppEngine?.getFeed?.().pairsTotal ?? null
-  });
-}));
-
-// مجموع + تقسيم كل فريم محسوب على الخادم (النتائج كاملة قد تصل عشرات الميغابايت — الأداء أولاً)
-const summarizeResults = (rows) => {
-  const all = rows.flatMap(r => r.trades ?? []);
-  const decided = all.filter(t => t.win === 0 || t.win === 1);
-  const wins = decided.filter(t => t.win === 1).length;
-  const rrRatios = decided.filter(t => Number.isFinite(t.rr));
-  const frames = new Map();
-  for (const pair of rows) {
-    for (const t of pair.trades ?? []) {
-      if (t.win !== 0 && t.win !== 1) continue;
-      const m = frames.get(pair.timeframe) || { decided: 0, wins: 0 };
-      m.decided += 1;
-      if (t.win === 1) m.wins += 1;
-      frames.set(pair.timeframe, m);
-    }
-  }
-  return {
-    total: all.length,
-    decided: decided.length,
-    wins,
-    winRate: decided.length ? wins / decided.length : null,
-    /**
-     * الصافي بعد الرسوم والانزلاق بجانب الإجمالي: الفرق بين الرقمين هو أثر التكاليف
-     * الصريح على نتائج الباك تيست (كانت صفراً قبل الإصلاح). `win` لم يتغيّر — الحكم
-     * على السعر كما هو، والصافي معلومة إضافية.
-     */
-    ...(() => {
-      const withNet = decided.filter(t => Number.isFinite(Number(t.netRr)));
-      const netWins = withNet.filter(t => Number(t.netRr) > 0).length;
-      return {
-        netDecided: withNet.length,
-        netWins,
-        netWinRate: withNet.length ? netWins / withNet.length : null,
-        avgNetRr: withNet.length ? withNet.reduce((a, t) => a + Number(t.netRr), 0) / withNet.length : null,
-        avgCostR: withNet.length ? withNet.reduce((a, t) => a + (Number(t.costR) || 0), 0) / withNet.length : null,
-        feePct: Number(process.env.TRADE_FEE_PCT ?? 0.001),
-        slippagePct: Number(process.env.TRADE_SLIPPAGE_PCT ?? 0.0005)
-      };
-    })(),
-    avgRR: rrRatios.length ? rrRatios.reduce((a, t) => a + t.rr, 0) / rrRatios.length : null,
-    avgBars: decided.length ? decided.reduce((a, t) => a + (t.bars || 0), 0) / decided.length : null,
-    perFrame: [...frames.entries()].map(([tf, m]) => ({ timeframe: tf, ...m })).sort((a, b) => a.timeframe.localeCompare(b.timeframe))
-  };
-};
-
-app.get('/api/backtest/results', handle(async (req, res) => {
-  const run = backtestState.lastRun;
-  if (!run) {
-    return res.json({
-      exists: false,
-      message: 'الحلقة المستمرة تعمل — بانتظار اكتمال أول دورة',
-      /**
-       * إن كانت هناك دورة محفوظة قبل إعادة التشغيل تُعرض هنا بوسم `restored` صريح،
-       * فلا يظهر للمستخدم «لا يوجد شيء» بينما تاريخه موجود في المخزن الدائم.
-       */
-      restoredRun: backtestRestoredSummary,
-      custom: backtestState.customRun
-    });
-  }
-  let rows = run.results ?? [];
-  const coin = req.query.coin ? String(req.query.coin).toUpperCase() : undefined;
-  const timeframe = req.query.timeframe ? String(req.query.timeframe) : undefined;
-  if (coin) rows = rows.filter(r => r.symbol === coin);
-  if (timeframe) rows = rows.filter(r => r.timeframe === timeframe);
-  // ترقيم صفحات الأزواج: الأزواج الكاملة ثقيلة — الافتراضي 400 (بحد أقصى 2000)
-  const limit = Math.min(Math.max(Number(req.query.limit) || 400, 1), 2000);
-  const offset = Math.max(Number(req.query.offset) || 0, 0);
-  res.json({
-    exists: true,
-    cycle: backtestState.cycle,
-    startedAt: run.startedAt,
-    lastRunAt: run.lastRunAt,
-    total: rows.length,
-    results: rows.slice(offset, offset + limit),
-    summary: summarizeResults(rows),
-    learn: run.learn ?? null,
-    /**
-     * آخر دورة محفوظة **قبل** إعادة التشغيل، بوسم صريح. لا تُخلط بنتائج الجلسة:
-     * الصفقات الكاملة لا تُحفظ (تضخّم)، فالمعروض منها عدد الأزواج والصفقات ونسبة
-     * الفوز وانحياز التعلّم — وهي ما يحتاجه من يسأل «ماذا كان تاريخي؟».
-     */
-    restoredRun: backtestRestoredSummary
-      ? {
-        restored: true,
-        lastRunAt: backtestRestoredSummary.lastRunAt ?? null,
-        pairs: backtestRestoredSummary.pairs ?? 0,
-        trades: backtestRestoredSummary.trades ?? 0,
-        wins: backtestRestoredSummary.wins ?? 0,
-        winRate: backtestRestoredSummary.winRate ?? null,
-        learn: backtestRestoredSummary.learn ?? null
-      }
-      : null,
-    custom: backtestState.customRun
-  });
-}));
-
-// الدورة: كل المستهدفات × كل الفريمات — نفس خطوات الكشف الحي حرفياً (صفر تعديل على منطق التداول)
-const runCycle = async () => {
-  if (backtestState.busy) return;
-  backtestState.busy = true;
-  const results = [];
-  try {
-    const targets = await resolveTargets();
-    if (!targets.length) { backtestState.error = 'لا مستهدفات (لاحلال/لا غير-باركود)'; return; }
-    backtestState.startedAt = Date.now();
-    backtestState.pairsDone = 0;
-    backtestState.pairsTotal = targets.length;
-    backtestState.cycle += 1; // الدورة الجانية: التالية تبدأ فور اكتمال هذه
-    const cycleNo = backtestState.cycle;
-    backtestState.error = null;
-    const calibration = await readCalibration();
-    for (const symbol of targets) {
-      for (const tf of ALL_TIMEFRAMES) {
-        try {
-          results.push(await runPairBacktest(db, { symbol, timeframe: tf, calibration, capital: 10000 }));
-        } catch (e) {
-          results.push({ symbol, timeframe: tf, trades: [], reason: e.message });
-        }
-        await new Promise(r => setTimeout(r, 300));
-      }
-      backtestState.pairsDone += 1;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    // حلقة التعلم المستمرة: على دورة كاملة
-    let learn = null;
-    try {
-      learn = learnOnTrades(results, { targetWinRate: 0.7 });
-    } catch (e) {
-      console.error('[backtest] learning failed:', e.message);
-    }
-    backtestState.lastRun = { startedAt: backtestState.startedAt, lastRunAt: Date.now(), results, learn };
-    backtestState.lastRunAt = Date.now();
-    console.log(`[backtest] cycle ${cycleNo} done: pairs ${backtestState.pairsDone}/${backtestState.pairsTotal} | learn: ${learn?.enough ? `winRate ${learn.winRate}` : 'غير كافية'}`);
-    broadcast({ type: 'backtest_done' });
-  } catch (e) {
-    backtestState.error = e.message;
-    console.error('[backtest] cycle failed:', e.message);
-  } finally {
-    backtestState.busy = false;
-    backtestJob.beat({ extra: { cycles: backtestState.cycles ?? null } });
-  }
-};
-
-// الحلقة الدورية المستمرة: تنتهي دورة → تبدأ التالية فوراً (لا انتظار ضغط — مهلة 5 ثوانٍ فقط بين اللفات)
-const runBacktestLoop = async () => {
-  for (;;) {
-    await runCycle();
-    await new Promise(r => setTimeout(r, 5000));
-  }
-};
-setTimeout(() => void runBacktestLoop(), 30_000); // تبدأ تلقائياً بعد مزامنة العملات
-
-app.post('/api/backtest/run', handle(async (_req, res) => {
-  if (backtestState.busy) return res.status(409).json({ error: 'دورة قيد التنفيذ بالفعل — الحلقة مستمرة تلقائياً' });
-  res.json({ ok: true, started: true });
-  void runCycle();
-}));
-
-// جولة مخصصة: عملة محددة + فريمها + مدى زمني (من — إلى) — منفصلة عن الدوري ولا تعيق الحلقة
-app.post('/api/backtest/run-custom', handle(async (req, res) => {
-  const symbol = String(req.body?.symbol || '').toUpperCase().trim();
-  const timeframe = String(req.body?.timeframe || '1h').toLowerCase().trim();
-  // قبول أرقام epoch أو صيغ تاريخ (ISO) — أكثر مرونة
-  const parseTs = (v) => {
-    if (v == null || v === '') return undefined;
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-    const d = Date.parse(v);
-    return Number.isNaN(d) ? undefined : d;
-  };
-  const fromTs = parseTs(req.body?.fromTs);
-  const toTs = parseTs(req.body?.toTs);
-  const tsGiven = (v) => v != null && v !== '';
-  if ((tsGiven(req.body?.fromTs) && fromTs === undefined) || (tsGiven(req.body?.toTs) && toTs === undefined)) return res.status(400).json({ error: 'مدى زمني غير صالح' });
-  backtestState.customBusy = true;
-  backtestState.customError = null;
-  res.json({ ok: true, started: true, symbol, timeframe });
-  void (async () => {
-    try {
-      const result = await runPairBacktest(db, {
-        symbol, timeframe, calibration: await readCalibration(), capital: 10000,
-        startTime: fromTs, endTime: toTs, bars: 20000
-      });
-      backtestState.customRun = { symbol, timeframe, fromTs: fromTs ?? null, toTs: toTs ?? null, at: Date.now(), result };
-      console.log(`[backtest] custom done: ${symbol} ${timeframe}`);
-      broadcast({ type: 'backtest_custom_done' });
-    } catch (e) {
-      backtestState.customError = e.message;
-      console.error('[backtest] custom failed:', e.message);
-    } finally {
-      backtestState.customBusy = false;
-    }
-  })();
-}));
-
 // ═══ طبقة بيانات السوق الحية (WebSocket) — أسعار كل السوق + شموع + تدفق صفقات ═══
 // مصدر واحد لكل المستهلكين: صفر نداءات REST للأسعار، شموع حية، CVD/فقاعات لحظية.
 // حدود الذاكرة (إصلاح OOM الإنتاج): بذر 250 شمعة + سقف 400/مفتاح + 1500 صفقة/رمز + 6 اتصالات.
@@ -2361,7 +2016,6 @@ const startLiquidityWorkbench = async () => {
 // تلك تعمل على النشر الدائم المخصص لها، وهذه النسخة تقرأ نفس قاعدة البيانات.
 const LIGHT_MODE = process.env.LIGHT_MODE === '1';
 
-setTimeout(() => { if (!LIGHT_MODE) void startLiquidityWorkbench(); else console.log('[light] workbench engine disabled (LIGHT_MODE=1)'); }, 30_000);
 setTimeout(() => { if (!LIGHT_MODE) marketStreams.start(); else console.log('[light] market streams disabled (LIGHT_MODE=1)'); }, 20_000); // ينطلق مع استقرار الخادم
 /**
  * ★التحويل الحادث: مستمع واحد على إغلاق الشموع المجمّعة. كل شمعة أُغلقت في المخزن
@@ -3299,136 +2953,6 @@ const periodicResearch = async () => {
   }
 };
 
-// ---- سجل القرارات (Case Ledger): لقطة مصنّفة لكل قرار تحليل ----
-app.get('/api/cases', handle(async (req, res) => {
-  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
-  const rows = await db.cases.list({ symbol });
-  res.json(rows);
-}));
-
-app.get('/api/cases/:id', handle(async (req, res) => {
-  const row = await db.cases.get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'القرار غير موجود' });
-  const images = await db.cases.imagesList(row.id);
-  res.json({ ...row, images });
-}));
-
-app.post('/api/cases', handle(async (req, res) => {
-  const symbol = assertSymbol(req.body?.symbol, res);
-  if (!symbol) return;
-  const actor = DECISION_ACTORS.includes(req.body?.actor) ? req.body.actor : null;
-  if (!actor) return res.status(400).json({ error: 'actor يجب أن يكون من أنواع القرار المعروفة' });
-  const decidedAt = Number.isFinite(Number(req.body?.decided_at)) && Number(req.body.decided_at) > 0
-    ? Number(req.body.decided_at)
-    : Date.now();
-  const payload = await assembleCase({ symbol, actor, decidedAt, snapshot: req.body?.snapshot ?? {}, db });
-  const rows = await db.cases.save({ symbol, actor, decided_at: decidedAt, payload: JSON.stringify(payload) });
-  const id = rows?.[0]?.id ?? null;
-  // صور الشارت لحظة القرار — منفصلة عن payload، فشلها لا يفشل حفظ القرار
-  if (id) {
-    try {
-      const images = (req.body?.snapshot?.screenshots ?? [])
-        .slice(0, 4)
-        .filter(s => typeof s?.dataUrl === 'string' && s.dataUrl.startsWith('data:image/'))
-        .map(s => ({
-          case_id: id,
-          symbol,
-          tf: String(s.tf ?? '').slice(0, 16),
-          data_url: s.dataUrl.slice(0, 1_000_000),
-          captured_at: decidedAt
-        }));
-      if (images.length) await db.cases.imagesSave(images);
-    } catch (e) {
-      console.error('[cases] screenshot persist failed:', e?.message ?? e);
-    }
-  }
-  res.json({ ok: true, id });
-}));
-
-// (نُقل إلى أعلى قبل /:symbol — إصلاح ظل التوجيه)
-
-// ---- السجل التاريخي للتحديد الآلي (منطق فابيو) ----
-// دمج حسب المنطقة + ترقيم على مستوى الصفوف: يخفض الحمولة من ميغابايتات إلى كيلوبايتات
-const autoSnapCache = new Map();
-app.get('/api/auto-history', handle(async (req, res) => {
-  const { clampPage, flattenSnapshots, dedupeByZoneKey } = await import('./liquidity/autoHistory.mjs');
-  const { limit, offset } = clampPage(req.query.limit, req.query.offset);
-  const filters = {
-    symbol: req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined,
-    timeframe: req.query.timeframe ? String(req.query.timeframe) : undefined,
-    type: req.query.type === 'BSL' || req.query.type === 'SSL' ? req.query.type : undefined,
-    minScore: req.query.minScore != null && req.query.minScore !== '' ? Number(req.query.minScore) : undefined,
-    from: req.query.from ? Number(req.query.from) : undefined,
-    to: req.query.to ? Number(req.query.to) : undefined,
-    fabioOnly: req.query.fabioOnly === 'false' ? false : true
-  };
-  // تفصيل منطقة واحدة: كل لقطات zoneKey محدد (يُستخدم عند توسيع صف)
-  if (req.query.zoneKey) {
-    const raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit: 500, offset: 0 });
-    const all = flattenSnapshots(raw, { ...filters, fabioOnly: false }).filter(r => r.zoneKey === String(req.query.zoneKey).slice(0, 200));
-    return res.json({ rows: all, total: all.length, limit: all.length, offset: 0, fabioOnly: false });
-  }
-  // كاش 15 ثانية للجلب الخام (مفتاح: symbol|from|to) — الافتتاح المتكرر للتبويب يصبح فورياً
-  const snapKey = `${filters.symbol ?? ''}|${filters.from ?? ''}|${filters.to ?? ''}`;
-  const cached = autoSnapCache.get(snapKey);
-  let raw;
-  if (cached && Date.now() - cached.ts < 15000) {
-    raw = cached.data;
-  } else {
-    raw = await db.zones.autoHistory({ symbol: filters.symbol, from: filters.from, to: filters.to, limit: 500, offset: 0 });
-    if (autoSnapCache.size > 8) autoSnapCache.clear();
-    autoSnapCache.set(snapKey, { data: raw, ts: Date.now() });
-  }
-  const flat = dedupeByZoneKey(flattenSnapshots(raw, filters));
-  const total = flat.length;
-  const rows = flat.slice(offset, offset + limit);
-  res.set('X-Total-Count', String(total));
-  res.json({ rows, total, limit, offset, fabioOnly: filters.fabioOnly });
-}));
-
-// صور الشارت المحفوظة لحظة التحديد الآلي: إلحاق + قراءة
-app.post('/api/auto-history/screenshots', handle(async (req, res) => {
-  const shots = (Array.isArray(req.body?.shots) ? req.body.shots : [])
-    .slice(0, 8)
-    .filter(s => typeof s?.zoneKey === 'string' && s.zoneKey.length <= 200
-      && typeof s?.dataUrl === 'string' && s.dataUrl.startsWith('data:image/'))
-    .map(s => ({
-      zoneKey: s.zoneKey.slice(0, 200),
-      symbol: String(s.symbol ?? s.zoneKey.split('|')[0] ?? '').toUpperCase().slice(0, 32),
-      timeframe: String(s.timeframe ?? s.zoneKey.split('|')[1] ?? '').slice(0, 16),
-      type: s.type === 'SSL' ? 'SSL' : 'BSL',
-      price: Number.isFinite(Number(s.price)) ? Number(s.price) : null,
-      dataUrl: s.dataUrl.slice(0, 1_000_000),
-      capturedAt: Number(s.capturedAt) || Date.now()
-    }));
-  if (!shots.length) return res.status(400).json({ error: 'لا توجد صور صالحة' });
-  for (const shot of shots) await db.zones.appendZoneScreenshot(shot);
-  broadcast({ type: 'auto_screenshots_saved', count: shots.length });
-  res.json({ ok: true, saved: shots.length });
-}));
-
-app.get('/api/auto-history/screenshots', handle(async (req, res) => {
-  const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
-  const from = req.query.from ? Number(req.query.from) : undefined;
-  const events = await db.zones.listZoneScreenshots({ symbol, from });
-  const latest = new Map();
-  for (const e of events) {
-    const shot = (() => { try { return JSON.parse(e.meta || 'null'); } catch { return null; } })();
-    if (!shot?.zoneKey || latest.has(shot.zoneKey)) continue;
-    latest.set(shot.zoneKey, { ...shot, ts: Number(e.ts ?? 0) });
-  }
-  res.json({ screenshots: [...latest.values()] });
-}));
-
-// ---- settings ----
-const ensureSettings = async () => {
-  let rows = await db.settings.get();
-  if (!rows.length) {
-    rows = await db.settings.create({ id: 1, quote: 'USDT', notify_timeout_min: 30, sound_enabled: true, sort_config: '{}' });
-  }
-  return rows[0];
-};
-
 app.get('/api/settings', handle(async (_req, res) => {
   res.json(serializeSettings(await ensureSettings()));
 }));
@@ -3448,50 +2972,6 @@ app.put('/api/settings', handle(async (req, res) => {
 
 // ---- events ----
 // قائمة خفيفة: بدون meta (meta الضخم يُجلب عند التوسيع فقط) — يخفض النقل من ميغابايتات إلى كيلوبايتات
-app.get('/api/events', handle(async (req, res) => {
-  const rows = await db.events.list(req.query);
-  res.json(rows.map(r => ({ ...r, meta: null })));
-}));
-
-// تفصيل حدث واحد بmeta الكامل — يُستدعى عند توسيع صف في سجل الأحداث
-app.get('/api/events/:id', handle(async (req, res) => {
-  const row = await db.events.get(Number(req.params.id));
-  if (!row) return res.status(404).json({ error: 'الحدث غير موجود' });
-  res.json(row);
-}));
-
-/**
- * الأنواع المسموح بكتابتها من الواجهة — قائمة بيضاء صريحة.
- * العلة (C1): كان المسار يقبل أي نوع حدث، فيمكن حقن «فرصة» أو «نتيجة» مزيفة تُستعاد
- * بعد إعادة التشغيل كأنها حقيقية، وتُفسد إحصاءات الأداء وسجل القرارات. الأنواع
- * التشخيصية التي يكتبها الخادم نفسه لم تعد قابلة للكتابة من الخارج إطلاقاً.
- */
-const CLIENT_WRITABLE_EVENT_TYPES = new Set([
-  'decision_analysis', 'decision_analysis_edit', 'decision_entry', 'decision_no_entry',
-  'decision_exit', 'decision_note', 'zone_reviewed', 'zone_feedback',
-  'strategy2_feedback', 'manual_note', 'central_notification', 'choch_check'
-]);
-const MAX_EVENT_TEXT = 4000;
-
-app.post('/api/events', handle(async (req, res) => {
-  const { symbol, type, message, meta } = req.body ?? {};
-  if (!symbol || !type || !message) return res.status(400).json({ error: 'symbol, type, message required' });
-  if (!CLIENT_WRITABLE_EVENT_TYPES.has(String(type))) {
-    return res.status(400).json({ error: 'نوع الحدث غير مسموح من الواجهة', allowed: [...CLIENT_WRITABLE_EVENT_TYPES] });
-  }
-  const sym = String(symbol).toUpperCase().slice(0, 24);
-  if (!/^[A-Z0-9_]{2,24}$/.test(sym)) return res.status(400).json({ error: 'رمز غير صالح' });
-  const rows = await db.events.create({
-    symbol: sym,
-    type: String(type),
-    // تقليم النصوص: يمنع تضخيم السجل ومحتوى ضار
-    message: String(message).slice(0, MAX_EVENT_TEXT),
-    meta: meta ? String(typeof meta === 'string' ? meta : JSON.stringify(meta)).slice(0, 20000) : null,
-    ts: Date.now()
-  });
-  res.json(rows[0]);
-}));
-
 // ---- symbols (قائمة أزواج السبوت المخزنة مسبقاً) ----
 const CHUNK = 500;
 
@@ -3871,7 +3351,6 @@ const shariahJob = health.register('shariah-resolver', { stallMs: 30 * 60 * 1000
  */
 const liquidityJob = health.register('liquidity-zones', { stallMs: 1_800_000 });   // كل 5 دقائق
 const liveJob = health.register('live-opportunities', { stallMs: 900_000 });        // كل 5 ثوان
-const backtestJob = health.register('backtest', { stallMs: 1_800_000 });            // كل 5 دقائق
 const strategy2Job = health.register('strategy2', { stallMs: 900_000 });            // كل 15 ثانية
 const marketJob = health.register('market-streams', { stallMs: 300_000 });          // دورية دقيقة
 
@@ -4261,7 +3740,6 @@ setInterval(() => {
   shadow.persist();
   void shadow.persistDb(db);
   void persistLearning();
-  void saveBacktestRun(db, backtestState.lastRun);
 }, 5 * 60 * 1000);
 
 const inventorySaver = startInventorySaver({

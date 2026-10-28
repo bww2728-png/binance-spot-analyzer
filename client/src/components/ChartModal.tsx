@@ -6,13 +6,9 @@ import type { Candle, LiquidityZone, Timeframe } from '../lib/types';
 import { TIMEFRAMES } from '../lib/types';
 import { createChart, createSeriesMarkers, CandlestickSeries, type ISeriesApi, type IPriceLine, type IChartApi, type UTCTimestamp, type ISeriesMarkersPluginApi, type Time, type CandlestickData } from 'lightweight-charts';
 import { CHART_COLORS, HOLLOW_CANDLES } from './MiniChart';
-import Toggle from './ui/Toggle';
 import AcademyModal from './AcademyModal';
 import { useZoneBands, zoneRange } from './ZoneBands';
 import ZoneListPanel from './ZoneListPanel';
-import { registerChart } from '../lib/cases/chartViews';
-import { shipZoneCase } from '../lib/cases/collect';
-import { captureChartPng } from '../lib/cases/png';
 
 const toBar = (c: Candle) => ({
   time: c.time as UTCTimestamp,
@@ -153,12 +149,6 @@ export function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAut
     setHoverBar(null);
     void load(false);
 
-    const unregisterChartView = registerChart(
-      symbol,
-      timeframe,
-      TF_SECONDS[timeframe] ?? 900,
-      seriesRef
-    );
 
     let disposed = false;
     let lastTime = 0;
@@ -202,7 +192,6 @@ export function BigChart({ symbol, timeframe, zones, zoneList, annotate, showAut
       seriesRef.current = null;
       markersRef.current = null;
       aliveRef.current = false;
-      unregisterChartView();
       try { chart.remove(); } catch { /* سباق تفكيك — تُهمل بصمت */ }
       setReady(false);
       setCanLoadMore(false);
@@ -594,26 +583,19 @@ function AutoZoneDialog({ zone, onClose, onCaptured }: {
 export default function ChartModal() {
   const modal = useStore(s => s.chartModal)!;
   const close = useStore(s => s.closeChart);
-  const analyses = useStore(s => s.analyses);
-  const update = useStore(s => s.updateAnalysis);
-  const scanBarcode = useStore(s => s.scanBarcode);
-  const analysis = analyses.find(a => a.symbol === modal.symbol);
   const barcodeScan = useStore(s => s.barcodeScans[modal.symbol]);
   const isBarcode = barcodeScan?.status === 'success' && barcodeScan.is_barcode;
   const [barcodeAck, setBarcodeAck] = useState(false);
-  const [barcodeScanning, setBarcodeScanning] = useState(false);
 
-  const [tfLower, setTfLower] = useState(modal.tfLower ?? analysis?.tf_lower ?? '15m');
-  const [tfUpper, setTfUpper] = useState(modal.tfUpper ?? analysis?.tf_upper ?? '4h');
+  const [tfLower, setTfLower] = useState(modal.tfLower ?? '15m');
+  const [tfUpper, setTfUpper] = useState(modal.tfUpper ?? '4h');
   // احترام الفريم المطلوب من زر الشارت (استراتيجيتي تطلب 1m/5m/15m) — مع المزامنة عند تغيّر الطلب
   useEffect(() => {
     if (modal.tfLower) setTfLower(modal.tfLower);
-    else if (analysis?.tf_lower) setTfLower(analysis.tf_lower);
-  }, [modal.symbol, modal.tfLower, analysis?.tf_lower]);
+  }, [modal.symbol, modal.tfLower]);
   useEffect(() => {
     if (modal.tfUpper) setTfUpper(modal.tfUpper);
-    else if (analysis?.tf_upper) setTfUpper(analysis.tf_upper);
-  }, [modal.symbol, modal.tfUpper, analysis?.tf_upper]);
+  }, [modal.symbol, modal.tfUpper]);
   // مستويات الاستراتيجية المطلوب رسمها (من زر الشارت) — في أماكنها السعرية على الفريمين
   const strategyLevels = useMemo(() => (modal.levels ?? []).filter(l => l != null && Number.isFinite(Number(l?.price))), [modal.levels]);
 
@@ -627,35 +609,11 @@ export default function ChartModal() {
   const [academyOpen, setAcademyOpen] = useState(false);
   const [accuracy, setAccuracy] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
-
-  // ---- سجل القرارات: التقاط صورة القرار (مناطق/تغذية راجعة) ---- 
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lowerChartRef = useRef<HTMLDivElement | null>(null);
   const upperChartRef = useRef<HTMLDivElement | null>(null);
-  const captureZone = useCallback((
-    actor: 'zone_create' | 'zone_edit' | 'zone_delete' | 'zone_auto_feedback' | 'zone_auto_note',
-    note: string,
-    zone: LiquidityZone
-  ) => {
-    const st = useStore.getState();
-    const current = st.analyses.find(a => a.symbol === modal.symbol) ?? null;
-    const shots: { tf: string; dataUrl: string }[] = [];
-    for (const [el, tf] of [[upperChartRef.current, tfUpper], [lowerChartRef.current, tfLower]] as const) {
-      const url = captureChartPng(el);
-      if (url) shots.push({ tf, dataUrl: url });
-    }
-    shipZoneCase({
-      symbol: modal.symbol,
-      actor,
-      note: note || null,
-      zone,
-      zones: zoneList,
-      before: current,
-      after: current,
-      screenshots: shots
-    });
-  }, [modal.symbol, zoneList, tfUpper, tfLower]);
-  const openLedger = useStore(s => s.openCaseLedger);
-  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+
   const [scrollTarget, setScrollTarget] = useState<{ time: number; nonce: number } | null>(null);
   const [fullscreen, setFullscreen] = useState<null | 'lower' | 'upper'>(null);
 
@@ -710,25 +668,11 @@ export default function ChartModal() {
     return () => { disposed = true; };
   }, [modal.symbol, zoneCounts]);
 
-  useEffect(() => {
-    let disposed = false;
-    setBarcodeScanning(true);
-    void scanBarcode(modal.symbol)
-      .catch(() => undefined)
-      .finally(() => { if (!disposed) setBarcodeScanning(false); });
-    return () => { disposed = true; };
-  }, [modal.symbol, scanBarcode]);
 
-  const zones = useMemo(() => ({
-    ssl: analysis?.ssl_price ?? null,
-    bsl: analysis?.bsl_price ?? null
-  }), [analysis?.ssl_price, analysis?.bsl_price]);
-
-  const patch = (p: Parameters<typeof update>[1]) => analysis && void update(analysis.id, p);
   const changeTf = (which: 'lower' | 'upper', value: string) => {
     const tf = value as Timeframe;
-    if (which === 'lower') { setTfLower(tf); patch({ tf_lower: tf }); }
-    else { setTfUpper(tf); patch({ tf_upper: tf }); }
+    if (which === 'lower') setTfLower(tf);
+    else setTfUpper(tf);
   };
 
   /** نقرة وضع التعليم: داخل حدود منطقة مظللة → آلية: تغذية راجعة، يدوية: تعديل، وإلا منطقة جديدة */
@@ -808,13 +752,6 @@ export default function ChartModal() {
             <h2 className="text-lg font-bold" style={{ color: 'var(--text-1)' }}>{modal.symbol}</h2>
             <LiveBadge symbol={modal.symbol} />
             <button
-              className="btn !py-1.5 !px-3 text-[11.5px]"
-              onClick={() => openLedger(modal.symbol)}
-              title="أرشيف هذه العملة — كل قرار ومنطقة وخُطة تحليل سابقة بلقطتها لحظة القرار"
-            >
-              الأرشيف
-            </button>
-            <button
               className={`btn !py-1.5 !px-3 text-[11.5px] ${annotate ? 'btn-accent' : ''}`}
               style={annotate ? { background: '#3b82f6', color: '#fff' } : {}}
               onClick={() => setAnnotate(v => !v)}
@@ -865,11 +802,6 @@ export default function ChartModal() {
         </div>
 
         <div className="p-5">
-          {barcodeScanning && (
-            <div className="mb-5 rounded-xl p-3.5 text-[12px]" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
-              جارٍ تأكيد فحص الباركود على آخر 100 شمعة دقيقة…
-            </div>
-          )}
           {barcodeScan?.status === 'success' && !barcodeAck && (
             <div
               className="mb-5 rounded-xl p-3.5 flex items-start justify-between gap-3 flex-wrap"
@@ -884,28 +816,6 @@ export default function ChartModal() {
               <button className="btn btn-accent !py-1.5 !px-3 text-[11px]" onClick={() => setBarcodeAck(true)}>
                 فهمت
               </button>
-            </div>
-          )}
-          {analysis && (
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-3 mb-5 text-[13px]" style={{ color: 'var(--text-2)' }}>
-              <label className="flex items-center gap-2">
-                سعر SSL:
-                <input type="number" step="any" className="num w-28" style={{ borderColor: 'rgba(8,153,129,0.45)' }} value={analysis.ssl_price ?? ''}
-                  onChange={e => patch({ ssl_price: e.target.value === '' ? null : Number(e.target.value) })} />
-              </label>
-              <label className="flex items-center gap-2">
-                سعر BSL:
-                <input type="number" step="any" className="num w-28" style={{ borderColor: 'rgba(242,54,69,0.45)' }} value={analysis.bsl_price ?? ''}
-                  onChange={e => patch({ bsl_price: e.target.value === '' ? null : Number(e.target.value) })} />
-              </label>
-              <label className="flex items-center gap-2">
-                لمس BSL
-                <Toggle on={analysis.bsl_touched === 1} label="لمس BSL" onChange={v => patch({ bsl_touched: v ? 1 : 0 })} />
-              </label>
-              <label className="flex items-center gap-2">
-                لمس SSL
-                <Toggle on={analysis.ssl_touched === 1} label="لمس SSL" onChange={v => patch({ ssl_touched: v ? 1 : 0 })} />
-              </label>
             </div>
           )}
 
@@ -928,7 +838,7 @@ export default function ChartModal() {
                   </button>
                 </div>
               )}
-              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} containerCb={el => { lowerChartRef.current = el; }} extraLines={strategyLevels} />
+              <BigChart symbol={modal.symbol} timeframe={tfLower} zones={{ ssl: null, bsl: null }} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'lower' ? fullscreenChartHeight : 340} containerCb={el => { lowerChartRef.current = el; }} extraLines={strategyLevels} />
             </div>
             <div
               className={fullscreen === 'upper' ? 'fixed inset-0 z-[60]' : fullscreen ? 'hidden' : ''}
@@ -947,7 +857,7 @@ export default function ChartModal() {
                   </button>
                 </div>
               )}
-              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={zones} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} containerCb={el => { upperChartRef.current = el; }} extraLines={strategyLevels} />
+              <BigChart symbol={modal.symbol} timeframe={tfUpper} zones={{ ssl: null, bsl: null }} zoneList={zoneList} annotate={annotate} showAuto={showAuto} onChartClick={handleChartClick} highlightId={highlightId} scrollTarget={scrollTarget} height={fullscreen === 'upper' ? fullscreenChartHeight : 340} containerCb={el => { upperChartRef.current = el; }} extraLines={strategyLevels} />
             </div>
           </div>
 
@@ -965,14 +875,13 @@ export default function ChartModal() {
               price={zoneDialog.price}
               zone={zoneDialog.zone}
               onClose={() => setZoneDialog(null)}
-              onCaptured={captureZone}
             />
           </div>
         )}
 
         {autoDialog && (
           <div className="absolute inset-0">
-            <AutoZoneDialog zone={autoDialog.zone} onClose={() => setAutoDialog(null)} onCaptured={captureZone} />
+            <AutoZoneDialog zone={autoDialog.zone} onClose={() => setAutoDialog(null)} />
           </div>
         )}
 

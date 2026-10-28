@@ -1,19 +1,16 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
-import type { Analysis, BarcodeScan, CaseRow, ChartLevel, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
-import type { SortResultRow, SortInput } from '../lib/sorting';
-import { sortAnalyses } from '../lib/sorting';
+import type { BarcodeScan, ChartLevel, CoinShariahRow, Candle, Settings, ShariahResearch } from '../lib/types';
 import { BinanceStreams, syncSymbols as syncSymbolsApi, fetchSpotSymbols, priceStreamName, klineStreamName, connectSymbolsSocket, pollSymbolsMeta, type MiniTicker, type KlineMsg, type SpotSymbol, type LiveOppTickRow, type LiveWatchTickRow, type SymbolsSocketState } from '../lib/binance';
-import { queueZoneCapture } from '../lib/autoCapture';
 import { evaluateShariah } from '../lib/shariah';
 
 const API = '/api';
 
 const rowVerdictAr = (v: string) => (v === 'halal' ? 'حلال' : v === 'haram' ? 'حرام' : 'للتحقق');
 
-export type Screen = 'liquidityWorkbench' | 'liquidityV2' | 'board' | 'dashboard' | 'cases' | 'settings' | 'autoHistory' | 'backtest' | 'liquidityZones' | 'customLiquidity' | 'liveOpportunities' | 'notifications' | 'strategy2';
+/** الشاشات الباقية بعد التنظيف + صفحة الفحص المخفي (#/syscheck) */
+export type Screen = 'liquidityZones' | 'liquidityV2' | 'customLiquidity' | 'liveOpportunities' | 'strategy2' | 'dashboard';
 export type Theme = 'dark' | 'light';
-export type ArchiveSection = 'cases' | 'zones' | 'events';
 
 /**
  * شريحة حالة لكل شاشة: تُحفظ عند مغادرتها وتُستعاد عند إعادة فتحها.
@@ -29,52 +26,19 @@ export interface ScreenState {
   scrollTop: number;
 }
 
-/* ═══ مركز الإشعارات — المكان الوحيد الذي تظهر فيه الإشعارات (بلا نوافذ منبثقة) ═══ */
-export type NotificationCategory = 'zones' | 'liveOpps' | 'shariah' | 'system' | 'actions';
-export type NotificationSeverity = 'info' | 'alert' | 'error';
-export interface AppNotification {
-  id: number;
-  ts: number;
-  category: NotificationCategory;
-  severity: NotificationSeverity;
-  symbol: string | null;
-  text: string;
-  action?: { label: string; onClick: () => void };
-  read: boolean;
-}
+const SCREENS: readonly Screen[] = ['liquidityZones', 'liquidityV2', 'customLiquidity', 'liveOpportunities', 'strategy2', 'dashboard'];
+const LAST_SCREEN_KEY = 'last_screen';
 
-const NOTIF_STORAGE_KEY = 'app_notifications_v1';
-const NOTIF_CAP = 500;
-let toastId = 0;
-const calibrationNotificationIds = { live: new Set<string>(), strategy2: new Set<string>() };
-
-function shouldNotifyCalibration(engine: 'live' | 'strategy2', at: unknown): boolean {
-  const timestamp = Number(at);
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return true;
-  const seen = calibrationNotificationIds[engine];
-  const id = String(timestamp);
-  if (seen.has(id)) return false;
-  seen.add(id);
-  if (seen.size > 100) seen.delete(seen.values().next().value!);
-  return true;
-}
-
-function loadStoredNotifications(): AppNotification[] {
+/** الشاشة الافتتاحية: رابط مباشر > آخر شاشة محفوظة > الفرص الحية */
+function initialScreen(): Screen {
+  const h = location.hash.replace('#/', '');
+  const fromHash = (h === 'syscheck' ? 'dashboard' : h) as Screen;
+  if (SCREENS.includes(fromHash)) return fromHash;
   try {
-    const raw = localStorage.getItem(NOTIF_STORAGE_KEY);
-    if (!raw) return [];
-    const rows = JSON.parse(raw) as AppNotification[];
-    if (!Array.isArray(rows)) return [];
-    // الإجراءات (الدوال) لا تنجو من التخزين — تُساق وتُعلَّم السجلات المقروءة
-    return rows.slice(0, NOTIF_CAP).map(r => ({ ...r, action: undefined }));
-  } catch { return []; }
-}
-
-function saveStoredNotifications(rows: AppNotification[]) {
-  try {
-    const plain = rows.slice(0, NOTIF_CAP).map(r => ({ ...r, action: undefined }));
-    localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(plain));
-  } catch { /* التخزين ممتلئ أو محجوب — الإشعارات تبقى في الذاكرة */ }
+    const saved = localStorage.getItem(LAST_SCREEN_KEY) as Screen | null;
+    if (saved && SCREENS.includes(saved)) return saved;
+  } catch { /* ignore */ }
+  return 'liveOpportunities';
 }
 
 function initialTheme(): Theme {
@@ -95,28 +59,18 @@ interface StoreState {
   barcodeScans: Record<string, BarcodeScan>;
   shariah: Record<string, CoinShariahRow>;
   shariahLoaded: boolean;
-  analyses: Analysis[];
   prices: Record<string, number>;
+  pricesUpdatedAt: number | null;
   settings: Settings | null;
-  bootErrors: { analyses: string | null; settings: string | null; symbols: string | null };
+  bootErrors: { settings: string | null; symbols: string | null };
   bootReady: boolean;
   screen: Screen;
   chartModal: { symbol: string; tfLower: string | null; tfUpper: string | null; levels?: ChartLevel[] } | null;
-  notifications: AppNotification[];
-  unreadNotifications: number;
-  markAllNotificationsRead: () => void;
-  clearNotifications: () => void;
-  markNotificationRead: (id: number) => void;
   streams: BinanceStreams | null;
   soundEnabled: boolean;
   syncing: boolean;
   lastSync: number;
   theme: Theme;
-  cases: CaseRow[];
-  casesError: string | null;
-  casesLoaded: boolean;
-  caseFilter: string | null;
-  archiveSection: ArchiveSection;
   /* شرائح حالة الشاشات — تُحفظ عند المغادرة وتُستعاد عند العودة */
   screenStates: Partial<Record<Screen, ScreenState>>;
   saveScreenState: (screen: Screen, patch: Partial<ScreenState>) => void;
@@ -137,22 +91,14 @@ interface StoreState {
   setScreen: (s: Screen) => void;
   openChart: (symbol: string, tfLower: string | null, tfUpper: string | null, levels?: ChartLevel[]) => void;
   closeChart: () => void;
-  openCaseLedger: (symbol?: string) => void;
-  setCaseFilter: (f: string | null) => void;
-  setArchiveSection: (s: ArchiveSection) => void;
-  refreshCases: () => Promise<void>;
-  addAnalysis: (symbol: string, extras?: Partial<Analysis>) => Promise<void>;
-  updateAnalysis: (id: number, patch: Partial<Analysis>) => Promise<void>;
-  deleteAnalysis: (id: number) => Promise<void>;
-  scanBarcode: (symbol: string) => Promise<BarcodeScan>;
-  refreshSymbols: (opts?: { silent?: boolean }) => Promise<void>;
   saveShariah: (symbol: string, row: Partial<CoinShariahRow>) => Promise<void>;
   researchShariahAuto: (symbol: string) => Promise<ShariahResearch>;
   deleteShariah: (symbol: string) => Promise<void>;
   saveSettings: (patch: Partial<Settings>) => Promise<void>;
+  refreshSymbols: (opts?: { silent?: boolean }) => Promise<void>;
   toggleTheme: () => void;
-  pushToast: (text: string, kind?: 'info' | 'alert', action?: { label: string; onClick: () => void }, meta?: { category?: NotificationCategory; symbol?: string; severity?: NotificationSeverity }) => void;
-  deleteNotification: (id: number) => void;
+  /* ملاحظات التشغيل تُكتب في كونسول المتصفح فقط — لا واجهة إشعارات ولا تخزين */
+  pushToast: (text: string, ...rest: unknown[]) => void;
   subscribePrice: (symbol: string) => void;
   unsubscribePrice: (symbol: string) => void;
   subscribeKline: (symbol: string, interval: string, cb: (candle: Candle, closed: boolean) => void) => () => void;
@@ -167,22 +113,6 @@ const priceUnsubs = new Map<string, () => void>();
  * بدل كتابة كاملة للمخزن عند كل رسالة miniTicker — يخفض إعادة رسم اللوحة من N/ثانية إلى دفعتين */
 const pendingPrices = new Map<string, number>();
 let priceFlushTimer: ReturnType<typeof setInterval> | null = null;
-const haramAlerted = new Set<string>();
-
-/** تنبيه تحوّل حكم عملة متابَعة إلى «حرام» — مع اقتراح إزالة بضغطة واحدة (القرار للمستخدم) */
-function alertIfHaramFollowed(symbol: string, verdict: string) {
-  const st = useStore.getState();
-  const followed = st.analyses.find(a => a.symbol === symbol);
-  if (!followed || verdict !== 'haram' || haramAlerted.has(symbol)) return;
-  haramAlerted.add(symbol);
-  const id = followed.id;
-  useStore.getState().pushToast(
-    `${symbol}: تغيّر تصنيفها الشرعي إلى «حرام» حسب البيانات — يُقترح إزالتها من لوحة المتابعة`,
-    'alert',
-    { label: 'إزالة من اللوحة', onClick: () => void useStore.getState().deleteAnalysis(id) },
-    { category: 'shariah', symbol, severity: 'alert' }
-  );
-}
 
 export const useStore = create<StoreState>((set, get) => ({
   symbols: [],
@@ -191,32 +121,18 @@ export const useStore = create<StoreState>((set, get) => ({
   barcodeScans: {},
   shariah: {},
   shariahLoaded: false,
-  analyses: [],
   prices: {},
+  pricesUpdatedAt: null,
   settings: null,
-  bootErrors: { analyses: null, settings: null, symbols: null },
+  bootErrors: { settings: null, symbols: null },
   bootReady: false,
-  screen: ((): Screen => {
-    // افتتاح مباشر على التبويب من الرابط (#/history مثلاً) — الافتراضي اللوحة
-    const h = location.hash.replace('#/', '');
-    if (h === 'history') return 'autoHistory';
-    return (['board', 'cases', 'autoHistory', 'dashboard', 'settings', 'backtest', 'liquidityZones', 'liquidityWorkbench', 'liquidityV2', 'customLiquidity', 'liveOpportunities', 'notifications', 'strategy2'] as const).includes(h as Screen)
-      ? h as Screen
-      : 'board';
-  })(),
+  screen: initialScreen(),
   chartModal: null,
-  notifications: ((): AppNotification[] => loadStoredNotifications())(),
-  unreadNotifications: ((): number => loadStoredNotifications().filter(n => !n.read).length)(),
   streams: null,
   soundEnabled: true,
   syncing: false,
   lastSync: 0,
   theme: initialTheme(),
-  cases: [],
-  casesLoaded: false,
-  casesError: null,
-  caseFilter: null,
-  archiveSection: 'cases',
   screenStates: {},
   liveOppTick: null,
   liveOppSocketState: 'connecting',
@@ -230,9 +146,8 @@ export const useStore = create<StoreState>((set, get) => ({
       streams = new BinanceStreams();
       set({ streams });
     }
-    const [barcodeResult, analysesResult, settingsResult] = await Promise.allSettled([
+    const [barcodeResult, settingsResult] = await Promise.allSettled([
       api.getBarcodeScans(),
-      api.getAnalyses(),
       api.getSettings()
     ]);
     const previous = get();
@@ -241,18 +156,14 @@ export const useStore = create<StoreState>((set, get) => ({
     if (barcodeResult.status === 'fulfilled') {
       for (const scan of barcodeResult.value) barcodeMap[scan.symbol] = scan;
     }
-    if (analysesResult.status === 'fulfilled') bootErrors.analyses = null;
-    else bootErrors.analyses = String(analysesResult.reason);
     if (settingsResult.status === 'fulfilled') bootErrors.settings = null;
     else bootErrors.settings = String(settingsResult.reason);
     set({
       ...(barcodeResult.status === 'fulfilled' ? { barcodeScans: barcodeMap } : {}),
-      ...(analysesResult.status === 'fulfilled' ? { analyses: analysesResult.value } : {}),
       ...(settingsResult.status === 'fulfilled' ? { settings: settingsResult.value ?? null } : {}),
       bootErrors,
       bootReady: true
     });
-    const analyses = analysesResult.status === 'fulfilled' ? analysesResult.value : get().analyses;
     const settings = settingsResult.status === 'fulfilled' ? settingsResult.value : get().settings;
     // شريعة: لا تُفشل init إذا تعذر الجدول
     try {
@@ -286,13 +197,6 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       set({ shariah: shMap, shariahLoaded: true });
     } catch { set({ shariahLoaded: true }); }
-    // فحص أولي: إن كانت أي عملة متابَعة حكمها المخزن «حرام» ننبّه مرة واحدة
-    try {
-      for (const a of get().analyses) {
-        const row = get().shariah[a.symbol];
-        alertIfHaramFollowed(a.symbol, row?.verdict ?? '');
-      }
-    } catch { /* ignore */ }
     // جلب قائمة الأزواج المخزنة + تاريخ آخر مزامنة
     const quote = settings?.quote ?? 'USDT';
     try {
@@ -315,7 +219,6 @@ export const useStore = create<StoreState>((set, get) => ({
       connectSymbolsSocket((msg) => {
         if (msg.type === 'symbols_updated') void get().refreshSymbols({ silent: false });
         else if (msg.type === 'zones_changed' || msg.type === 'zones_auto_updated') void get().refreshZoneCounts();
-        else if (msg.type === 'zones_auto_updated' && msg.symbol) queueZoneCapture(String(msg.symbol));
         else if (msg.type === 'zone_near' && msg.zone && msg.symbol) {
           get().pushToast(`${msg.symbol}: السعر يقترب من منطقة ${msg.zone.type}${msg.zone.note ? ` — ${msg.zone.note}` : ''}`, 'alert', undefined, { category: 'zones', symbol: String(msg.symbol), severity: 'alert' });
         } else if (msg.type === 'zone_swept' && msg.zone && msg.symbol) {
@@ -342,10 +245,7 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ calibrationProgress: { done: msg.done ?? 0, total: msg.total ?? 0 } });
         } else if (msg.type === 'live_calibration_done') {
           set({ calibrationProgress: null });
-          if (shouldNotifyCalibration('live', msg.at)) {
-            const persisted = msg.persisted === true;
-            get().pushToast(persisted ? 'اكتملت معايرة الفرص الحية وحُفظت نتائجها' : 'اكتملت معايرة الفرص الحية، لكن لم يُؤكد حفظ نتائجها', persisted ? 'info' : 'alert', undefined, { category: 'liveOpps', severity: persisted ? 'info' : 'error' });
-          }
+          get().pushToast(msg.persisted === true ? 'اكتملت معايرة الفرص الحية وحُفظت نتائجها' : 'اكتملت معايرة الفرص الحية، لكن لم يُؤكد حفظ نتائجها');
         } else if (msg.type === 'strategy2_new' && msg.opportunity) {
           const o = msg.opportunity as unknown as { symbol: string; tf: string; model: number; entry: number; stop: number; tp1: number; rr: number; htfDirection: string };
           get().pushToast(`استراتيجيتي — ${o.symbol} (${o.tf}) نموذج ${o.model}: دخول ${o.entry} · وقف ${o.stop} · هدف ${o.tp1} · R:R ${o.rr} · اتجاه HTF ${o.htfDirection === 'up' ? 'صاعد' : o.htfDirection === 'down' ? 'هابط' : 'عرضي'}`, 'alert', undefined, { category: 'liveOpps', symbol: o.symbol, severity: 'alert' });
@@ -364,10 +264,7 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
         } else if (msg.type === 'strategy2_calibration_done') {
           set({ strategy2Pulse: { at: Date.now(), kind: String(msg.type) } });
-          if (shouldNotifyCalibration('strategy2', msg.at)) {
-            const persisted = msg.persisted === true;
-            get().pushToast(persisted ? 'اكتملت معايرة استراتيجيتي وحُفظت نتائجها' : 'اكتملت معايرة استراتيجيتي، لكن لم يُؤكد حفظ نتائجها', persisted ? 'info' : 'alert', undefined, { category: 'liveOpps', severity: persisted ? 'info' : 'error' });
-          }
+          get().pushToast(msg.persisted === true ? 'اكتملت معايرة استراتيجيتي وحُفظت نتائجها' : 'اكتملت معايرة استراتيجيتي، لكن لم يُؤكد حفظ نتائجها');
         } else if (msg.type === 'strategy2_directions' && Array.isArray(msg.changed)) {
           // نبضة اتجاهات: تُحفّز إعادة الجلب الصامتة في تبويب الاتجاهات (debounce 1 ث)
           set({ strategy2Pulse: { at: Date.now(), kind: 'strategy2_directions' } });
@@ -393,8 +290,6 @@ export const useStore = create<StoreState>((set, get) => ({
       });
       pollSymbolsMeta(60, () => void get().refreshSymbols({ silent: true }));
     }
-    // اشتراك بأسعار كل العملات المحللة
-    for (const a of analyses) get().subscribePrice(a.symbol);
     void get().refreshZoneCounts();
   },
 
@@ -459,25 +354,13 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setScreen: (s) => {
     set({ screen: s });
-    // رابط مباشر لكل تبويب: يشارك ويعمل زر الرجوع
-    try { history.replaceState(null, '', `#/${s === 'autoHistory' ? 'history' : s}`); } catch { /* ignore */ }
+    // تذكّر آخر شاشة + رابط مباشر لكل تبويب (يشارك ويعمل زر الرجوع)
+    try { localStorage.setItem(LAST_SCREEN_KEY, s); } catch { /* ignore */ }
+    try { history.replaceState(null, '', `#/${s === 'dashboard' ? 'syscheck' : s}`); } catch { /* ignore */ }
   },
 
   openChart: (symbol, tfLower, tfUpper, levels) => set({ chartModal: { symbol, tfLower, tfUpper, levels } }),
   closeChart: () => set({ chartModal: null }),
-
-  /** فتح شاشة الأرشيف — مع تصفية لعملة محددة إن وُجدت (يُغلق الشارت أولاً) */
-  openCaseLedger: (symbol) => {
-    set({ chartModal: null, screen: 'cases', caseFilter: symbol?.toUpperCase() ?? null, archiveSection: 'cases' });
-    void get().refreshCases();
-  },
-
-  setCaseFilter: (f) => {
-    set({ caseFilter: f?.toUpperCase() ?? null });
-    void get().refreshCases();
-  },
-
-  setArchiveSection: (s) => set({ archiveSection: s }),
 
   /** دمج جزئي في شريحة الشاشة — لا يمس بقية الحقول */
   saveScreenState: (screen, patch) => set((st) => {
@@ -492,64 +375,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   getScreenState: (screen) => get().screenStates[screen],
 
-  refreshCases: async () => {
-    const symbol = get().caseFilter ?? undefined;
-    try {
-      const rows = await api.getCases(symbol);
-      set({ cases: rows, casesLoaded: true, casesError: null });
-    } catch (e) {
-      // فشل واضح بدل skeleton لا نهائي — لا يُفشل التنقل
-      set({ casesLoaded: true, casesError: String(e) });
-    }
-  },
-
-  addAnalysis: async (symbol, extras) => {
-    const row = await api.createAnalysis({ symbol: symbol.toUpperCase(), ...(extras ?? {}) });
-    set((st) => ({ analyses: [row, ...st.analyses] }));
-    get().subscribePrice(row.symbol);
-    void import('../lib/cases/collect').then(m => m.shipCoinEvent(row.symbol, 'coin_add', null, row));
-  },
-
-  updateAnalysis: async (id, patch) => {
-    const before = get().analyses.find(a => a.id === id) ?? null;
-    set((st) => ({
-      analyses: st.analyses.map(a => a.id === id ? { ...a, ...patch } : a)
-    }));
-    const after = get().analyses.find(a => a.id === id) ?? null;
-    if (before && after) {
-      void import('../lib/cases/collect').then(m => m.shipAnalysisEdit(before.symbol, before, after));
-    }
-    try {
-      const row = await api.updateAnalysis(id, patch);
-      set((st) => ({ analyses: st.analyses.map(a => a.id === id ? row : a) }));
-    } catch (e) {
-      get().pushToast(`فشل الحفظ: ${String(e)}`, 'alert');
-      const fresh = await api.getAnalyses();
-      set({ analyses: fresh });
-    }
-  },
-
-  deleteAnalysis: async (id) => {
-    const a = get().analyses.find(x => x.id === id);
-    set((st) => ({ analyses: st.analyses.filter(x => x.id !== id) }));
-    if (a) {
-      get().unsubscribePrice(a.symbol);
-      void import('../lib/cases/collect').then(m => m.shipCoinEvent(a.symbol, 'coin_remove', a, null));
-    }
-    await api.deleteAnalysis(id);
-  },
-
-  scanBarcode: async (symbol) => {
-    const row = await api.scanBarcode(symbol);
-    set((st) => ({ barcodeScans: { ...st.barcodeScans, [symbol]: row } }));
-    if (row.status !== 'success') throw new Error(row.reason || 'تعذر فحص الباركود');
-    return row;
-  },
-
   saveShariah: async (symbol, row) => {
     const saved = await api.setShariah(symbol, row);
     set((st) => ({ shariah: { ...st.shariah, [symbol]: saved } }));
-    alertIfHaramFollowed(symbol, saved.verdict);
   },
 
   researchShariahAuto: async (symbol) => {
@@ -589,55 +417,10 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ theme });
   },
 
-  /** تسجيل إشعار في مركز الإشعارات — المكان الوحيد الذي يظهر فيه (بلا نوافذ منبثقة) */
-  pushToast: (text, kind = 'info', action, meta) => {
-    const id = ++toastId;
-    if (toastId > 1_000_000) toastId = 1; // تجنب تضخم المعرّف عبر الجلسات الطويلة
-    const notification: AppNotification = {
-      id,
-      ts: Date.now(),
-      category: meta?.category ?? 'actions',
-      severity: meta?.severity ?? (kind === 'alert' ? 'alert' : 'info'),
-      symbol: meta?.symbol?.toUpperCase() ?? null,
-      text,
-      action,
-      read: false
-    };
-    set((st) => {
-      const notifications = [notification, ...st.notifications].slice(0, NOTIF_CAP);
-      saveStoredNotifications(notifications);
-      return {
-        notifications,
-        unreadNotifications: notifications.filter(n => !n.read).length
-      };
-    });
+  /** ملاحظات تشغيلية تُكتب في كونسول المتصفح فقط — نظام الإشعارات حُذف كلياً */
+  pushToast: (text, ...rest) => {
+    console.info('[note]', text, ...(rest.length ? rest : []));
   },
-  /** حذف إشعار واحد من جدول المركز */
-  deleteNotification: (id) => set((st) => {
-    const notifications = st.notifications.filter(n => n.id !== id);
-    saveStoredNotifications(notifications);
-    return { notifications, unreadNotifications: notifications.filter(n => !n.read).length };
-  }),
-
-  markAllNotificationsRead: () => set((st) => {
-    if (st.unreadNotifications === 0) return st;
-    const notifications = st.notifications.map(n => (n.read ? n : { ...n, read: true }));
-    saveStoredNotifications(notifications);
-    return { notifications, unreadNotifications: 0 };
-  }),
-
-  clearNotifications: () => {
-    saveStoredNotifications([]);
-    set({ notifications: [], unreadNotifications: 0 });
-  },
-
-  markNotificationRead: (id) => set((st) => {
-    const target = st.notifications.find(n => n.id === id);
-    if (!target || target.read) return st;
-    const notifications = st.notifications.map(n => (n.id === id ? { ...n, read: true } : n));
-    saveStoredNotifications(notifications);
-    return { notifications, unreadNotifications: notifications.filter(n => !n.read).length };
-  }),
 
   subscribePrice: (symbol) => {
     const s = get().streams;
@@ -649,7 +432,7 @@ export const useStore = create<StoreState>((set, get) => ({
         if (pendingPrices.size === 0) return;
         const batch = Object.fromEntries(pendingPrices);
         pendingPrices.clear();
-        set((st) => ({ prices: { ...st.prices, ...batch } }));
+        set((st) => ({ prices: { ...st.prices, ...batch }, pricesUpdatedAt: Date.now() }));
       }, 600);
     }
     const unsub = s.subscribe(name, (data) => {
@@ -690,11 +473,3 @@ export const useStore = create<StoreState>((set, get) => ({
 
   livePrice: (symbol) => get().prices[symbol] ?? null
 }));
-
-export function selectSortedRows(state: StoreState): SortResultRow[] {
-  const inputs: SortInput[] = state.analyses.map(a => ({
-    analysis: a,
-    livePrice: state.prices[a.symbol] ?? null
-  }));
-  return sortAnalyses(inputs);
-}
