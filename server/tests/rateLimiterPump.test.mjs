@@ -1,6 +1,12 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRateLimiter } from '../net/limiter.mjs';
+import { holdEventLoop } from './_holdLoop.mjs';
+
+// مؤقّت الـpump داخل المحدد `unref()`ed، فانتظار وعد يُحلّ به يترك الحلقة بلا مقبض
+// على Node 22 فيُلغى الاختبار. مثبّت واحد للملف كله (انظر _holdLoop.mjs).
+const releaseLoop = holdEventLoop();
+after(() => releaseLoop());
 
 /**
  * عطل مُثبت ومُقاس: دالة `pump` كانت مُعرَّفة في المحدد ولا يُستدعى لها أحد.

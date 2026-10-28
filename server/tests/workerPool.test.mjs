@@ -5,10 +5,16 @@
  * هذا هو الضمان المطلوب: تحسين الأداء (نقل العمل خارج حلقة الأحداث) بلا أي
  * تغيير في القرار أو في الشروط.
  */
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWorkerPool } from '../services/workerPool.mjs';
 import { scanHistory, detectLiquidityZones } from '../liquidity-zones/engine.mjs';
+import { holdEventLoop } from './_holdLoop.mjs';
+
+// العمال ومهل المهام `unref()`ed داخل المجمّع (صحيح للإنتاج)، فانتظار `pool.run()` يترك
+// الحلقة بلا مقبض على Node 22 فيُلغى الاختبار. مثبّت واحد للملف كله (انظر _holdLoop.mjs).
+const releaseLoop = holdEventLoop();
+after(() => releaseLoop());
 
 const silentLog = { log: () => {}, warn: () => {}, error: () => {} };
 
