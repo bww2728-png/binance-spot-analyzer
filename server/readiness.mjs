@@ -47,8 +47,13 @@ export function evaluateReadiness({
     dist: { ok: dist === null ? null : Boolean(dist) },
     storage: {
       configured: storage?.configured ?? null,
-      persistFailures: Number.isFinite(Number(storage?.persistFailures)) ? Math.max(0, Number(storage.persistFailures)) : 0,
-      countersMalformed: storage?.persistFailures != null && !Number.isFinite(Number(storage.persistFailures))
+      serviceRole: storage?.serviceRole ?? null,
+      publicKey: storage?.publicKey ?? null,
+      persistFailures: typeof storage?.persistFailures === 'number' && Number.isFinite(storage.persistFailures)
+        ? Math.max(0, storage.persistFailures)
+        : 0,
+      countersMalformed: storage?.persistFailures != null
+        && !(typeof storage.persistFailures === 'number' && Number.isFinite(storage.persistFailures))
     },
     live: { required: lightMode ? false : Boolean(live?.required), state: live?.state ?? null, error: live?.error ?? null },
     market: {
@@ -62,6 +67,7 @@ export function evaluateReadiness({
   else if (dist === null) add('bundle_unknown', 'warning', null);
 
   if (storage?.configured === false) add('storage_unconfigured', 'critical', 'SUPABASE_URL + مفتاح Supabase غير مضبوطين');
+  if (storage?.publicKey === false) add('public_key_missing', 'warning', 'مفتاح المختبر (ANON/VITE_) مفقود — workbench معطّل');
   if (checks.storage.persistFailures > 0) {
     add('persist_failures', 'warning', storage?.lastPersistError ?? null);
   }

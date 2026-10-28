@@ -1,9 +1,10 @@
 # خطة تقوية الأمان (AUD-008)
 
-**الحالة:** خطة جاهزة للتنفيذ — **لم تُطبَّق** في هذا التدقيق.
-**السبب:** التطبيق يحتاج سرّاً جديداً (`service_role`) وترحيلاً على قاعدة بيانات حية،
-وكلاهما خارج تفويض المهمة (§3.2 من التكليف). تنفيذها يتطلب قرار مالك وإجراءً تشغيلياً
-منفصلاً وقابلاً للتراجع.
+**الحالة:** المرحلة 1 **مطبَّقة في الكود** (خامدة حتى يُضاف السر). المرحلة 2 **جاهزة كملف
+ترحيل غير مطبَّق**. المرحلة 3 (مصادقة الواجهة) **مخطَّطة فقط**.
+**السبب:** تطبيق المرحلتين 2 و3 يغيّر نموذج الثقة في الإنتاج ويحتاج ترحيلاً على قاعدة حية
+وإجراءً تشغيلياً — وكلاهما خارج تفويض المهمة (§3.2 من التكليف). الكود والملفات وخطة
+التراجع جاهزة، والتنفيذ يحتاج قرار مالك.
 
 ---
 
@@ -14,7 +15,9 @@
 | كل مسارات `/api` بلا مصادقة | لا وسيط تحقّق في `server/index.js`؛ لا `Authorization` في أي مسار |
 | لا حدّ معدل على المدخلات | لا middleware لحد الطلبات (المحدد الموجود يخص نداءات Binance الصادرة) |
 | كل جدول مفعّل عليه RLS لكن بسياسة `anon` كاملة | `server/migrations/000_full_schema.sql` — `create policy "<t>_all" ... to anon using (true) with check (true)` |
-| الخادم يستخدم مفتاحاً واحداً للقراءة والكتابة (Anon أو `VITE_`) | `server/db.js` — `SUPABASE_KEY = process.env.SUPABASE_ANON_KEY \|\| process.env.VITE_SUPABASE_PUBLISHABLE_KEY \|\| ''` (لا `service_role`) |
+| الخادم يستخدم مفتاحاً عاماً واحداً للقراءة والكتابة (Anon أو `VITE_`) افتراضياً | `server/db.js` — `selectStorageKey()`: لا يستخدم `SERVICE_ROLE` إلا بإقرار `SUPABASE_SERVICE_ROLE_CONFIRMED=1` |
+| `service_role` **بلا منح** على الجداول الأساسية | منح `service_role` في المستودع محصور بجداول المختبر (`007:84-88`, `008:31`, `012:68-74`) — لذلك يلزم `013b_grant_service_role.sql` قبل التفعيل |
+| `liquidityWorkbench` يكتب بـ`anon` **بالعقد** | `server/db.js` → `restWorkbench` + `WORKBENCH_KEY`؛ و`tests/liquidityWorkbenchDb.test.mjs` يفرضه حتى مع وجود مفتاح خدمة |
 | المتصفح لا يتصل بـSupabase مباشرة | `client/src/lib/api.ts` — `useSupabase = false`، وكل النداءات عبر Express |
 | مفتاح `anon` غير موجود في المستودع | لا `supabase.co` ولا `eyJ...` في أي ملف مصدر |
 
@@ -37,30 +40,41 @@
 
 ---
 
-## 3) المرحلة 1 — مفتاح الخادم (بلا كسر شيء)
+## 3) المرحلة 1 — مفتاح الخادم (بلا كسر شيء) — ✅ **مطبَّقة في الكود / تحتاج 3 خطوات تشغيلية**
 
 **الهدف:** فصل هوية الخادم عن هوية العميل.
 
+**الترتيب إلزامي — لا تُقدّم خطوة على أخرى:**
+
+| # | الخطوة | لماذا هذا الترتيب |
+|---|---|---|
+| 1 | نفّذ `server/migrations/013b_grant_service_role.sql` | المنح في هذا المشروع صريحة لا تلقائية (`011:1-2`)، و`service_role` بلا منح يُرجع 401/403 |
+| 2 | اضبط `SUPABASE_SERVICE_ROLE_KEY` **و** `SUPABASE_SERVICE_ROLE_CONFIRMED=1` في بيئة الخادم | الكود لا يفعّل الهوية بمجرد وجود المفتاح — لتفادي انقطاع صامت |
+| 3 | أعد النشر وتحقّق: `/readyz` → `checks.storage.serviceRole = true` | إثبات أن الهوية مُفعَّلة فعلاً |
+
 1. أنشئ مفتاح `service_role` من لوحة Supabase (Project Settings → API).
-2. اضبطه في بيئة الخادم فقط: `SUPABASE_SERVICE_ROLE_KEY=...` (لا يُضاف إلى `.env.example`
-   بقيمة، فقط اسم المتغيّر).
-3. عدّل `server/db.js` ليُفضّله مع الاحتفاظ بالاحتياط:
+2. اضبطه في بيئة الخادم فقط مع الإقرار. **لا قيم في `.env.example`** — يُذكر الاسم فقط، والقيمة تُدار في مدير أسرار المنصة.
+3. **الكود جاهز** في `server/db.js`:
 
 ```js
-const SUPABASE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-  '';
-export const usingServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
-// storageConfigured() قائمة بالفعل وتقرأ SUPABASE_KEY — لا تحتاج تعديلاً بعد هذه الخطوة.
+export function selectPublicKey(env = process.env) {
+  return env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
+}
+export function selectStorageKey(env = process.env) {
+  const service = String(env.SUPABASE_SERVICE_ROLE_CONFIRMED ?? '') === '1'
+    ? (env.SUPABASE_SERVICE_ROLE_KEY || '') : '';
+  return service || selectPublicKey(env);
+}
+export function isUsingServiceRole(env = process.env) { /* إقرار + مفتاح + اختلاف الهوية */ }
 ```
 
-4. أعد النشر. **لا تغيير سلوكي**: السياسات الحالية تسمح للمفتاحين بالشيء نفسه.
-5. تحقّق: `/readyz` تبقى 200، وسجل الإقلاع يبيّن أن الخادم يستخدم service role (رسالة
-   واحدة بلا طباعة المفتاح).
+   مُختبَر في `server/tests/storageKey.test.mjs` (12 حالة): بلا الإقرار **لا يتغيّر شيء
+   إطلاقاً**، ومفتاح عام موضوع في متغيّرة الخدمة لا يُعتبر هوية خدمة.
+4. تحقّق: `checks.storage.serviceRole` تصبح `true`، و`checks.storage.publicKey` تبقى `true`
+   (مفتاح المختبر منفصل)، وسجل الإقلاع لا يطبع أي مفتاح.
 
-**التراجع:** احذف المتغيّر وأعد النشر — النظام يعود إلى `anon` فوراً.
+**التراجع:** احذف `SUPABASE_SERVICE_ROLE_CONFIRMED` (وحده يكفي) وأعد النشر — يعود النظام
+إلى المفتاح العام فوراً بلا تغيير كود. المنح المضافة في الخطوة 1 غير ضارة ويمكن إبقاؤها.
 
 ---
 
@@ -73,7 +87,11 @@ restrictive.
 ### 4.1 الجداول التي يقرأها العميل عبر الخادم فقط
 
 بما أن الواجهة لا تصل إلى Supabase مباشرة، **لا حاجة لأي صلاحية `anon` على أي جدول**.
-الحد الأدنى الآمن:
+
+> **الملف الجاهز:** `server/migrations/014_restrict_anon_privileges.sql` (معاملة واحدة،
+> يشمل `alter default privileges` لمنع عودة الثقب عند إنشاء جدول جديد)، والتراجع في
+> `014a_rollback_anon_privileges.sql`. **لم يُطبَّق** — التشغيل قرار مالك بعد المرحلة 1.
+> المقتطف التالي هو شرحه المُختصر:
 
 ```sql
 -- 1) إسقاط السياسات المفتوحة
@@ -90,11 +108,11 @@ begin
 end $$;
 
 -- 2) إلغاء صلاحيات anon على الجداول (تُمنح للـservice_role فقط)
+--    ملاحظة: الملف الفعلي 014 يستثني جداول liquidity_workbench% لأن db.js يكتبها بـanon عقداً
 revoke all on all tables in schema public from anon;
 revoke all on all sequences in schema public from anon;
-
--- 3) (اختياري) قراءة عامة محدودة إن أراد المالك لوحة قراءة بلا خادم
--- grant select on public.symbols, public.coin_shariah to anon;
+-- 3) الدوال ترث EXECUTE من PUBLIC — السحب من anon وحده لا يغلق شيئاً
+revoke execute on all routines in schema public from public;
 ```
 
 > `service_role` يتجاوز RLS بحكم صلاحياته، فلا يحتاج سياسات.
@@ -180,5 +198,5 @@ app.use('/api', (req, res, next) => {
 - [ ] `has_table_privilege('anon', <كل جدول>, 'insert'|'update'|'delete')` = false للجميع.
 - [ ] الخادم يعمل بمفتاح `service_role` و`/readyz` = 200 بعد إعادة النشر.
 - [ ] طلب كتابة بلا رمز يُرجع 401 (إن فُعّلت المرحلة 3).
-- [ ] كل الاختبارات ناجحة (660) بعد كل مرحلة.
+- [ ] كل الاختبارات ناجحة (674) بعد كل مرحلة.
 - [ ] لا انحدار في مسارات القراءة العامة.

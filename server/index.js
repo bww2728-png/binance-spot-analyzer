@@ -32,7 +32,9 @@ import { createHealth } from './health.mjs';
 import { evaluateReadiness } from './readiness.mjs';
 import { cpus } from 'node:os';
 import { createRateLimiter } from './net/limiter.mjs';
-import { setRateLimiter, storageConfigured } from './db.js';
+import {
+  setRateLimiter, storageConfigured, isUsingServiceRole, publicKeyConfigured
+} from './db.js';
 import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
 import { startRetention } from './services/retention.mjs';
@@ -2594,6 +2596,10 @@ runtime.readinessProbe = () => {
     storage: {
       // مصدر واحد للحقيقة: نفس الشرط الذي يستخدمه db.js فعلياً (يشمل احتياط VITE_).
       configured: storageConfigured(),
+      // هوية الخادم: مشتقة من الهوية لا من وجود المتغيّرة (انظر isUsingServiceRole).
+      serviceRole: isUsingServiceRole(),
+      // مفتاح المختبر منفصل عن مفتاح التخزين — قد يوجد أحدهما دون الآخر.
+      publicKey: publicKeyConfigured(),
       persistFailures: persist?.persistFailures ?? 0,
       lastPersistError: persist?.lastPersistError ?? null
     },
