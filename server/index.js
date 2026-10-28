@@ -29,6 +29,7 @@ import { readAllPages, readAllPagesComplete } from './services/readAllPages.mjs'
 import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams, createKeyQueue } from './market/streams.mjs';
 import { createHealth } from './health.mjs';
+import { evaluateReadiness } from './readiness.mjs';
 import { cpus } from 'node:os';
 import { createRateLimiter } from './net/limiter.mjs';
 import { setRateLimiter } from './db.js';
@@ -138,17 +139,36 @@ const runtime = {
   zones: () => null,
   /** دليل الاستعادة بعد إعادة التشغيل: عدد المراجعات المستعادة ومفاتيح الظل */
   stateRestore: () => null,
-  liquidityWorkbench: () => null
+  liquidityWorkbench: () => null,
+  /** مدخلات تقييم الجاهزية — تُربط بعد تهيئة المحركات (انظر /readyz) */
+  readinessProbe: () => ({})
 };
 let liquidityWorkbench = null;
-// نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api
+// نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api. فحص حياة فقط: العملية حيّة.
+// لا تُستخدم للجاهزية: عودتها 200 لا تعني أن التخزين مُهيّأ أو أن الاستعادة نجحت.
 app.get('/healthz', (req, res) => res.json({ ok: true, up: Date.now() }));
-// نقطة جاهزية غير حاجبة: لا تنتظر Supabase/Binance أبداً (تشخيص سريع دون تعليق healthcheck)
-// يتحقق الـ deploy منها يدوياً بعد الإقلاع: /readyz → {ok, dist, uptime}
+/**
+ * نقطة جاهزية حقيقية (readiness ≠ liveness): لا تنتظر Supabase/Binance أبداً، لكنها
+ * تقرأ الحالة المعلنة للمكونات.
+ *
+ * العيب الذي أُصلح: كانت تفحص وجود `client/dist/index.html` وحده، فتُعلن «جاهز» لخدمة
+ * فشلت استعادة فرصها الحية أو لم تُضبط لها قاعدة بيانات إطلاقاً. الآن تُبنى على
+ * `evaluateReadiness` (وحدة نقية مُختبرة) وتعيد 503 عندما يكون شرط صحّي مفقوداً.
+ */
 app.get('/readyz', (req, res) => {
   const distDir = path.join(__dirname, '..', 'client', 'dist');
   const dist = fs.existsSync(path.join(distDir, 'index.html'));
-  res.status(dist ? 200 : 503).json({ ok: dist, dist, up: Date.now(), uptime: process.uptime() });
+  let probe = {};
+  let probeError = null;
+  try { probe = runtime.readinessProbe() ?? {}; } catch (e) { probeError = String(e?.message ?? e); }
+  const report = evaluateReadiness({ dist, ...probe });
+  res.status(report.ready ? 200 : 503).json({
+    ...report,
+    dist,
+    probeError,
+    up: Date.now(),
+    uptime: process.uptime()
+  });
 });
 
 /**
@@ -219,9 +239,10 @@ app.use((req, res, next) => {
   return json1mb(req, res, next);
 });
 
-// تحذير بدء التشغيل: القيم المدمجة احتياطية — اضبط SUPABASE_URL/ANON_KEY في بيئة الاستضافة (لا تُطبع القيم أبداً)
+// تحذير بدء التشغيل: لا قيم مدمجة في الكود — بلا هذين المتغيّرين كل نداءات التخزين ستفشل
+// (كان النص يقول «قيم مدمجة احتياطية» وهي غير موجودة، فيُقرأ الفشل كأنه عمل طبيعي)
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-  console.warn('[config] using baked-in Supabase defaults (set SUPABASE_URL/SUPABASE_ANON_KEY to override)');
+  console.warn('[config] SUPABASE_URL/SUPABASE_ANON_KEY غير مضبوطين — التخزين والاستعادة معطّلان، /readyz ستُعيد 503');
 }
 
 // رفضوع وعود مرفوضة في الحلقات الخلفية يجب ألا تُسقط healthz بصمت
@@ -2551,6 +2572,33 @@ const liveOpportunityRecovery = createLiveOpportunityRecovery({
 });
 if (LIGHT_MODE) console.log('[light] live-opportunities engine disabled (LIGHT_MODE=1)');
 else liveOpportunityRecovery.start(75_000);
+
+/**
+ * مدخلات `/readyz`: حالة الاستعادة المعلنة + تهيئة التخزين + وضع نقل بيانات السوق.
+ * تُقرأ من مكوّنات قائمة (لا نداء شبكي)، فلا تُعلّق فحص الجاهزية أبداً.
+ */
+runtime.readinessProbe = () => {
+  const liveStatus = liveOppEngine.getStatus?.() ?? {};
+  let market = null;
+  try {
+    const s = marketStreams.stats();
+    market = { available: s.available, connected: s.connected, priceAgeMs: s.priceAgeMs };
+  } catch { market = null; }
+  const persist = (() => { try { return health.counters(); } catch { return null; } })();
+  return {
+    storage: {
+      configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+      persistFailures: persist?.persistFailures ?? 0,
+      lastPersistError: persist?.lastPersistError ?? null
+    },
+    live: {
+      required: !LIGHT_MODE,
+      state: liveStatus.recovery?.state ?? null,
+      error: liveStatus.recovery?.error ?? null
+    },
+    market
+  };
+};
 
 // ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══
 // هيكل خارجي/داخلي · بريميوم/ديسكاونت · choch up · نموذجا دخول · نقاط فشل موثقة.

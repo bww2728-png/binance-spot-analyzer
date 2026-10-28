@@ -79,8 +79,8 @@ git push -u origin main
 | الفحص | المسار/الأمر |
 | --- | --- |
 | الصفحة | `GET /` (يجب 200؛ 503 تعني `client/dist` ناقصا — راجع سجل البناء) |
-| الصحة | `GET /healthz` (يجب `{ok:true}` بلا انتظار DB) |
-| الجاهزية | `GET /readyz` (يجب `{ok:true, dist:true}`) |
+| الصحة | `GET /healthz` (حياة العملية فقط: `{ok:true}` بلا انتظار DB) |
+| الجاهزية | `GET /readyz` (جاهزية حقيقية: 200 و`state` = `ready`/`degraded`، أو 503 مع `reasons` عند فقد شرط حرج: حزمة الواجهة، تهيئة التخزين، أو فشل استعادة الفرص الحية) |
 | حالة القائمة | `GET /api/symbols/meta` (عدّاد الأصول + `last_updated`) |
 | مزامنة يدوية | `POST /api/symbols/sync` |
 | WebSocket | الاتصال بـ `wss(s)://<host>/ws` ← رسالة `hello` |

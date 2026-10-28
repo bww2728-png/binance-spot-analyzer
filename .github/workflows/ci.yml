@@ -1,0 +1,72 @@
+name: CI
+
+# لم يكن للمستودع أي فحص آلي: 660 اختباراً لا تعمل إلا يدوياً، وبناء العميل لا يُختبر
+# قبل الدفع. هذا الملف يجعل الانحدار مرئياً في كل Push و Pull Request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: server (tests + syntax + audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: install root deps
+        run: npm ci --no-audit --no-fund
+
+      - name: install server deps
+        run: npm ci --prefix server --no-audit --no-fund
+
+      - name: unit + integration tests
+        run: npm test
+
+      - name: syntax check (all server modules)
+        shell: bash
+        run: |
+          set -euo pipefail
+          find server -type f \( -name '*.mjs' -o -name '*.js' \) -not -path '*/node_modules/*' -print0 \
+            | xargs -0 -n1 node --check
+          echo "syntax ok"
+
+      - name: production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+  client:
+    name: client (typecheck + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: install
+        run: npm ci --prefix client --no-audit --no-fund
+
+      - name: typecheck
+        run: npm run lint --prefix client
+
+      - name: build
+        run: npm run build --prefix client
+
+      - name: production dependency audit
+        run: npm audit --omit=dev --audit-level=high --prefix client
