@@ -5,7 +5,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { WebSocketServer } from 'ws';
 import db from './db.js';
 import { researchSymbol } from './research.mjs';
 import { detectSymbol, buildSnapshot, ALL_TIMEFRAMES, bookSignals } from './liquidity/engine.mjs';
@@ -3553,9 +3552,10 @@ app.use((err, req, res, next) => {
 });
 
 // ---- خادم WebSocket لبث تحديثات قائمة الأزواج لحظياً ----
+// اختياري: منصات تمنع WebSockets في خططها المجانية (مثل SnapDeploy) تضبط DISABLE_SERVER_WS=1،
+// فتعمل الواجهة على الاحتياطي الدوري (/api/symbols/meta) بلا أي فقد وظيفي جوهري.
+// الاستيراد ديناميكي محروس: غياب حزمة ws من التبعيات لا يكسر الإقلاع.
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
-
 const wsClients = new Set();
 const broadcast = (obj) => {
   const payload = JSON.stringify(obj);
@@ -3566,29 +3566,40 @@ const broadcast = (obj) => {
   }
 };
 
-wss.on('connection', (ws) => {
-  wsClients.add(ws);
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
-  // ترحيب بالميتا الحالية
-  void (async () => {
-    try {
-      const lastUpdated = await db.symbols.lastUpdated();
-      ws.send(JSON.stringify({ type: 'hello', last_updated: lastUpdated }));
-    } catch { /* ignore */ }
-  })();
-  ws.on('close', () => wsClients.delete(ws));
-  ws.on('error', () => wsClients.delete(ws));
-});
+if (process.env.DISABLE_SERVER_WS === '1') {
+  console.log('[ws] disabled via DISABLE_SERVER_WS=1 — clients fall back to polling');
+} else {
+  try {
+    const { WebSocketServer } = await import('ws');
+    const wss = new WebSocketServer({ server, path: '/ws' });
 
-// heartbeat: تنظيف الاتصالات الميتة كل 30 ثانية
-setInterval(() => {
-  for (const ws of wsClients) {
-    if (ws.isAlive === false) { try { ws.terminate(); } catch { /* ignore */ } wsClients.delete(ws); continue; }
-    ws.isAlive = false;
-    try { ws.ping(); } catch { /* ignore */ }
+    wss.on('connection', (ws) => {
+      wsClients.add(ws);
+      ws.isAlive = true;
+      ws.on('pong', () => { ws.isAlive = true; });
+      // ترحيب بالميتا الحالية
+      void (async () => {
+        try {
+          const lastUpdated = await db.symbols.lastUpdated();
+          ws.send(JSON.stringify({ type: 'hello', last_updated: lastUpdated }));
+        } catch { /* ignore */ }
+      })();
+      ws.on('close', () => wsClients.delete(ws));
+      ws.on('error', () => wsClients.delete(ws));
+    });
+
+    // heartbeat: تنظيف الاتصالات الميتة كل 30 ثانية
+    setInterval(() => {
+      for (const ws of wsClients) {
+        if (ws.isAlive === false) { try { ws.terminate(); } catch { /* ignore */ } wsClients.delete(ws); continue; }
+        ws.isAlive = false;
+        try { ws.ping(); } catch { /* ignore */ }
+      }
+    }, 30000);
+  } catch {
+    console.warn('[ws] ws package unavailable — running HTTP-only (polling fallback)');
   }
-}, 30000);
+}
 
 server.listen(PORT, () => {
   const distOk = fs.existsSync(path.join(distDir, 'index.html'));
