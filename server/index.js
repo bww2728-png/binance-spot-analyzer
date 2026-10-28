@@ -2328,8 +2328,13 @@ const startLiquidityWorkbench = async () => {
     scheduleWorkbenchRetry();
   }
 };
-setTimeout(() => { void startLiquidityWorkbench(); }, 30_000);
-setTimeout(() => marketStreams.start(), 20_000); // ينطلق مع استقرار الخادم
+// الوضع الخفيف: حاويات صغيرة (خطط مجانية بذاكرة ~384MB) تشغّل التطبيق والـAPIs بلا
+// المحركات الخلفية الثقيلة (المختبر/الفرص الحية/الاستراتيجية الثانية/بذر البث) —
+// تلك تعمل على النشر الدائم المخصص لها، وهذه النسخة تقرأ نفس قاعدة البيانات.
+const LIGHT_MODE = process.env.LIGHT_MODE === '1';
+
+setTimeout(() => { if (!LIGHT_MODE) void startLiquidityWorkbench(); else console.log('[light] workbench engine disabled (LIGHT_MODE=1)'); }, 30_000);
+setTimeout(() => { if (!LIGHT_MODE) marketStreams.start(); else console.log('[light] market streams disabled (LIGHT_MODE=1)'); }, 20_000); // ينطلق مع استقرار الخادم
 /**
  * ★التحويل الحادث: مستمع واحد على إغلاق الشموع المجمّعة. كل شمعة أُغلقت في المخزن
  * (أي فريم) تُضاف إلى طابور منزوع التكرار وتُجدول في نهاية دورة الأحداث الحالية، ثم
@@ -2544,7 +2549,8 @@ const liveOpportunityRecovery = createLiveOpportunityRecovery({
   ),
   log: console
 });
-liveOpportunityRecovery.start(75_000);
+if (LIGHT_MODE) console.log('[light] live-opportunities engine disabled (LIGHT_MODE=1)');
+else liveOpportunityRecovery.start(75_000);
 
 // ═══ محرك «الفرص الحية — استراتيجيتي» — SMC كامل: قمم/قيعان محمية بخطواتها الخمس ═══
 // هيكل خارجي/داخلي · بريميوم/ديسكاونت · choch up · نموذجا دخول · نقاط فشل موثقة.
@@ -2703,7 +2709,7 @@ const strategy2Engine = createStrategyEngine({
   },
   shadow
 });
-setTimeout(() => strategy2Engine.start(), 95_000); // بعد محرك الفرص الأول (اشتراكات WS متسلسلة)
+setTimeout(() => { if (!LIGHT_MODE) strategy2Engine.start(); else console.log('[light] strategy2 engine disabled (LIGHT_MODE=1)'); }, 95_000); // بعد محرك الفرص الأول (اشتراكات WS متسلسلة)
 
 app.get('/api/strategy2/feed', handle(async (req, res) => {
   const feed = strategy2Engine.getFeed();
