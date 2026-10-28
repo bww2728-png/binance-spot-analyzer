@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, CaseActor, CaseImage, CaseRow, CoinShariahRow, EventLog, LiquidityZone, Settings, ShariahResearch, ShariahResearchStatus, ZoneHistoryGroup, ZonesAccuracy, BacktestStatus, BacktestResults, LiveOpportunitiesResponse, LiquidityDetection, LiquidityZoneEngineStatus, BuyFeed, BuyStatus, BuyOpportunity, BuyHistoryResponse, PersistedOpportunityHistoryPage, PersistedOpportunityHistorySummary, PersistedRejectionReason, Strategy2Feed, Strategy2HistoryResponse, Strategy2DirectionsResponse, LiquidityV2ZonesResponse, LiquidityV2StatusResponse, Candle } from './types';
 
 /**
@@ -10,14 +11,22 @@ import type { Analysis, AutoHistoryResponse, AutoZoneScreenshot, BarcodeScan, Ca
 const envUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const envKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined;
 
-export const supabase = createClient(
-  envUrl || window.location.origin,
-  envKey || 'verdent-baas-proxy'
-);
+/**
+ * مسار Supabase SDK معطّل نهائياً (`useSupabase=false` أدناه): كل النداءات تمرّ عبر
+ * Express. كان `createClient` يُنفَّذ دائماً عند تحميل الوحدة، فيسحب حزمة
+ * `vendor-supabase` (~221KB خام / 57KB مضغوطة) إلى التحميل الأول بلا أي مستهلك.
+ *
+ * الآن الإنشاء مشروط بنفس العلَم، فيستطيع المجمّع إسقاط الفرع الميت والاعتمادية معه.
+ * لا تغيير سلوكي: العلَم ثابت `false`، و`sbApi` لا يُستدعى إطلاقاً.
+ */
+const useSupabase = false;
+
+export const supabase = (useSupabase
+  ? createClient(envUrl || window.location.origin, envKey || 'verdent-baas-proxy')
+  : null) as unknown as SupabaseClient;
 // Force REST path: works on both localhost (dev) and any deployed origin (Railway/Vercel/etc.)
 // The Express server talks to Supabase via server/db.js (baked defaults).
 // Using the Supabase SDK directly from the client only works behind a same-origin BaaS proxy (e.g. Verdent Publish).
-const useSupabase = false;
 
 const SB = {
   analyses: 'analyses' as const,
