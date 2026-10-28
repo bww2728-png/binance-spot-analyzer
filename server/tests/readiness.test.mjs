@@ -111,3 +111,34 @@ test('مدخلات ناقصة لا تُسقط التقييم (لا رمي است
   assert.equal(r.state, READINESS_STATE.DEGRADED); // dist مجهول = تحذير
   assert.ok(r.reasons.some(x => x.code === 'bundle_unknown'));
 });
+
+test('عدّاد فشل حفظ غير رقمي ⇒ يظهر كتحذير صريح لا كصفر صامت', () => {
+  const r = evaluateReadiness({
+    ...healthy,
+    storage: { configured: true, persistFailures: 'abc' }
+  });
+  assert.equal(r.checks.storage.persistFailures, 0);
+  assert.equal(r.checks.storage.countersMalformed, true);
+  assert.ok(r.reasons.some(x => x.code === 'persist_counters_malformed'));
+  assert.equal(r.ready, true, 'تشخيص تالف لا يُسقط النظام');
+});
+
+test('persistFailures سالب أو كسري لا يُنتج عدّاداً مضللاً', () => {
+  const neg = evaluateReadiness({ ...healthy, storage: { configured: true, persistFailures: -5 } });
+  assert.equal(neg.checks.storage.persistFailures, 0);
+  assert.equal(neg.reasons.some(x => x.code === 'persist_failures'), false);
+
+  const frac = evaluateReadiness({ ...healthy, storage: { configured: true, persistFailures: 2.7 } });
+  assert.equal(frac.checks.storage.persistFailures, 2.7);
+  assert.ok(frac.reasons.some(x => x.code === 'persist_failures'));
+});
+
+test('LIGHT_MODE لا يُنتج تناقضاً: state=disabled وليس pending', () => {
+  const r = evaluateReadiness({
+    ...healthy,
+    lightMode: true,
+    live: { required: true, state: 'pending' }
+  });
+  assert.equal(r.checks.live.state, 'disabled');
+  assert.equal(r.state, READINESS_STATE.READY);
+});

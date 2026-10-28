@@ -32,7 +32,7 @@ import { createHealth } from './health.mjs';
 import { evaluateReadiness } from './readiness.mjs';
 import { cpus } from 'node:os';
 import { createRateLimiter } from './net/limiter.mjs';
-import { setRateLimiter } from './db.js';
+import { setRateLimiter, storageConfigured } from './db.js';
 import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
 import { startRetention } from './services/retention.mjs';
@@ -140,8 +140,8 @@ const runtime = {
   /** دليل الاستعادة بعد إعادة التشغيل: عدد المراجعات المستعادة ومفاتيح الظل */
   stateRestore: () => null,
   liquidityWorkbench: () => null,
-  /** مدخلات تقييم الجاهزية — تُربط بعد تهيئة المحركات (انظر /readyz) */
-  readinessProbe: () => ({})
+  /** مدخلات تقييم الجاهزية — تُربط بعد تهيئة المحركات (انظر /readyz). تفشل مغلقة عمداً. */
+  readinessProbe: () => { throw new Error('readiness probe not initialized'); }
 };
 let liquidityWorkbench = null;
 // نقطة صحّة لمنصات الاستضافة (Railway/…) — بلا مسار /api. فحص حياة فقط: العملية حيّة.
@@ -161,9 +161,14 @@ app.get('/readyz', (req, res) => {
   let probe = {};
   let probeError = null;
   try { probe = runtime.readinessProbe() ?? {}; } catch (e) { probeError = String(e?.message ?? e); }
-  const report = evaluateReadiness({ dist, ...probe });
-  res.status(report.ready ? 200 : 503).json({
+  // probe لا يملك `dist` أصلاً، والترتيب هنا يمنعه من تجاوزها لو تغيّر شكله لاحقاً.
+  const report = evaluateReadiness({ ...probe, dist });
+  // probe فاشل = جاهزية غير معلومة ⇒ 503. بدون ذلك كان فشل الـprobe يُنتج `degraded`/200،
+  // أي أن النقطة تُعلن «جاهز» بالضبط عندما تعجز عن التقييم.
+  const ok = !probeError && report.ready;
+  res.status(ok ? 200 : 503).json({
     ...report,
+    ready: report.ready && !probeError,
     dist,
     probeError,
     up: Date.now(),
@@ -241,8 +246,8 @@ app.use((req, res, next) => {
 
 // تحذير بدء التشغيل: لا قيم مدمجة في الكود — بلا هذين المتغيّرين كل نداءات التخزين ستفشل
 // (كان النص يقول «قيم مدمجة احتياطية» وهي غير موجودة، فيُقرأ الفشل كأنه عمل طبيعي)
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-  console.warn('[config] SUPABASE_URL/SUPABASE_ANON_KEY غير مضبوطين — التخزين والاستعادة معطّلان، /readyz ستُعيد 503');
+if (!storageConfigured()) {
+  console.warn('[config] التخزين غير مُهيّأ (SUPABASE_URL + مفتاح) — الحفظ والاستعادة معطّلان، /readyz ستُعيد 503');
 }
 
 // رفضوع وعود مرفوضة في الحلقات الخلفية يجب ألا تُسقط healthz بصمت
@@ -2587,7 +2592,8 @@ runtime.readinessProbe = () => {
   const persist = (() => { try { return health.counters(); } catch { return null; } })();
   return {
     storage: {
-      configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+      // مصدر واحد للحقيقة: نفس الشرط الذي يستخدمه db.js فعلياً (يشمل احتياط VITE_).
+      configured: storageConfigured(),
       persistFailures: persist?.persistFailures ?? 0,
       lastPersistError: persist?.lastPersistError ?? null
     },
@@ -2596,7 +2602,9 @@ runtime.readinessProbe = () => {
       state: liveStatus.recovery?.state ?? null,
       error: liveStatus.recovery?.error ?? null
     },
-    market
+    market,
+    // LIGHT_MODE يُعطّل المحرك عمداً، فلا يجوز أن يظهر `pending` مع `ready:true`.
+    lightMode: LIGHT_MODE
   };
 };
 

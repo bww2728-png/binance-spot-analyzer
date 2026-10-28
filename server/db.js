@@ -15,6 +15,17 @@ export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
 
+/**
+ * هل التخزين مُهيّأ فعلاً؟ **المصدر الواحد للحقيقة**.
+ *
+ * السبب: فحص الجاهزية في `index.js` كان يعيد بناء نفس الشرط نصّاً
+ * (`SUPABASE_URL && SUPABASE_ANON_KEY`)، فأغفل الاحتياط `VITE_SUPABASE_PUBLISHABLE_KEY`
+ * الموجود هنا. الأثر: نشر يضبط المفتاح عبر `VITE_` فقط يعمل تخزينه فعلياً وتُعلنه
+ * `/readyz` معطّلاً (503 كاذب دائم). وكذلك بعد خطة التقوية (`SUPABASE_SERVICE_ROLE_KEY`)
+ * لكان الشرط القديم يسقط بينما الخادم يعمل.
+ */
+export const storageConfigured = () => Boolean(process.env.SUPABASE_URL && SUPABASE_KEY);
+
 const keyAuthHeaders = (key) => key.startsWith('sb_publishable_') || key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` };
 const baseHeaders = {
   apikey: SUPABASE_KEY,

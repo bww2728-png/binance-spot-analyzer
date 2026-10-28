@@ -44,7 +44,9 @@ jobs:
           echo "syntax ok"
 
       - name: production dependency audit
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit --omit=dev --audit-level=high --prefix server
 
   client:
     name: client (typecheck + build)

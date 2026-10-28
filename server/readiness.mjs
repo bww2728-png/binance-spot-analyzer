@@ -45,7 +45,11 @@ export function evaluateReadiness({
 
   const checks = {
     dist: { ok: dist === null ? null : Boolean(dist) },
-    storage: { configured: storage?.configured ?? null, persistFailures: Number(storage?.persistFailures) || 0 },
+    storage: {
+      configured: storage?.configured ?? null,
+      persistFailures: Number.isFinite(Number(storage?.persistFailures)) ? Math.max(0, Number(storage.persistFailures)) : 0,
+      countersMalformed: storage?.persistFailures != null && !Number.isFinite(Number(storage.persistFailures))
+    },
     live: { required: lightMode ? false : Boolean(live?.required), state: live?.state ?? null, error: live?.error ?? null },
     market: {
       available: market?.available ?? null,
@@ -57,10 +61,11 @@ export function evaluateReadiness({
   if (dist === false) add('bundle_missing', 'critical', 'client/dist/index.html مفقود');
   else if (dist === null) add('bundle_unknown', 'warning', null);
 
-  if (storage?.configured === false) add('storage_unconfigured', 'critical', 'SUPABASE_URL/SUPABASE_ANON_KEY غير مضبوطين');
+  if (storage?.configured === false) add('storage_unconfigured', 'critical', 'SUPABASE_URL + مفتاح Supabase غير مضبوطين');
   if (checks.storage.persistFailures > 0) {
     add('persist_failures', 'warning', storage?.lastPersistError ?? null);
   }
+  if (checks.storage.countersMalformed) add('persist_counters_malformed', 'warning', 'persistFailures غير رقمي');
 
   if (lightMode) {
     checks.live.state = 'disabled';

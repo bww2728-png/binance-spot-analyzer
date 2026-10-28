@@ -14,7 +14,7 @@
 | كل مسارات `/api` بلا مصادقة | لا وسيط تحقّق في `server/index.js`؛ لا `Authorization` في أي مسار |
 | لا حدّ معدل على المدخلات | لا middleware لحد الطلبات (المحدد الموجود يخص نداءات Binance الصادرة) |
 | كل جدول مفعّل عليه RLS لكن بسياسة `anon` كاملة | `server/migrations/000_full_schema.sql` — `create policy "<t>_all" ... to anon using (true) with check (true)` |
-| الخادم يستخدم `SUPABASE_ANON_KEY` وحده للقراءة والكتابة | `server/db.js` — `SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || ...` |
+| الخادم يستخدم مفتاحاً واحداً للقراءة والكتابة (Anon أو `VITE_`) | `server/db.js` — `SUPABASE_KEY = process.env.SUPABASE_ANON_KEY \|\| process.env.VITE_SUPABASE_PUBLISHABLE_KEY \|\| ''` (لا `service_role`) |
 | المتصفح لا يتصل بـSupabase مباشرة | `client/src/lib/api.ts` — `useSupabase = false`، وكل النداءات عبر Express |
 | مفتاح `anon` غير موجود في المستودع | لا `supabase.co` ولا `eyJ...` في أي ملف مصدر |
 
@@ -53,6 +53,7 @@ const SUPABASE_KEY =
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   '';
 export const usingServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+// storageConfigured() قائمة بالفعل وتقرأ SUPABASE_KEY — لا تحتاج تعديلاً بعد هذه الخطوة.
 ```
 
 4. أعد النشر. **لا تغيير سلوكي**: السياسات الحالية تسمح للمفتاحين بالشيء نفسه.
