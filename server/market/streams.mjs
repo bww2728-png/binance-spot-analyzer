@@ -1107,6 +1107,9 @@ export function createMarketStreams({
         lastUpdateAt: agg.lastUpdateAt
       };
       return {
+        /** هل حزمة البث متاحة أصلاً؟ false ⇒ مسار REST/الاستطلاع فقط (تدهور معلن لا صامت) */
+        available: WebSocket != null,
+        transport: WebSocket != null ? 'ws' : 'rest-fallback',
         connected: conns.some(c => c.ws.readyState === WS_OPEN),
         connections: conns.length,
         streams: conns.reduce((a, c) => a + c.active.size, 0),
