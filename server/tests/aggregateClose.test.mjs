@@ -11,9 +11,15 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WebSocketServer } from 'ws';
+// ws اختيارية (انظر market/streams.mjs): تُتخطى اختبارات البث الحي على المنصات بلا WebSockets
+let WebSocketServer = null;
+try { WebSocketServer = (await import('ws')).WebSocketServer; } catch { WebSocketServer = null; }
+
 import { createMarketStreams, createKeyQueue } from '../market/streams.mjs';
 
+if (!WebSocketServer) {
+  test('ws غير متاحة — اختبارات البث الحي متخطاة (وضع HTTP-only)', { skip: 'ws package not installed' }, () => {});
+} else {
 const silentLog = { log: () => {}, warn: () => {}, error: () => {} };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -239,3 +245,4 @@ test('8) createKeyQueue: معالج فاشل لا يُسقط الطابور ول
   await Promise.resolve();
   assert.equal(calls, 2, 'الطابور لم يتعطل بعد الفشل');
 });
+}

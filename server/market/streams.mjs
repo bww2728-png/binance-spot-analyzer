@@ -16,7 +16,12 @@
  * النمط: بذر REST مرة واحدة (500 شمعة) → تحديث حي بالبث → تسوية REST خفيفة دورية ضد الانجراف.
  */
 
-import WebSocket from 'ws';
+// حزمة ws اختيارية: منصات تمنع WebSockets (مثل الخطط المجانية) تشغّل الموديول بلا بث حي —
+// تعمل عندها الأسعار والشموع على بذر REST ودوريات الاستطلاع بدل البث، بلا أي انهيار.
+let WebSocket = null;
+try { WebSocket = (await import('ws')).default; } catch { WebSocket = null; }
+const WS_OPEN = 1; // يكافئ WS_OPEN في حزمة ws
+export const marketStreamsAvailable = () => WebSocket != null;
 import { detectBubbles, detectIceberg } from '../liquidity/orderbook.mjs';
 import { createCandleStore, TF_MS } from './candleStore.mjs';
 
@@ -210,7 +215,7 @@ export function createMarketStreams({
   }
 
   function openConn(id) {
-    if (stopped) return;
+    if (stopped || !WebSocket) return;
     const host = cfg.hosts[hostIndex % cfg.hosts.length];
     // الاتصال الأول يحمل أسعار السوق الإجمالية في URL — البقية تتصل عاراة وتشترك بطلباتها
     const url = id === 1 ? `${host}/stream?streams=!miniTicker@arr` : `${host}/stream`;
@@ -234,13 +239,13 @@ export function createMarketStreams({
       attempt = 0;
       conn.lastMsgAt = now();
       conn.keepAlive = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === WS_OPEN) {
           try { ws.ping(); } catch { /* onclose يتبع */ }
         }
       }, 30_000);
       // مراقب حياة: اتصال أصمّ بلا رسائل (شبكة معلقة بلا إغلاق) يُقطع لإعادة الفتح
       conn.livenessTimer = setInterval(() => {
-        if (stopped || ws.readyState !== WebSocket.OPEN) return;
+        if (stopped || ws.readyState !== WS_OPEN) return;
         const silent = now() - (conn.lastMsgAt || 0);
         if (silent > cfg.livenessTimeoutMs) {
           log.warn?.(`[market-streams] shard#${id} silent ${Math.round(silent / 1000)}s — recycling`);
@@ -708,7 +713,7 @@ export function createMarketStreams({
   }
 
   function flushOn(conn, op) {
-    if (conn.ws.readyState !== WebSocket.OPEN) return; // on open يُعاد الإرسال تلقائياً
+    if (conn.ws.readyState !== WS_OPEN) return; // on open يُعاد الإرسال تلقائياً
     const bag = op === 'sub' ? conn.pendingSubs : conn.pendingUnsubs;
     if (!bag.size) return;
     const names = [...bag];
@@ -915,7 +920,8 @@ export function createMarketStreams({
       started = true;
       stopped = false;
       startedAt = now();
-      syncSubs(); // يفتح الاتصالات المطلوبة ويوزع الاشتراكات
+      if (WebSocket) syncSubs(); // يفتح الاتصالات المطلوبة ويوزع الاشتراكات (يتخطى عند غياب ws)
+      else log.warn?.('[market-streams] ws unavailable — REST seeding/polling only, no live streaming');
       reconcileTimer = setInterval(reconcileTick, cfg.reconcileMs);
       if (reconcileTimer.unref) reconcileTimer.unref();
       // استطلاع أسعار REST: يضمن حداثة كل رمز رغم تقطّع نبضات البث المتاح
@@ -943,7 +949,7 @@ export function createMarketStreams({
      * الشرط الأخير ضروري: اتصال «مفتوح» بلا رسائل يعني بيانات مجمّدة، وهي أسوأ من
      * الرجوع إلى REST لأنها تبدو صالحة. الاستهلاك يعرف الفرق من getPriceAt.
      */
-    connected: () => conns.some(c => c.ws.readyState === WebSocket.OPEN)
+    connected: () => conns.some(c => c.ws.readyState === WS_OPEN)
       && prices.size > 0
       && (!lastMessageAt || now() - lastMessageAt <= cfg.priceStaleMs),
     getPrice: (symbol) => prices.get(String(symbol).toUpperCase())?.price ?? null,
@@ -1086,7 +1092,7 @@ export function createMarketStreams({
         if (recentTraders.has(sym)) tradingStaleCandles += 1;
       }
       const silent = conns
-        .filter(c => c.ws.readyState === WebSocket.OPEN && t - (c.lastMsgAt || 0) > cfg.livenessTimeoutMs)
+        .filter(c => c.ws.readyState === WS_OPEN && t - (c.lastMsgAt || 0) > cfg.livenessTimeoutMs)
         .length;
       /**
        * إحصاء المخزن المجمّع: دليل أثر التحويل الحادث (مفاتيح/شموع/ذاكرة/فجوات).
@@ -1101,7 +1107,7 @@ export function createMarketStreams({
         lastUpdateAt: agg.lastUpdateAt
       };
       return {
-        connected: conns.some(c => c.ws.readyState === WebSocket.OPEN),
+        connected: conns.some(c => c.ws.readyState === WS_OPEN),
         connections: conns.length,
         streams: conns.reduce((a, c) => a + c.active.size, 0),
         klineSubs: wantedKlines.size,
