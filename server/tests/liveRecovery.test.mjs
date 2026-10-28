@@ -115,13 +115,13 @@ test('live recovery: a failed emergency-state read prevents startup and schedule
   assert.equal(recovery.getState().retryScheduled, true);
 });
 
-test('live recovery: a truncated read never reaches rehydrate or start', async () => {
+test('live recovery: a truncated opportunities read never reaches rehydrate or start', async () => {
   const h = makeEngine();
   const timers = fakeTimers();
   const recovery = createLiveOpportunityRecovery({
     engine: h.engine,
-    readLifecycle: async () => ({ rows: [{ id: 1 }], pages: 1, truncated: true }),
-    readOpportunities: emptyPage,
+    readLifecycle: emptyPage,
+    readOpportunities: async () => ({ rows: [{ id: 1 }], pages: 1, truncated: true }),
     setTimeoutFn: timers.setTimeoutFn,
     clearTimeoutFn: timers.clearTimeoutFn,
     log: { log() {}, error() {} }
@@ -131,6 +131,26 @@ test('live recovery: a truncated read never reaches rehydrate or start', async (
   assert.equal(h.events.some(event => event.startsWith('rehydrate:')), false);
   assert.equal(h.starts(), 0);
   assert.equal(h.engine.getStatus().recovery.state, 'failed');
+});
+
+test('live recovery: a truncated lifecycle read degrades but still recovers and starts', async () => {
+  const h = makeEngine();
+  const timers = fakeTimers();
+  const recovery = createLiveOpportunityRecovery({
+    engine: h.engine,
+    // أقدم صفوف دورة الحياة هي ما يُسقط عند الاقتطاع، وهي أصلاً مرشحة للإسقاط بقاعدة
+    // النضارة — فتُقبل الاستعادة المتدهورة بدل انسداد دائم يمنع المحرك إلى الأبد.
+    readLifecycle: async () => ({ rows: [{ id: 1 }], pages: 1, truncated: true }),
+    readOpportunities: emptyPage,
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+    log: { log() {}, warn() {}, error() {} }
+  });
+  const result = await recovery.runNow();
+  assert.equal(result.ok, true);
+  assert.ok(h.events.some(event => event.startsWith('rehydrate:')));
+  assert.equal(h.starts(), 1);
+  assert.equal(h.engine.getStatus().recovery.state, 'ready');
 });
 
 test('live recovery: stop ثم start أثناء قراءة معلقة لا يطلق استعادة مزدوجة', async () => {

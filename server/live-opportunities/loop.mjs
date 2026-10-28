@@ -1400,9 +1400,11 @@ export function createLiveOpportunityEngine(deps) {
    */
   function rehydrate(rows, meta = {}) {
     if (cfg.recoveryRequired) {
+      // اقتطاع دورة الحياة مقبول (الأقدم تُسقطه قاعدة النضارة أصلاً) — أما فشل القراءة
+      // أو اقتطاع فرص النشر فيمنع الاستعادة: لا يجوز فقد فرصة مفتوحة.
       const complete = Array.isArray(rows)
         && meta.lifecycle?.ok === true && meta.opportunities?.ok === true
-        && !meta.lifecycle?.truncated && !meta.opportunities?.truncated;
+        && !meta.opportunities?.truncated;
       if (!complete) {
         status.rehydrateMeta = meta;
         const error = 'استعادة الفرص الحية غير مكتملة أو تجاوزت حد الصفوف';

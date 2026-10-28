@@ -62,13 +62,20 @@ export function createLiveOpportunityRecovery({
         ? { ok: true, paused: Boolean(pauseStateResult.value?.paused), pauseUpdatedAt: Number(pauseStateResult.value?.pauseUpdatedAt) || null }
         : { ok: false, error: String(pauseStateResult.reason?.message ?? pauseStateResult.reason) };
 
-      const failed = Object.entries(metadata).filter(([, result]) => !result.ok || result.truncated);
+      // اقتطاع سجل دورة الحياة غير قاتل: الصفوف المسقطة هي الأقدم، والسويبات الأقدم
+      // من نافذة النضارة تُسقط أصلاً عند إعادة البناء، والمتتبعات الفردية تُعاد بناؤها
+      // من مصدر المناطق الحي في أول دورة. اقتطاع فرص النشر يبقى قاتلاً — لا يجوز فقد
+      // فرصة مفتوحة، وكذلك أي فشل قراءة.
+      const failed = Object.entries(metadata).filter(([name, result]) => !result.ok || (result.truncated && name !== 'lifecycle'));
       if (failed.length) {
         const error = failed.map(([name, result]) => `${name}: ${result.error ?? (result.truncated ? 'تجاوز حد الاستعادة' : 'فشل غير محدد')}`).join(' · ');
         engine.setRecoveryState('failed', { error, metadata });
         log.error?.('[live-opp] recovery incomplete; engine remains paused:', metadata);
         scheduleRetry(runGeneration);
         return { ok: false, metadata };
+      }
+      if (metadata.lifecycle?.truncated) {
+        log.warn?.('[live-opp] lifecycle history truncated at the read cap; recovering with the newest rows only:', metadata.lifecycle);
       }
 
       const rows = [...lifecycleResult.value.rows, ...opportunitiesResult.value.rows];

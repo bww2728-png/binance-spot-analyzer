@@ -2535,7 +2535,9 @@ const liveOpportunityRecovery = createLiveOpportunityRecovery({
   },
   readLifecycle: () => readAllPages(
     ({ beforeId, limit }) => db.events.liveLifecyclePage(Date.now() - LIVE_RECOVERY_WINDOW_MS, beforeId, limit),
-    { pageSize: 1000, maxRows: 50_000 }
+    // سقف أعلى من الحجم الفعلي ليوم كامل من أحداث دورة الحياة (~150k) — والاقتطاع
+    // فوق السقف غير قاتل (أقدم الأحداث تُسقط أصلاً بقاعدة النضارة عند إعادة البناء).
+    { pageSize: 1000, maxRows: 200_000 }
   ),
   readOpportunities: () => readAllPages(
     ({ beforeId, limit }) => db.events.liveOppEventsPage(0, beforeId, limit),
