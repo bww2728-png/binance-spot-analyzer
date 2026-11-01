@@ -159,6 +159,13 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       totalZones: result.totalZones,
       zonesCapped: false,
       zones: result.zones.map((zone) => ({ ...zone, engine: result.engine })),
+      // أحداث البنية مرة واحدة (v2 فقط تنتجها؛ legacy تعيد مصفوفة فارغة) — لا نسخة لكل منطقة
+      structureEvents: result.structureEvents ?? [],
+      meta: {
+        rightBars: result.rightBars ?? null,
+        // توقيت الحساب على ساعة الخادم — للعرض التشخيصي فقط، ولا يدخل في قرار الظهور التاريخي
+        computedAt: now()
+      },
       candles: rows,
       computeMs: result.computeMs,   // زمن حساب المحرك داخل الخيط المنفصل
       totalMs: now() - t0,           // الجلب + الحساب + التحويل
