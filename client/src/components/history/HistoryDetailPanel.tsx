@@ -50,7 +50,13 @@ export default function HistoryDetailPanel({ element, data, cursorTime, replay, 
    * نطاق حياة المنطقة من القائمة العامة (بيانات المصدر نفسها، بلا صلة مخترعة).
    */
   const zoneStart = element.createdAt ?? element.availableAt;
-  const zoneEnd = element.endAt ?? cursorTime;
+  /**
+   * نهاية نطاق حياة المنطقة لا تتجاوز مؤشر الوقت في وضع التتبع: منطقة سُحبت بعد
+   * المؤشر كان نطاقها يمتد إلى ما بعد المؤشر، فتُعرض أحداث لم تقع بعد عند هذه اللحظة.
+   */
+  const zoneEnd = element.endAt == null
+    ? cursorTime
+    : (replay ? Math.min(element.endAt, cursorTime) : element.endAt);
   const relatedEvents: HistoryStructureEvent[] = (data.structureEvents ?? []).filter((e) => {
     if (zoneStart == null) return false;
     const at = e.availableAt ?? e.time;

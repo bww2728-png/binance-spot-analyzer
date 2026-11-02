@@ -172,6 +172,86 @@ test('منطقة بلا أزمنة: availableAt = null بدل اختلاق قي�
   assert.equal(out.confirmedAt, null);
 });
 
+test('v2: availableAt لحدث بنيوي لا يسبق تأكيد أي بيفوت يعتمد عليه (منع تسرب حقيقي)', () => {
+  const candles = makeCandles();
+  const endIndex = candles.length - 1;
+  const zones = detectLiquidityZonesV2({ symbol: 'TESTUSDT', timeframe: '1m', candles, endIndex });
+  const rightBars = adaptiveConfig(candles, endIndex).rightBars;
+  const serializer = createHistorySerializer(candles);
+  serializer.setRightBars(rightBars);
+  const lastIndex = candles.length - 1;
+  const timeAt = (i) => candles[Math.min(Math.max(i, 0), lastIndex)].time;
+
+  const events = new Map();
+  for (const zone of zones) {
+    for (const raw of zone.structureEvents ?? []) {
+      const ev = serializer.serializeEvent(raw);
+      if (ev) events.set(ev.key, ev);
+    }
+  }
+  assert.ok(events.size > 0);
+
+  let leakFree = 0;
+  for (const ev of events.values()) {
+    if (ev.type === 'idm') continue;
+    const pivots = [ev.brokenPivotIndex, ev.evidence?.high1, ev.evidence?.low1].filter((i) => typeof i === 'number');
+    const latestConfirm = Math.max(...pivots.map((i) => timeAt(i + rightBars)));
+    assert.ok(
+      ev.availableAt >= latestConfirm,
+      `${ev.key}: availableAt (${ev.availableAt}) يسبق تأكيد بيفوته الأخير (${latestConfirm})`
+    );
+    // الأحداث تُعرض فقط عند/بعد لحظة إمكان معرفتها
+    assert.ok(ev.availableAt >= ev.time);
+    leakFree += 1;
+  }
+  assert.ok(leakFree > 0, 'وُجدت أحداث غير IDM لاختبارها');
+});
+
+test('v2: invalidation.at المساوي لـsweptAt لا يُعرض إبطالاً مستقلاً', () => {
+  const candles = makeCandles(60);
+  const serializer = createHistorySerializer(candles);
+  const base = {
+    id: 'z1', kind: 'supply', state: 'swept', referenceLevel: 105, referenceAlt: null,
+    liquidityLevel: 106, retailStop: 107, zoneBox: { high: 106, low: 104 }, bodyBox: null,
+    createdAt: candles[5].time, confirmedAt: candles[20].time,
+    confidence: 0.5, touches: 1, timeframe: '1m',
+    touchPoints: [{ index: 5, time: candles[5].time, price: 105 }],
+    trendline: null, atr: 0.5, distanceAtr: 0, prominenceAtr: 3, reasons: [], premium: null,
+    form: 'A', fvgs: [], structureEvents: []
+  };
+  // (1) المحرك v2: invalidation.at === sweptAt ⇒ لا إبطال مستقل (يُعلن فجوة)
+  const same = serializer.serializeZone({
+    ...base,
+    sweptAt: candles[40].time,
+    invalidation: { reason: 'سُحبت السيولة', at: candles[40].time }
+  });
+  assert.equal(same.sweptAt, candles[40].time);
+  assert.equal(same.invalidatedAt, null, 'نفس الزمن لا يُسمّى إبطالاً منفصلاً');
+
+  // (2) منطقة بإبطال زمني مستقل فعلاً ⇒ يُمرَّر كما هو
+  const distinct = serializer.serializeZone({
+    ...base,
+    state: 'invalidated',
+    sweptAt: null,
+    invalidation: { reason: 'انتهاء الصلاحية', at: candles[30].time }
+  });
+  assert.equal(distinct.invalidatedAt, candles[30].time);
+  assert.equal(distinct.sweptAt, null, 'الإبطال لا يُسمّى سويباً');
+});
+
+test('v2: fvg.invalidatedAt يُمرَّر كما وصل ولا يُخترع عند غيابه', () => {
+  const candles = makeCandles(60);
+  const serializer = createHistorySerializer(candles);
+  const withTime = serializer.serializeFvg({
+    index: 10, time: candles[10].time, kind: 'bullish', top: 105, bottom: 104, invalidatedAt: candles[25].time
+  });
+  assert.equal(withTime.invalidatedAt, candles[25].time, 'الزمن الواصل يُمرَّر');
+  const without = serializer.serializeFvg({
+    index: 10, time: candles[10].time, kind: 'bullish', top: 105, bottom: 104
+  });
+  assert.equal(without.invalidatedAt, null, 'لا يُخترع زمن إبطال');
+});
+
 test('rightBars يُضبط من adaptiveConfig ويؤثر في availableAt (لا قيمة مخفية)', () => {
   const candles = makeCandles(200);
   const serializer = createHistorySerializer(candles);

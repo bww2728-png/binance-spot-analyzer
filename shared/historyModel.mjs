@@ -194,9 +194,15 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
 
   const engineTypes = ENGINE_TYPES[engine] ?? ENGINE_TYPES.legacy;
   const allowEvents = engine === 'v2';
+  const unexpectedKinds = new Set();
 
   for (const zone of zones) {
     if (!zone || !TYPE_META[zone.kind]) continue;
+    // حماية حدود المحركين: نوع لا ينتجه المحرك المختار لا يُبنى (يُعلن في الفجوات)
+    if (!engineTypes.includes(zone.kind)) {
+      unexpectedKinds.add(zone.kind);
+      continue;
+    }
     const timing = zoneTiming(zone);
     const meta = TYPE_META[zone.kind];
     const range = zoneRange(zone);
@@ -237,7 +243,8 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
       confirmedBasis: timing.confirmedBasis,
       sweptAt: timing.sweptAt,
       invalidatedAt: timing.invalidatedAt,
-      endAt: timing.sweptAt,
+      // أول لحظة انتهاء فعلياً: السويب أو الإبطال، أيهما أسبق
+      endAt: minDefined(timing.sweptAt, timing.invalidatedAt),
       // عنصر بلا زمن معرفة حقيقي: لا يُعرض في وضع التتبع إلا بخيار صريح
       untimed: timing.availableAt == null,
       high,
@@ -279,46 +286,55 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
     elements.push(element);
 
     // ---- نقاط اللمس/الارتكاز كعناصر مستقلة (قمة/قاع)
-    const swingType = zone.kind.includes('ssl') ? 'swing_low' : 'swing_high';
-    for (const p of points) {
-      const key = `${swingType}:${p.time}:${p.price}`;
-      if (seenTouch.has(key)) continue;
-      seenTouch.add(key);
-      elements.push({
-        id: `touch:${key}`,
-        typeId: swingType,
-        shape: 'marker',
-        zoneId: zone.id,
-        label: TYPE_META[swingType].label,
-        color: TYPE_META[swingType].color,
-        rgb: TYPE_META[swingType].rgb,
-        state: 'confirmed',
-        createdAt: p.time,
-        availableAt: p.availableAt ?? p.time,
-        confirmedAt: p.time,
-        confirmedBasis: 'pivot',
-        sweptAt: null,
-        invalidatedAt: null,
-        endAt: p.time,
-        untimed: false,
-        high: p.price,
-        low: p.price,
-        price: p.price,
-        priceAlt: null,
-        liquidity: null,
-        points: [],
-        trend: null,
-        touches: 1,
-        confidence: null,
-        atr: null,
-        distanceAtr: null,
-        formation: null,
-        fvgs: [],
-        breaks: [],
-        eventKeys: [],
-        marker: 'circle',
-        raw: { zoneId: zone.id, kind: zone.kind, time: p.time, price: p.price, availableAt: p.availableAt ?? p.time }
-      });
+    /**
+     * عرض/طلب (`shape: 'box'`) تُصدَّر بنقطة واحدة = **منتصف الصندوق** (تساوي
+     * referenceLevel تماماً)، وليست بيفوتاً. تحويلها إلى علامة سويب كان يختلق «قمة
+     * سعرية» عند منتصف مستطيل الطلب/العرض (578 علامة مختلقة مقيسة على v2/7d)،
+     * ويكسر قاعدة «الشكل يطابق النوع». تُبنى العلامات لأنواع البيفوتات فقط.
+     */
+    const pivotBased = meta.shape !== 'box';
+    if (pivotBased) {
+      const swingType = zone.kind.includes('ssl') ? 'swing_low' : 'swing_high';
+      for (const p of points) {
+        const key = `${swingType}:${p.time}:${p.price}`;
+        if (seenTouch.has(key)) continue;
+        seenTouch.add(key);
+        elements.push({
+          id: `touch:${key}`,
+          typeId: swingType,
+          shape: 'marker',
+          zoneId: zone.id,
+          label: TYPE_META[swingType].label,
+          color: TYPE_META[swingType].color,
+          rgb: TYPE_META[swingType].rgb,
+          state: 'confirmed',
+          createdAt: p.time,
+          availableAt: p.availableAt ?? p.time,
+          confirmedAt: p.time,
+          confirmedBasis: 'pivot',
+          sweptAt: null,
+          invalidatedAt: null,
+          endAt: p.time,
+          untimed: false,
+          high: p.price,
+          low: p.price,
+          price: p.price,
+          priceAlt: null,
+          liquidity: null,
+          points: [],
+          trend: null,
+          touches: 1,
+          confidence: null,
+          atr: null,
+          distanceAtr: null,
+          formation: null,
+          fvgs: [],
+          breaks: [],
+          eventKeys: [],
+          marker: 'circle',
+          raw: { zoneId: zone.id, kind: zone.kind, time: p.time, price: p.price, availableAt: p.availableAt ?? p.time }
+        });
+      }
     }
 
     // ---- فجوات FVG المرتبطة (v2 فقط، وتُعرض مرة واحدة)
@@ -432,6 +448,11 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
     gaps.push('`zone.idm` في مخرجات v2 فارغ دائماً؛ بيانات IDM متاحة فقط عبر أحداث البنية.');
     gaps.push('`structureEvents` داخل كل منطقة في v2 = كل الأحداث من نشأة المنطقة حتى نهاية النافذة، لا صلة محددة بها؛ تُعرض الأحداث مرة واحدة وتُفلتر في التفاصيل بنطاق زمن المنطقة.');
     gaps.push('مناطق العرض/الطلب لا تحمل sweptAt/invalidatedAt — تُرسم حتى آخر شمعة بحالة المحرك نفسها.');
+    gaps.push('مناطق العرض/الطلب تحمل نقطة لمس واحدة = منتصف الصندوق لا بيفوتاً؛ لا تُبنى منها علامات قمة/قاع.');
+    gaps.push('`fvg.invalidatedAt` يُحسب في `v2/imbalance.mjs` لكن `v2/index.mjs` يُسقطه (مع `fvg.time`) عند بناء المنطقة، فيُقبل دائماً `undefined` ⇒ كل FVG يُرسم حياً حتى آخر شمعة. الشارت يمرّر الحقل كما هو ولا يخترع زمناً.');
+  }
+  if (unexpectedKinds.size > 0) {
+    gaps.push(`أنواع وصلت من المحرك خارج قائمة أنواعه المعلنة ولم تُبنَ (حماية فصل المحركين): ${[...unexpectedKinds].join(', ')}.`);
   }
   gaps.push('المرجع البديل (referenceAlt) يُنتج بلا زمن تكوّن — يُعرض كخط بلا توقيت ويُخفى في وضع التتبع ما لم يُفعَّل خيار «العناصر غير المؤرخة».');
   gaps.push('`detectedAt` (ساعة الجهاز عند الحساب) لا يُمرَّر إلى الشارت التاريخي: لا يحمل معلومة تاريخية ويجعل المخرجات غير حتمية.');
@@ -519,17 +540,48 @@ export function defaultFilters() {
   };
 }
 
-/** دمج فلاتر محفوظة مع الافتراضي (تحصين ضد مخطط قديم/ناقص) */
+/**
+ * دمج فلاتر محفوظة مع الافتراضي (تحصين ضد مخطط قديم/ناقص/تالف).
+ * الحقول الرقمية تُثبَّت عددياً: قيمة نصية في `localStorage` كانت تُسقط الرسم
+ * عند `.toFixed`، وقيمة غير منتهية تُشوّه المدى.
+ */
 export function mergeFilters(saved) {
   const base = defaultFilters();
   if (!saved || typeof saved !== 'object') return base;
+  const numOr = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+  const nullableNum = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  const bool = (v) => v === true;
+  const side = saved.side === 'above' || saved.side === 'below' ? saved.side : 'all';
   return {
     ...base,
     ...saved,
+    minTouches: numOr(saved.minTouches, base.minTouches),
+    minConfidence: numOr(saved.minConfidence, base.minConfidence),
+    timeFrom: nullableNum(saved.timeFrom),
+    timeTo: nullableNum(saved.timeTo),
+    side,
+    priceMin: nullableNum(saved.priceMin),
+    priceMax: nullableNum(saved.priceMax),
+    withinView: bool(saved.withinView),
+    atrDistance: nullableNum(saved.atrDistance),
+    showHistory: saved.showHistory !== false,
+    confirmedOnly: bool(saved.confirmedOnly),
+    untimed: bool(saved.untimed),
     types: { ...base.types, ...(saved.types ?? {}) },
     states: { ...base.states, ...(saved.states ?? {}) },
     formations: { ...base.formations, ...(saved.formations ?? {}) },
-    appearance: { ...base.appearance, ...(saved.appearance ?? {}) }
+    appearance: {
+      ...base.appearance,
+      ...(saved.appearance ?? {}),
+      opacity: numOr(saved.appearance?.opacity, base.appearance.opacity),
+      lineWidth: numOr(saved.appearance?.lineWidth, base.appearance.lineWidth),
+      labels: bool(saved.appearance?.labels ?? base.appearance.labels),
+      touchPoints: bool(saved.appearance?.touchPoints ?? base.appearance.touchPoints),
+      alt: bool(saved.appearance?.alt ?? base.appearance.alt),
+      fvg: bool(saved.appearance?.fvg ?? base.appearance.fvg),
+      extend: bool(saved.appearance?.extend ?? base.appearance.extend),
+      body: bool(saved.appearance?.body ?? base.appearance.body)
+    }
   };
 }
 
@@ -750,11 +802,15 @@ export function layoutElements({
       if (!insideX(x1) || x2 == null || x2 <= x1) { culled += 1; continue; }
       const yRef = el.price != null ? py(el.price) : null;
       const yLiq = el.liquidity != null ? py(el.liquidity) : null;
-      if (!insideY(yRef) && !insideY(yLiq)) { culled += 1; continue; }
+      // حدّا النطاق يُحسبان قبل بوابة الرسم: عند تكبير سعري قد تخرج القيمة المرجعية
+      // ومستوى السيولة من الشاشة بينما جسم النطاق ظاهر — استبعاده كان يُخفي نطاقاً حياً.
+      const yBandTop = el.high != null ? py(el.high) : null;
+      const yBandBot = el.low != null ? py(el.low) : null;
+      if (!insideY(yRef) && !insideY(yLiq) && !insideY(yBandTop) && !insideY(yBandBot)) { culled += 1; continue; }
       // النطاق القديم (شارت الشاشة نفسها): تعبئة من نقاط اللمس الحقيقية حتى مستوى السيولة
       if (el.shape === 'band') {
-        const yTop = el.high != null ? py(el.high) : null;
-        const yBot = el.low != null ? py(el.low) : null;
+        const yTop = yBandTop;
+        const yBot = yBandBot;
         if (yTop != null && yBot != null) {
           rects.push({
             id: el.id,
@@ -795,13 +851,26 @@ export function layoutElements({
       const startTime = el.availableAt ?? p0.time;
       let x0 = tx(p0.time);
       let y0 = py(p0.price);
-      // اقتصاص يسار: الخط النازل/الصاعد الممتد من قبل النطاق يُعاد إسقاطه على حافته
-      if (x0 != null && x0 < 0 && viewStartTime != null && tr.slope != null && p0.index != null) {
-        const idxAtStart = indexAtTime ? indexAtTime(viewStartTime) : null;
-        if (idxAtStart != null) {
-          x0 = 0;
-          y0 = py(p0.price + tr.slope * (idxAtStart - p0.index));
-        }
+      /**
+       * سعر المحرك عند أي لحظة: p0.price + slope × (index(t) − p0.index).
+       * تقييم الخط عند طرفه المرسوم بدل إعادة استخدام سعر النقطة الأولى هو ما
+       * يجعل الميل البصري مطابقاً لميل المحرك ويمر الخط بنقاطه فعلاً.
+       */
+      const priceAt = (t) => {
+        if (tr.slope == null || p0.index == null || t == null || !indexAtTime) return null;
+        const idx = indexAtTime(t);
+        return idx == null ? null : p0.price + tr.slope * (idx - p0.index);
+      };
+      // اقتصاص يسار: الخط الممتد من قبل النطاق يُعاد إسقاطه على حافته
+      if (x0 != null && x0 < 0 && viewStartTime != null) {
+        const yAtEdge = py(priceAt(viewStartTime));
+        if (yAtEdge != null) { x0 = 0; y0 = yAtEdge; }
+      }
+      // لا يُرسم قبل لحظة المعرفة الحقيقية: يُقتصر الطرف الأيسر على زمن التأكيد
+      const xKnow = tx(startTime);
+      if (xKnow != null && x0 != null && xKnow > x0) {
+        const yAtKnow = py(priceAt(startTime));
+        if (yAtKnow != null) { x0 = xKnow; y0 = yAtKnow; }
       }
       let x1 = null;
       let y1 = null;
@@ -820,8 +889,7 @@ export function layoutElements({
       }
       if (x0 == null || y0 == null || x1 == null || y1 == null) { culled += 1; continue; }
       if (!insideY(y0) && !insideY(y1)) { culled += 1; continue; }
-      const drawX0 = Math.max(x0, tx(startTime) ?? x0);
-      segments.push({ id: el.id, x1: drawX0, y1: y0, x2: x1, y2: y1, color: el.color, width: lineWidth * (selected ? 2.2 : 1.6), alpha: a * 0.95, dashed: false });
+      segments.push({ id: el.id, x1: x0, y1: y0, x2: x1, y2: y1, color: el.color, width: lineWidth * (selected ? 2.2 : 1.6), alpha: a * 0.95, dashed: false });
       if (showTouches) {
         for (const p of tr.points) {
           const x = tx(p.time);
@@ -829,7 +897,7 @@ export function layoutElements({
           if (insideX(x) && insideY(y)) markers.push({ id: el.id, kind: 'pivot', shape: 'circle', x, y, color: el.color, alpha: a, size: 2.4 });
         }
       }
-      pushLabel(`${TYPE_META[el.typeId].short} ${tr.points.length} نقاط`, drawX0 + 3, y0 - 4, el.color);
+      pushLabel(`${TYPE_META[el.typeId].short} ${tr.points.length} نقاط`, x0 + 3, y0 - 4, el.color);
       drawn += 1;
       continue;
     }
@@ -852,7 +920,12 @@ export function layoutElements({
 
     // ---- علامة قمة/قاع
     if (el.shape === 'marker') {
-      const x = tx(el.availableAt ?? el.createdAt);
+      // إظهار/إخفاء نقاط الارتكاز من تفضيلات العرض (لا علاقة له بالفلاتر)
+      if (!showTouches) continue;
+      // العلامة تجلس على **زمن البيفوت نفسه** (createdAt) لا على زمن تأكيده:
+      // إزاحتها بمقدار rightBars كانت تضعها على شمعة ليست القمة/القاع.
+      // منع الظهور قبل المعرفة يقع في selectElements عبر availableAt.
+      const x = tx(el.createdAt ?? el.availableAt);
       const y = py(el.price);
       if (!insideX(x) || !insideY(y)) { culled += 1; continue; }
       markers.push({ id: el.id, kind: 'swing', shape: 'circle', x, y, color: el.color, alpha: a * 0.75, size: selected ? 4 : 2.6 });
@@ -910,18 +983,17 @@ export function layoutElements({
     drawn += 1;
   }
 
-  // ---- نقاط اللمس وخطوات الكسر (زخرفة العناصر المؤهلة)
+  // ---- خطوات الكسر (زخرفة العناصر المؤهلة).
+  // نقاط الارتكاز لا تُرسم هنا: كل نقطة تتحول في `buildElements` إلى عنصر علامة
+  // مستقل (swing_high/swing_low) بنفس الزمن والسعر تماماً، فرسمها مرة ثانية كان
+  // نسخة مكررة فوق نفس الإحداثيات (34247 دائرة في legacy و2249 في v2). إبقاء الرسم
+  // على عناصر العلامة وحدها يجعل فلتر النوع يعمل فعلاً: إخفاء «قمة (Swing High)»
+  // يُخفي كل دوائر القمم لا بعضها، لأن نسخة «touch» كانت تمرّ من تحت الفلتر.
   if (showTouches) {
     for (const el of elements) {
-      if (!el.points?.length && !el.breaks?.length) continue;
+      if (!el.breaks?.length) continue;
       const state = cursorTime == null ? el.state ?? 'confirmed' : stateAt(el, cursorTime);
       const a = alphaForState(state) * opacity;
-      for (const p of el.points) {
-        if (replay && cursorTime != null && p.time > cursorTime) continue;
-        const x = tx(p.time);
-        const y = py(p.price);
-        if (insideX(x) && insideY(y)) markers.push({ id: el.id, kind: 'touch', shape: 'circle', x, y, color: el.color, alpha: a, size: 2 });
-      }
       for (const b of el.breaks) {
         if (replay && cursorTime != null && b.time > cursorTime) continue;
         const x = tx(b.time);
@@ -977,7 +1049,7 @@ export function hitTest(layout, point, tol = 8) {
     const d = distToSegment(x, y, s.x1, s.y1, s.x2, s.y2);
     if (d <= tol && (!best || d < best.d)) best = { id: s.id, d, kind: 'segment' };
   }
-  if (best) return best.id.replace(/:alt$/, '');
+  if (best) return best.id.replace(/:(alt|level)$/, '');
 
   for (let i = layout.rects.length - 1; i >= 0; i -= 1) {
     const r = layout.rects[i];

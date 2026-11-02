@@ -18,6 +18,12 @@
 
 const fin = (v) => v != null && v !== '' && Number.isFinite(Number(v));
 const numOrNull = (v) => (fin(v) ? Number(v) : null);
+/** أقصى قيمة معرّفة — تُستخدم لجعل «أول معرفة» متحفظاً (الأحدث) لا متسرّعاً */
+const maxDefined = (...xs) => {
+  let m = null;
+  for (const x of xs) if (x != null && (m == null || x > m)) m = x;
+  return m;
+};
 
 export function createHistorySerializer(candles) {
   const list = Array.isArray(candles) ? candles : [];
@@ -71,6 +77,12 @@ export function createHistorySerializer(candles) {
       top,
       bottom,
       availableAt: timeAt(index + 1),
+      /**
+       * `imbalance.detectFvgs` يحسب `invalidatedAt` فعلاً (imbalance.mjs:213) لكن
+       * `v2/index.mjs` يُسقطه مع `time` عند بناء المنطقة (map على أربعة حقول فقط)،
+       * فيصل هنا `undefined` دائماً ⇒ كل FVG يبدو حياً حتى آخر شمعة. النقل هنا صحيح
+       * ومستقبلي: يعمل تلقائياً حين يُمرَّر الحقل، ولا يخترع زمناً حين لا يُمرَّر.
+       */
       invalidatedAt: numOrNull(f.invalidatedAt)
     };
   };
@@ -85,6 +97,24 @@ export function createHistorySerializer(candles) {
     if (time == null) return null;
     const isIdm = e.type === 'idm';
     const confirmed = evidence ? evidence.confirmed !== false : true;
+    /**
+     * حدث البنية لا يمكن معرفته قبل تأكيد **كل** بيفوت يعتمد عليه، وقاعدة المحرك
+     * المعلنة في `findPivots` أن البيفوت عند الفهرس i يُعرف عند `candles[i + rightBars]`.
+     * `e.time` هو شمعة الكسر وحدها، وقد تسبق تأكيد بيفوت من بيفوتات دليل الحدث
+     * (`brokenPivotIndex` / `evidence.high1` / `evidence.low1`) — مقيس على مخرجات
+     * حقيقية: 138 حدثاً من 1837 بتسرب حتى 5 شموع. الأخذ بالأقصى يمنع التسرب بلا اختراع زمن.
+     */
+    const evidencePivots = isIdm
+      ? []
+      : [brokenPivotIndex, numOrNull(evidence?.high1), numOrNull(evidence?.low1)];
+    const latestPivotConfirm = evidencePivots
+      .map((i) => (i != null ? pivotConfirmTime(i) : null))
+      .reduce((m, t) => (m == null || (t != null && t > m) ? t : m), null);
+    const availableAt = isIdm
+      ? (confirmed && brokenIndex != null
+          ? maxDefined(timeAt(brokenIndex), pivotConfirmTime(index))
+          : pivotConfirmTime(index))
+      : maxDefined(time, latestPivotConfirm);
     return {
       key: `${e.type}:${index}`,
       type: e.type,
@@ -100,7 +130,7 @@ export function createHistorySerializer(candles) {
       external: e.external === true,
       priorBos: numOrNull(e.priorBos),
       idmLevel: numOrNull(e.idmLevel),
-      availableAt: isIdm ? (confirmed && brokenIndex != null ? timeAt(brokenIndex) : pivotConfirmTime(index)) : time,
+      availableAt,
       confirmed: isIdm ? confirmed : true,
       evidence
     };
@@ -110,7 +140,19 @@ export function createHistorySerializer(candles) {
     const sd = isSupplyDemand(zone);
     const createdAt = numOrNull(zone.createdAt);
     const confirmedAt = numOrNull(zone.confirmedAt);
-    const sweptAt = numOrNull(zone.sweptAt) ?? numOrNull(zone.invalidation?.at);
+    // السويب = بلوغ سعر السيولة (المحرك يضع `sweptAt` بنفسه). لا سقوط إلى
+    // `invalidation.at`: دمج الزمنين كان يجعل كل منطقة مسحوبة تبدو مبطلة ويُخفي
+    // أن الإبطال الزمني المستقل غير موجود في مخرجات v2 أصلاً.
+    const sweptAt = numOrNull(zone.sweptAt);
+    /**
+     * المحرك v2 لا يُنتج زمن إبطال مستقلاً: `invalidation.at` هو **نفس** زمن السويب
+     * (`zones.mjs`: state === 'swept' ⇒ invalidation {reason, at: sweptAt}) — مقيس: كل
+     * المناطق المسحوبة (444) لها at === sweptAt، وصفر منطقة غير مسحوبة لها invalidation.
+     * تمريره كـ`invalidatedAt` كان يعرض سطرَي زمن متطابقين وينسب إبطالاً لم يقع،
+     * ويخالف فصل sweptAt عن invalidatedAt. يُمرَّر فقط حين يكون زمناً مستقلاً فعلاً.
+     */
+    const invalidationAt = numOrNull(zone.invalidation?.at);
+    const invalidatedAt = invalidationAt != null && invalidationAt !== sweptAt ? invalidationAt : null;
 
     const fvgs = Array.isArray(zone.fvgs) ? zone.fvgs.map(serializeFvg).filter(Boolean) : [];
     const touches = Array.isArray(zone.touchPoints) ? zone.touchPoints.map(serializeTouch).filter(Boolean) : [];
@@ -176,7 +218,7 @@ export function createHistorySerializer(candles) {
        */
       detectedAt: null,
       sweptAt,
-      invalidatedAt: numOrNull(zone.invalidation?.at),
+      invalidatedAt,
       invalidation: zone.invalidation ?? null,
       availableAt,
       availableAtBasis,

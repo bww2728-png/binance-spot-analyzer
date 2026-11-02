@@ -175,9 +175,59 @@ test('v2: يعرض أنواعه الستة + الأحداث + FVG، ويحذف �
   assert.ok(types.includes('supply'));
   assert.equal(types.filter((t) => t === 'fvg').length, 1, 'FVG المكرر على منطقتين يُرسم مرة واحدة');
   assert.equal(types.filter((t) => t === 'bos_down').length, 1, 'الحدث المكرر على منطقتين يُرسم مرة واحدة');
-  assert.equal(types.filter((t) => t === 'swing_high').length, 1, 'نفس نقطة اللمس لا تتكرر');
+  // مناطق العرض/الطلب مستطيلات ونقطة لمسها = منتصف الصندوق لا بيفوتاً ⇒ لا تُختلق
+  // منها علامات قمة/قاع (الشكل يطابق النوع).
+  assert.equal(types.filter((t) => t === 'swing_high' || t === 'swing_low').length, 0);
   assert.ok(elements.every((e) => TYPE_META[e.typeId]));
 });
+
+test('نقاط اللمس الحقيقية (أنواع البيفوتات) لا تتكرر كعلامات', () => {
+  const duplicated = {
+    ...legacyZone(),
+    touchPoints: [
+      { index: 0, time: 1_000_000, price: 101, availableAt: 1_000_180 },
+      { index: 0, time: 1_000_000, price: 101, availableAt: 1_000_180 },
+      { index: 4, time: 1_000_240, price: 101.2, availableAt: 1_000_420 }
+    ]
+  };
+  const { elements } = buildElements({ engine: 'legacy', zones: [duplicated] });
+  assert.equal(
+    elements.filter((e) => e.typeId === 'swing_high').length,
+    2,
+    'النقطة المكررة حرفياً تُرسم مرة واحدة'
+  );
+});
+
+test('كل نقطة ارتكاز تُرسم مرة واحدة فقط (لا دائرة مكررة)', () => {
+  const rows = candleSeries(60);
+  const zone = legacyZone({
+    touchPoints: [
+      { index: 5, time: rows[5].time, price: 101, availableAt: rows[8].time },
+      { index: 15, time: rows[15].time, price: 101.2, availableAt: rows[18].time }
+    ]
+  });
+  const { elements } = buildElements({ engine: 'legacy', zones: [zone] });
+  const style = defaultFilters().appearance;
+  const layout = layoutElements({
+    elements, ...axisFor(rows), width: 1000, height: 500,
+    cursorTime: rows[59].time, cursorIndex: 59, replay: false, style
+  });
+  const swings = layout.markers.filter((m) => m.kind === 'swing');
+  const touches = layout.markers.filter((m) => m.kind === 'touch');
+  assert.equal(swings.length, 2, 'علامة لكل نقطة ارتكاز');
+  assert.equal(touches.length, 0, 'لا نسخة ثانية فوق نفس النقطة');
+
+  // إخفاء نقاط اللمس من تفضيلات العرض يخفي العلامات بلا حذف عنصر من التحديد
+  const hidden = layoutElements({
+    elements, ...axisFor(rows), width: 1000, height: 500,
+    cursorTime: rows[59].time, cursorIndex: 59, replay: false,
+    style: { ...style, touchPoints: false }
+  });
+  assert.equal(hidden.markers.filter((m) => m.kind === 'swing').length, 0);
+  assert.equal(selectElements(elements, { cursorTime: rows[59].time, replay: false, filters: defaultFilters() }).visible.length,
+    elements.length, 'التفضيل البصري لا يحذف عناصر');
+});
+
 
 test('v2: zone.idm الفارغ موثّق كفجوة بدل اختلاق بيانات', () => {
   const { meta } = buildElements({ engine: 'v2', zones: [v2Supply()], structureEvents: [v2Event()] });
@@ -515,4 +565,97 @@ test('toSeconds يوحّد الثواني والمللي ثانية ويرفض �
   assert.equal(toSeconds(null), null);
   assert.equal(toSeconds(0), null);
   assert.equal(toSeconds('x'), null);
+});
+
+/* ------------------------------------------------------------------ */
+/* انحدار: حدود المحركين، نهاية العمر، وتحصين الفلاتر المحفوظة        */
+/* ------------------------------------------------------------------ */
+
+test('نوع لا ينتجه المحرك المختار لا يُبنى ويُعلن كفجوة (حماية فصل المحركين)', () => {
+  // نوع v2 يصل من مسار المحرك القديم ⇒ يُرفض ولا يُرسم في شاشة legacy
+  const foreign = { ...v2Supply(), id: 'leak-1' };
+  const legacy = buildElements({ engine: 'legacy', zones: [legacyZone(), foreign] });
+  assert.equal(legacy.elements.filter((e) => e.typeId === 'supply').length, 0, 'لا تسرب أنواع بين المحركين');
+  assert.ok(legacy.meta.gaps.some((g) => g.includes('خارج قائمة أنواعه المعلنة')), 'الفجوة تُعلن بالأسماء');
+
+  // ولا يُبنى حدث بنيوي في legacy حتى لو وصل
+  const legacyEvents = buildElements({ engine: 'legacy', zones: [legacyZone()], structureEvents: [v2Event()] });
+  assert.equal(legacyEvents.elements.filter((e) => e.typeId === 'bos_down').length, 0);
+});
+
+test('endAt = أقرب زمن انتهاء فعلي (سويب أو إبطال)، والإبطال يوقف الرسم', () => {
+  // منطقة مبطلة بلا سويب: كانت تُرسم حتى آخر الشمعة لأن endAt كان sweptAt فقط
+  const invalidated = legacyZone({ id: 'inv-1', state: 'invalidated', sweptAt: null, invalidatedAt: 1_000_500, availableAt: 1_000_240 });
+  const { elements } = buildElements({ engine: 'legacy', zones: [invalidated] });
+  const el = elements.find((e) => e.id === 'zone:inv-1');
+  assert.equal(el.endAt, 1_000_500, 'نهاية العمر = زمن الإبطال لا null');
+
+  // منطقة مسحوبة: نهاية العمر = زمن السويب
+  const swept = legacyZone({ id: 'sw-1', state: 'swept', sweptAt: 1_000_900, invalidatedAt: null });
+  const sweptOut = buildElements({ engine: 'legacy', zones: [swept] }).elements.find((e) => e.id === 'zone:sw-1');
+  assert.equal(sweptOut.endAt, 1_000_900);
+
+  // كلا الزمنين: الأسبق يوقف الرسم
+  const both = legacyZone({ id: 'both-1', state: 'swept', sweptAt: 1_000_900, invalidatedAt: 1_000_600 });
+  const bothOut = buildElements({ engine: 'legacy', zones: [both] }).elements.find((e) => e.id === 'zone:both-1');
+  assert.equal(bothOut.endAt, 1_000_600, 'الأسبق هو نهاية العمر، ويبقى sweptAt وinvalidatedAt منفصلين');
+  assert.equal(bothOut.sweptAt, 1_000_900);
+  assert.equal(bothOut.invalidatedAt, 1_000_600);
+});
+
+test('منطقة مبطلة بلا سويب لا تمتد إلى آخر الشمعة في الرسم', () => {
+  const rows = candleSeries(60);
+  const invalidated = legacyZone({ id: 'inv-2', state: 'invalidated', sweptAt: null, invalidatedAt: rows[20].time, availableAt: rows[5].time, createdAt: rows[3].time });
+  const style = defaultFilters().appearance;
+  const axis = axisFor(rows);
+  const layout = layoutElements({
+    elements: buildElements({ engine: 'legacy', zones: [invalidated] }).elements,
+    ...axis,
+    width: 1000,
+    height: 500,
+    cursorTime: rows[59].time,
+    cursorIndex: 59,
+    replay: false,
+    style
+  });
+  const rect = layout.rects.find((r) => r.id === 'zone:inv-2');
+  assert.ok(rect, 'المنطقة المبطلة تُرسم ضمن عمرها');
+  const xAtEnd = axis.tx ? axis.tx(rows[20].time) : null;
+  if (xAtEnd != null) {
+    assert.ok(rect.x + rect.w <= xAtEnd + 2, 'الرسم يتوقف عند الإبطال لا عند آخر الشمعة');
+  }
+  assert.ok(rect.x + rect.w < 1000, 'لا امتداد إلى حافة الشارت بعد الإبطال');
+});
+
+test('mergeFilters يحصّن القيم التالفة من localStorage بلا إسقاط الرسم', () => {
+  const merged = mergeFilters({
+    minTouches: 'كثير',
+    minConfidence: null,
+    timeFrom: 'بلا',
+    timeTo: '',
+    side: 'جانبي',
+    priceMin: 'x',
+    withinView: 'true',
+    showHistory: false,
+    confirmedOnly: 'yes',
+    untimed: 1,
+    appearance: { opacity: 'شفاف', lineWidth: null, labels: 'on', fvg: 0 }
+  });
+  const base = defaultFilters();
+  assert.equal(merged.minTouches, base.minTouches);
+  assert.equal(merged.timeFrom, null);
+  assert.equal(merged.timeTo, null);
+  assert.equal(merged.side, 'all');
+  assert.equal(merged.priceMin, null);
+  assert.equal(merged.withinView, false, 'النص ليس true حرفياً');
+  assert.equal(merged.showHistory, false, 'القيمة الصريحة false تُحترم');
+  assert.equal(merged.confirmedOnly, false);
+  assert.equal(merged.untimed, false);
+  assert.equal(merged.appearance.opacity, base.appearance.opacity);
+  assert.equal(merged.appearance.lineWidth, base.appearance.lineWidth);
+  assert.ok(Number.isFinite(merged.appearance.opacity), 'لا NaN يصل إلى toFixed');
+  assert.ok(Number.isFinite(merged.appearance.lineWidth));
+  // قيمة صحيحة تُحترم
+  assert.equal(mergeFilters({ minTouches: 5, side: 'above' }).minTouches, 5);
+  assert.equal(mergeFilters({ side: 'below' }).side, 'below');
 });

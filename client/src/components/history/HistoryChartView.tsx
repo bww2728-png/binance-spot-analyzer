@@ -186,6 +186,16 @@ export default function HistoryChartView({
       prevKeyRef.current = '';
       initializedRef.current = false;
     };
+  }, [drawOverlay]);
+
+  // ---- تغيير الارتفاع (ملء الشاشة) لا يعيد إنشاء الشارت.
+  // إعادة الإنشاء كانت تُفرغ الرسم لأن تغذية الشموع في effect آخر لا يعتمد الارتفاع،
+  // فتظهر نافذة جديدة بلا بيانات حتى يتحرك المؤشر.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({ height });
+    drawOverlay();
   }, [height, drawOverlay]);
 
   // ---- تغذية البيانات: إلحاق عند التقدم (سريع) وsetData عند القفز/الرجوع/تغيّر الهوية
@@ -250,7 +260,7 @@ export default function HistoryChartView({
     const range = chart.timeScale().getVisibleLogicalRange();
     if (range) chart.timeScale().setVisibleLogicalRange(range);
     drawOverlay();
-  }, [elements, style, selectedId, replay, drawOverlay]);
+  }, [elements, style, selectedId, replay, altInReplay, drawOverlay]);
 
   // ---- مؤشر اليد عند المرور على عنصر قابل للنقر
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {

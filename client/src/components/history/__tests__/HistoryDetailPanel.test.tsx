@@ -146,6 +146,29 @@ describe('HistoryDetailPanel — أحداث البنية تُقيَّد بنطا
     renderPanel(element, data, 8000);
     expect(screen.queryByText(/أحداث البنية داخل نطاق حياة المنطقة/)).toBeNull();
   });
+
+  it('في وضع التتبع لا يُعرض حدث بعد نهاية عمر المنطقة ولا بعد المؤشر (لا تسرب مستقبلي)', () => {
+    // المنطقة (legacy Z1) مسحوبة عند 2000 ⇒ عمرها 1000..2000
+    const legacyEl = elementOf(buildLegacy(), 'zone:Z1');
+    const data = responseOf('legacy', [legacyZone], [
+      evt('bos_up:early', 1100),
+      evt('bos_up:late', 1800)
+    ]);
+
+    // (1) مؤشر 1500 قبل نهاية العمر: يُستبعد الحدث الواقع بعد المؤشر
+    const replayView = renderPanel(legacyEl, data, 1500, true);
+    expect(screen.getByText('أحداث البنية داخل نطاق حياة المنطقة (1)')).toBeTruthy();
+    replayView.unmount();
+
+    // (2) مؤشر 3000 بعد انتهاء العمر: النطاق مقطوع عند 2000 فيظهر الحدثان
+    const afterSweep = renderPanel(legacyEl, data, 3000, true);
+    expect(screen.getByText('أحداث البنية داخل نطاق حياة المنطقة (2)')).toBeTruthy();
+    afterSweep.unmount();
+
+    // (3) العرض الكامل (بلا تتبع): النطاق كامل 1000..2000 ⇒ الحدثان
+    renderPanel(legacyEl, data, 1500, false);
+    expect(screen.getByText('أحداث البنية داخل نطاق حياة المنطقة (2)')).toBeTruthy();
+  });
 });
 
 describe('HistoryDetailPanel — بيانات المصدر وأزمنة النقر', () => {
