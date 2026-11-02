@@ -252,6 +252,57 @@ test('v2: fvg.invalidatedAt يُمرَّر كما وصل ولا يُخترع ع�
   assert.equal(without.invalidatedAt, null, 'لا يُخترع زمن إبطال');
 });
 
+/** شموع فيها فجوات صاعدة تُملأ لاحقاً ⇒ FVG فعلية داخل مناطق العرض/الطلب */
+const makeGapCandles = (count = 600) => {
+  const out = [];
+  let p = 100;
+  for (let i = 0; i < count; i += 1) {
+    const g = i % 40;
+    let op; let cl; let hi; let lo;
+    if (g === 20) { op = p; cl = p + 3; hi = p + 3.4; lo = p - 0.2; }
+    else if (g === 21) { op = p + 3.4; cl = p + 3.9; hi = p + 4; lo = p + 3.2; }
+    else if (g === 30) { op = p + 4; cl = p - 0.5; hi = p + 4.2; lo = p - 1.2; }
+    else {
+      const w = Math.sin(i / 5) * 0.8;
+      op = p; cl = p + w * 0.6;
+      hi = Math.max(op, cl) + 0.4; lo = Math.min(op, cl) - 0.4;
+    }
+    out.push({ time: BASE_TIME + i * MINUTE, open: op, high: hi, low: lo, close: cl, volume: 10 });
+    p = cl;
+  }
+  return out;
+};
+
+test('v2: زمن إبطال FVG يمرّ من المحرك إلى المُسلسِل (نهاية عمر حقيقية)', () => {
+  const candles = makeGapCandles(600);
+  const zones = detectLiquidityZonesV2({ symbol: 'T', timeframe: '1m', candles, endIndex: candles.length - 1 });
+  const serializer = createHistorySerializer(candles);
+  const times = timesOf(candles);
+
+  let fvgs = 0;
+  let withKey = 0;
+  let withValue = 0;
+  let badTime = 0;
+  for (const zone of zones) {
+    for (const raw of zone.fvgs ?? []) {
+      fvgs += 1;
+      // الحقل لا يُسقط في map المحرك (كان يُسقطه فيضيع زمن الإبطال كاملاً)
+      if (Object.prototype.hasOwnProperty.call(raw, 'invalidatedAt')) withKey += 1;
+      const s = serializer.serializeFvg(raw);
+      assert.ok(s, 'FVG صالح يُسلسل');
+      if (s.invalidatedAt != null) {
+        withValue += 1;
+        assert.ok(times.has(s.invalidatedAt), 'زمن الإبطال زمن شمعة حقيقية');
+        assert.ok(s.invalidatedAt > s.availableAt, 'الإبطال لا يسبق لحظة معرفة الفجوة');
+      }
+    }
+  }
+
+  assert.ok(fvgs > 0, 'محفظة الاختبار تُنتج FVG فعلية داخل مناطق');
+  assert.equal(withKey, fvgs, 'الحقل موجود كـkey في كل FVG (لا إسقاط صامت)');
+  assert.ok(withValue > 0, 'يوجد FVG ممتلئ يحمل زمن إبطال فعلياً من المحرك');
+});
+
 test('rightBars يُضبط من adaptiveConfig ويؤثر في availableAt (لا قيمة مخفية)', () => {
   const candles = makeCandles(200);
   const serializer = createHistorySerializer(candles);

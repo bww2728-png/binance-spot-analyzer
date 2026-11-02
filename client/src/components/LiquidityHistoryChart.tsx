@@ -348,9 +348,9 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
               </div>
               <div className="absolute top-2 left-2 z-10 rounded px-2 py-1 text-[10px] font-semibold pointer-events-none" style={{ background: 'rgba(10,14,22,.82)', color: '#fff' }}>
                 {data.symbol} · 1m · {data.days} يوماً · {data.bars.toLocaleString('en-US')} شمعة
-                {' · '}مرئي <span className="num">{selection.counts.visible}</span>/{selection.counts.total}
+                {' · '}بعد الفلاتر <span className="num">{selection.counts.visible}</span>/{selection.counts.total}
                 {hidden > 0 && <span style={{ color: '#fbbf24' }}> · مخفي {hidden}</span>}
-                {stats.culled > 0 && <span style={{ color: '#93c5fd' }}> · خارج النطاق {stats.culled}</span>}
+                <span style={{ color: '#93c5fd' }}> · على الشارت {stats.drawn}{stats.culled > 0 ? ` · خارج النافذة ${stats.culled}` : ''}</span>
                 {stats.labelSkips > 0 && <span style={{ color: '#94a3b8' }}> · تسميات متداخلة {stats.labelSkips}</span>}
                 {replay && <span style={{ color: '#fbbf24' }}> · تتبع</span>}
               </div>

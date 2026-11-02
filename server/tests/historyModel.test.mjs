@@ -198,6 +198,69 @@ test('نقاط اللمس الحقيقية (أنواع البيفوتات) لا 
   );
 });
 
+test('النقر يرجّح أصغر مستطيل يحتوي النقطة (FVG داخل منطقة كبيرة قابل للنقر)', () => {
+  const rows = candleSeries(60);
+  const big = v2Supply({
+    id: 'big-supply',
+    zoneBox: { high: 300, low: -100 },
+    bodyBox: { high: 200, low: 0 },
+    availableAt: rows[2].time,
+    createdAt: rows[2].time
+  });
+  const small = v2Supply({
+    id: 'small-supply',
+    // 1.6 وحدة سعرية عند مقياس الاختبار (2px لكل وحدة) = 3.2px ارتفاعاً ⇒ هدف مرئي
+    zoneBox: { high: 101, low: 99.4 },
+    bodyBox: { high: 100.8, low: 99.6 },
+    availableAt: rows[10].time,
+    createdAt: rows[10].time
+  });
+  const { elements } = buildElements({ engine: 'v2', zones: [big, small] });
+  const axis = axisFor(rows);
+  const layout = layoutElements({
+    elements, ...axis, width: 1000, height: 500,
+    cursorTime: rows[59].time, cursorIndex: 59, replay: false, style: defaultFilters().appearance
+  });
+  const smallRect = layout.rects.find((r) => r.id === 'zone:small-supply');
+  const bigRect = layout.rects.find((r) => r.id === 'zone:big-supply');
+  assert.ok(smallRect && bigRect, 'المستطيلان مرسومان');
+  // نقطة داخل الصغير وهي أيضاً داخل الكبير
+  const inside = {
+    x: smallRect.x + smallRect.w / 2,
+    y: smallRect.y + smallRect.h / 2
+  };
+  assert.ok(inside.y >= bigRect.y && inside.y <= bigRect.y + bigRect.h, 'النقطة داخل الكبير أيضاً');
+  assert.equal(hitTest(layout, inside, 6), 'zone:small-supply', 'الأصغر هو المحدد');
+});
+
+test('شريط رفيع (ارتفاعه < 3px) لا يسرق النقر من المنطقة الكبيرة تحته', () => {
+  const rows = candleSeries(60);
+  const big = v2Supply({
+    id: 'big-supply',
+    zoneBox: { high: 300, low: -100 },
+    bodyBox: { high: 200, low: 0 },
+    availableAt: rows[2].time,
+    createdAt: rows[2].time
+  });
+  const sliver = v2Supply({
+    id: 'sliver-supply',
+    // 0.5 وحدة سعرية = 1px فقط: غير قابل للاستهداف بصرياً
+    zoneBox: { high: 101, low: 100.5 },
+    bodyBox: { high: 100.9, low: 100.6 },
+    availableAt: rows[10].time,
+    createdAt: rows[10].time
+  });
+  const { elements } = buildElements({ engine: 'v2', zones: [big, sliver] });
+  const axis = axisFor(rows);
+  const layout = layoutElements({
+    elements, ...axis, width: 1000, height: 500,
+    cursorTime: rows[59].time, cursorIndex: 59, replay: false, style: defaultFilters().appearance
+  });
+  const bigRect = layout.rects.find((r) => r.id === 'zone:big-supply');
+  const point = { x: bigRect.x + bigRect.w / 2, y: bigRect.y + bigRect.h / 2 };
+  assert.equal(hitTest(layout, point, 6), 'zone:big-supply', 'الخلفية المرئية هي المحدد');
+});
+
 test('كل نقطة ارتكاز تُرسم مرة واحدة فقط (لا دائرة مكررة)', () => {
   const rows = candleSeries(60);
   const zone = legacyZone({

@@ -92,10 +92,10 @@ export function createHistorySerializer(candles) {
       bottom,
       availableAt: timeAt(index + 1),
       /**
-       * `imbalance.detectFvgs` يحسب `invalidatedAt` فعلاً (imbalance.mjs:213) لكن
-       * `v2/index.mjs` يُسقطه مع `time` عند بناء المنطقة (map على أربعة حقول فقط)،
-       * فيصل هنا `undefined` دائماً ⇒ كل FVG يبدو حياً حتى آخر شمعة. النقل هنا صحيح
-       * ومستقبلي: يعمل تلقائياً حين يُمرَّر الحقل، ولا يخترع زمناً حين لا يُمرَّر.
+       * `imbalance.detectFvgs` يحسب `invalidatedAt` فعلاً (زمن الشمعة التي ملأت
+       * الفجوة بالكامل). كان يُسقط في طبقتي map (`imbalance.mjs` ثم `v2/index.mjs`)
+       * فيصل `undefined` دائماً وتُرسَم كل FVG حية حتى آخر شمعة. الآن يُمرَّر كما هو:
+       * لا يُخترع زمن، والفجوة غير الممتلئة تبقى بلا إبطال.
        */
       invalidatedAt: numOrNull(f.invalidatedAt)
     };

@@ -461,7 +461,7 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
     gaps.push('`structureEvents` داخل كل منطقة في v2 = كل الأحداث من نشأة المنطقة حتى نهاية النافذة، لا صلة محددة بها؛ تُعرض الأحداث مرة واحدة وتُفلتر في التفاصيل بنطاق زمن المنطقة.');
     gaps.push('مناطق العرض/الطلب لا تحمل sweptAt/invalidatedAt — تُرسم حتى آخر شمعة بحالة المحرك نفسها.');
     gaps.push('مناطق العرض/الطلب تحمل نقطة لمس واحدة = منتصف الصندوق لا بيفوتاً؛ لا تُبنى منها علامات قمة/قاع.');
-    gaps.push('`fvg.invalidatedAt` يُحسب في `v2/imbalance.mjs` لكن `v2/index.mjs` يُسقطه (مع `fvg.time`) عند بناء المنطقة، فيُقبل دائماً `undefined` ⇒ كل FVG يُرسم حياً حتى آخر شمعة. الشارت يمرّر الحقل كما هو ولا يخترع زمناً.');
+    gaps.push('`fvg.invalidatedAt` يُمرَّر الآن كما حسبه المحرك (زمن ملء الفجوة) فيتوقف رسمها وزمن حالتها عند لحظة الملء؛ الفجوة التي لم تُملأ تبقى بلا إبطال ولا يُخترع لها زمن.');
   }
   if (unexpectedKinds.size > 0) {
     gaps.push(`أنواع وصلت من المحرك خارج قائمة أنواعه المعلنة ولم تُبنَ (حماية فصل المحركين): ${[...unexpectedKinds].join(', ')}.`);
@@ -1079,11 +1079,32 @@ export function hitTest(layout, point, tol = 8) {
   }
   if (best) return best.id.replace(/:(alt|level)$/, '');
 
-  for (let i = layout.rects.length - 1; i >= 0; i -= 1) {
-    const r = layout.rects[i];
-    const inside = x >= r.x - 2 && x <= r.x + r.w + 2 && y >= r.y - 2 && y <= r.y + r.h + 2;
-    if (inside) return r.id.replace(/:body$/, '');
-  }
+  // المستطيلات: قاعدة واحدة معلنة ومحسومة
+  //   1) «هدف مرئي» = مستطيل عرضه وارتفاعه ≥ MIN_TARGET px (أصغر بكثير من ذلك لا
+  //      يمكن أن يقصده المستخدم بصرياً: شريط مستوى ارتفاعه بكسل أو فجوة عمرها
+  //      أقل من شمعة).
+  //   2) إن كان تحت المؤشر هدف مرئي ← أصغرها مساحة (الأكثر تحديداً: صندوق FVG
+  //      داخل منطقة عرض/طلب كبيرة، أو جسم شمعة داخل صندوقها).
+  //   3) وإلا ← أكبر مستطيل يحتوي النقطة (الخلفية التي يراها المستخدم فعلاً).
+  // مرحلتان: الاحتواء الصارم أولاً ثم هامش 2px للعناصر الرفيعة فقط.
+  const MIN_TARGET = 3;
+  const insideRect = (r, pad) => x >= r.x - pad && x <= r.x + r.w + pad && y >= r.y - pad && y <= r.y + r.h + pad;
+  const pickRect = (pad) => {
+    let smallestVisible = null;
+    let largest = null;
+    for (let i = 0; i < layout.rects.length; i += 1) {
+      const r = layout.rects[i];
+      if (!insideRect(r, pad)) continue;
+      const area = Math.max(r.w, 1) * Math.max(r.h, 1);
+      if (!largest || area >= largest.area) largest = { id: r.id, area };
+      if (r.w >= MIN_TARGET && r.h >= MIN_TARGET && (!smallestVisible || area <= smallestVisible.area)) {
+        smallestVisible = { id: r.id, area };
+      }
+    }
+    return smallestVisible ?? largest;
+  };
+  const bestRect = pickRect(0) ?? pickRect(2);
+  if (bestRect) return bestRect.id.replace(/:body$/, '');
   return null;
 }
 

@@ -287,7 +287,16 @@ export function detectSupplyDemand(candles, fvgs, structureEvents = [], endIndex
       bodyHigh: Math.max(origin.open, origin.close),
       bodyLow: Math.min(origin.open, origin.close),
       originCandleIndex: originIndex,
-      fvgs: fvgList.map(f => ({ index: f.index, time: f.time, kind: f.kind, top: f.top, bottom: f.bottom })),
+      // تمرير محايد لحقول الفجوة كما حسبها `detectFvgs` (لا حساب ولا تغيير قاعدة):
+      // إسقاط `invalidatedAt` هنا كان يمنع معرفة نهاية عمر أي FVG ممتلئ.
+      fvgs: fvgList.map(f => ({
+        index: f.index,
+        time: f.time,
+        kind: f.kind,
+        top: f.top,
+        bottom: f.bottom,
+        invalidatedAt: f.invalidatedAt
+      })),
       bosIndex,
       confirmed,
       provisional: !confirmed
