@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { detectLiquidityZones } from '../liquidity-zones/engine.mjs';
+import { detectLiquidityZones, adaptiveConfig } from '../liquidity-zones/engine.mjs';
 import { detectLiquidityZonesV2 } from '../liquidity-zones/v2/index.mjs';
+import { createHistorySerializer } from './liquidityHistorySerialize.mjs';
 
 /**
  * خيط حساب منفصل للشارت التاريخي: يمنع حظر حلقة أحداث الخادم أثناء حساب
@@ -8,7 +9,8 @@ import { detectLiquidityZonesV2 } from '../liquidity-zones/v2/index.mjs';
  * Float64 متداخلة [time,open,high,low,close,volume] ويعيد المناطق مُسقطة
  * بحقول الرسم فقط.
  *
- * لا تعديل هنا على أي قاعدة كشف — استدعاء مباشر لمخرجات المحركين كما هي.
+ * لا تعديل هنا على أي قاعدة كشف — استدعاء مباشر لمخرجات المحركين كما هي،
+ * والتسلسل (بما فيه `availableAt`) في `liquidityHistorySerialize.mjs` المشروح والمُختبر.
  */
 
 const { engineKey, symbol, timeframe, bars, buf } = workerData;
@@ -27,46 +29,48 @@ const candles = Array.from({ length: bars }, (_, i) => {
 });
 
 const versions = { legacy: 'liquidity-engine-v1', v2: 'liquidity-engine-v2' };
-
-const serializeZone = (zone) => ({
-  id: zone.id,
-  kind: zone.kind,
-  state: zone.state,
-  direction: zone.direction,
-  referenceLevel: zone.referenceLevel,
-  referenceAlt: Number.isFinite(Number(zone.referenceAlt)) ? Number(zone.referenceAlt) : null,
-  liquidityLevel: zone.liquidityLevel,
-  zoneBox: zone.zoneBox ?? null,
-  bodyBox: zone.bodyBox ?? null,
-  createdAt: zone.createdAt ?? zone.confirmedAt ?? null,
-  sweptAt: zone.sweptAt ?? null,
-  confidence: zone.confidence,
-  touches: zone.touches,
-  timeframe: zone.timeframe,
-  // حقول الرسم بمنطق شارتي الشاشتين (MultiZoneChart / LiquidityV2Chart):
-  // نقاط اللمس الحقيقية للصناديق، وخط الاتجاه من نقاطه حتى إسقاطه.
-  touchPoints: Array.isArray(zone.touchPoints)
-    ? zone.touchPoints.map((p) => ({ time: Number(p.time), price: Number(p.price) })).filter((p) => Number.isFinite(p.time) && Number.isFinite(p.price))
-    : [],
-  trendline: zone.trendline && Array.isArray(zone.trendline.points) && zone.trendline.points.length >= 2
-    ? {
-        points: zone.trendline.points.slice(0, 8).map((p) => ({ time: Number(p.time), price: Number(p.price) })).filter((p) => Number.isFinite(p.time) && Number.isFinite(p.price)),
-        projected: Number(zone.trendline.projected)
-      }
-    : null
-});
+const endIndex = candles.length - 1;
 
 try {
   const t0 = Date.now();
   const zonesRaw = engineKey === 'v2'
-    ? detectLiquidityZonesV2({ symbol, timeframe, candles, endIndex: candles.length - 1 })
-    : detectLiquidityZones({ symbol, timeframe, candles, endIndex: candles.length - 1 });
+    ? detectLiquidityZonesV2({ symbol, timeframe, candles, endIndex })
+    : detectLiquidityZones({ symbol, timeframe, candles, endIndex });
+
+  /**
+   * `rightBars` هي نفس القيمة التي يستخدمها `findPivots` في هذه النافذة
+   * (adaptiveConfig على آخر شمعة) — فزمن تأكيد أي بيفوت = الشمعة index + rightBars.
+   */
+  let rightBars = 3;
+  try {
+    rightBars = adaptiveConfig(candles, Math.max(0, endIndex)).rightBars;
+  } catch { /* القيمة الافتراضية آمنة */ }
+
+  const serializer = createHistorySerializer(candles);
+  serializer.setRightBars(rightBars);
+
+  const zones = zonesRaw.map(serializer.serializeZone);
+
+  // أحداث البنية: تجميع مرة واحدة مع الحفاظ على ترتيبها الزمني
+  const eventsByKey = new Map();
+  for (const zone of zonesRaw) {
+    const list = Array.isArray(zone.structureEvents) ? zone.structureEvents : [];
+    for (const raw of list) {
+      const ev = serializer.serializeEvent(raw);
+      if (ev && !eventsByKey.has(ev.key)) eventsByKey.set(ev.key, ev);
+    }
+  }
+  const structureEvents = [...eventsByKey.values()]
+    .sort((a, b) => a.index - b.index || String(a.type).localeCompare(String(b.type)));
+
   parentPort.postMessage({
     ok: true,
     engine: versions[engineKey],
     computeMs: Date.now() - t0,
     totalZones: zonesRaw.length,
-    zones: zonesRaw.map(serializeZone)
+    rightBars,
+    zones,
+    structureEvents
   });
 } catch (error) {
   parentPort.postMessage({ ok: false, error: String(error?.message ?? error) });
