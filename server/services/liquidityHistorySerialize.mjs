@@ -39,6 +39,20 @@ export function createHistorySerializer(candles) {
 
   let rightBars = 3;
 
+  /** خريطة زمن→فهرس (كسلية) — تُستخدم لاستكمال حقول ناقصة من مخرجات المحرك */
+  let indexByTime = null;
+  const indexAtTime = (t) => {
+    if (!fin(t)) return null;
+    if (!indexByTime) {
+      indexByTime = new Map();
+      for (let i = 0; i < list.length; i += 1) {
+        const time = Number(list[i].time);
+        if (Number.isFinite(time) && !indexByTime.has(time)) indexByTime.set(time, i);
+      }
+    }
+    return indexByTime.has(Number(t)) ? indexByTime.get(Number(t)) : null;
+  };
+
   const setRightBars = (value) => {
     if (Number.isFinite(Number(value)) && Number(value) > 0) rightBars = Math.trunc(Number(value));
   };
@@ -187,7 +201,13 @@ export function createHistorySerializer(candles) {
     const trendline = zone.trendline && Array.isArray(zone.trendline.points) && zone.trendline.points.length >= 2
       ? {
           points: zone.trendline.points.slice(0, 12).map((p) => ({
-            index: numOrNull(p.index),
+            /**
+             * المحرك القديم يُصدر `trendline.points` بلا `index` (engine.mjs:341)
+             * بينما نفس النقاط في `touchPoints` تحمله. غيابه يمنع حساب ميل الخط
+             * عند المؤشر فيُستخدم `projected` (قيمة آخر شمعة) طرفاً أيمن ⇒ تسرب.
+             * الاستكمال هنا استعلام زمن→فهرس فقط، لا حساب ولا اختراع قيمة.
+             */
+            index: numOrNull(p.index) ?? indexAtTime(p.time),
             time: numOrNull(p.time),
             price: numOrNull(p.price)
           })).filter((p) => p.time != null && p.price != null),
@@ -249,5 +269,5 @@ export function createHistorySerializer(candles) {
     };
   };
 
-  return { get rightBars() { return rightBars; }, setRightBars, serializeZone, serializeEvent, serializeTouch, serializeFvg, timeAt, pivotConfirmTime };
+  return { get rightBars() { return rightBars; }, setRightBars, serializeZone, serializeEvent, serializeTouch, serializeFvg, timeAt, indexAtTime, pivotConfirmTime };
 }

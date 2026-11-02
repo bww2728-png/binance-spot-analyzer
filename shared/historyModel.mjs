@@ -154,7 +154,10 @@ function zoneTiming(zone) {
   // السويب والإبطال حدثان مختلفان: السويب = بلوغ سعر السيولة، الإبطال = انتهاء الصلاحية.
   // دمجهما كان يجعل كل منطقة مسحوبة تُصنَّف «مبطلة» وتفقد حالتها الحقيقية عند المؤشر.
   const sweptAt = toSeconds(zone.sweptAt);
-  const invalidatedAt = toSeconds(zone.invalidatedAt) ?? toSeconds(zone.invalidation?.at);
+  // لا سقوط إلى `invalidation.at`: الخادم يمرّر `invalidatedAt` النهائي فقط (يحذفه
+  // حين يساوي السويب). السقوط هنا كان يعيد اختلاق إبطال مساوٍ للسويب في طبقة العميل
+  // بعد إصلاحه على الخادم ⇒ سطرا زمن متطابقان في لوحة التفاصيل.
+  const invalidatedAt = toSeconds(zone.invalidatedAt);
   // لا سقوط إلى createdAt: زمن النشأة يسبق المعرفة الحقيقية (rightBars) فاستخدامه
   // «معرفةً» هو بالضبط تسرب المستقبل. غيابه ⇒ العنصر غير مؤرخ ويُعامل صراحةً كذلك.
   const availableAt = toSeconds(zone.availableAt);
@@ -400,6 +403,15 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
       if (time == null || price == null) continue;
       const meta = TYPE_META[ev.type];
       const availableAt = toSeconds(ev.availableAt) ?? time;
+      const isIdm = ev.type === 'idm';
+      /**
+       * `confirmed:false` يُصدره المحرك لـIDM لم يُكسر (structure.mjs). عرضه
+       * «مؤكداً» مع `confirmedAt` = زمن الارتداد كان يخترع تأكيداً. والتأكيد الحقيقي
+       * لـIDM هو زمن كسر الحركة (`brokenTime`)، أما BOS/CHoCH فتأكيده إغلاق شمعة
+       * الكسر نفسها (`time`) وهو ما يعلنه المحرك في `confirmBasis`.
+       */
+      const confirmed = ev.confirmed !== false;
+      const confirmedAt = !confirmed ? null : isIdm ? toSeconds(ev.brokenTime) : time;
       elements.push({
         id: `event:${ev.key ?? `${ev.type}:${ev.index}`}`,
         typeId: ev.type,
@@ -408,10 +420,10 @@ export function buildElements({ engine, zones = [], structureEvents = [] }) {
         label: meta.label,
         color: meta.color,
         rgb: meta.rgb,
-        state: 'confirmed',
+        state: confirmed ? 'confirmed' : 'candidate',
         createdAt: time,
         availableAt,
-        confirmedAt: time,
+        confirmedAt,
         confirmedBasis: ev.confirmBasis ?? 'close',
         sweptAt: null,
         invalidatedAt: null,
@@ -549,7 +561,9 @@ export function mergeFilters(saved) {
   const base = defaultFilters();
   if (!saved || typeof saved !== 'object') return base;
   const numOr = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
-  const nullableNum = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  // أرقام محفوظة فقط؛ `Number([]) === 0` و`Number('') === 0` كانت تحوّل مدخلاً
+  // تالفاً إلى 0 صالح يخفي كل العناصر (timeTo=0) أو يصفّر الحد الأدنى.
+  const nullableNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const bool = (v) => v === true;
   const side = saved.side === 'above' || saved.side === 'below' ? saved.side : 'all';
   return {
@@ -573,8 +587,10 @@ export function mergeFilters(saved) {
     appearance: {
       ...base.appearance,
       ...(saved.appearance ?? {}),
-      opacity: numOr(saved.appearance?.opacity, base.appearance.opacity),
-      lineWidth: numOr(saved.appearance?.lineWidth, base.appearance.lineWidth),
+      // الحدود مطابقة لمدى اللوحة (شفافية 0.15..1، سماكة 0.5..3): قيمة تالفة
+      // خارجها كانت تُخفي الرسم كله (شفافية 0) أو تنتج حدوداً غير مرئية.
+      opacity: Math.min(1, Math.max(0.15, numOr(saved.appearance?.opacity, base.appearance.opacity))),
+      lineWidth: Math.min(3, Math.max(0.5, numOr(saved.appearance?.lineWidth, base.appearance.lineWidth))),
       labels: bool(saved.appearance?.labels ?? base.appearance.labels),
       touchPoints: bool(saved.appearance?.touchPoints ?? base.appearance.touchPoints),
       alt: bool(saved.appearance?.alt ?? base.appearance.alt),
@@ -661,7 +677,11 @@ export function selectElements(elements, { filters, cursorTime, replay, cursorPr
       if (dist > f.atrDistance) { counts.hidden.price += 1; continue; }
     }
 
-    if (!f.showHistory && el.endAt != null && t != null && el.endAt <= t) { counts.hidden.history += 1; continue; }
+    // «إظهار العناصر المنتهية» يخص العناصر ذات امتداد زمني؛ العلامات والأحداث
+    // لحظية (endAt = زمنها) فاستبعادها كان يُخفي كل القمم/القيعان وكل أحداث البنية
+    // رغم أن الفلتر لا يعنيهم.
+    const isInstant = el.shape === 'marker' || el.shape === 'event';
+    if (!f.showHistory && !isInstant && el.endAt != null && t != null && el.endAt <= t) { counts.hidden.history += 1; continue; }
 
     visible.push(el);
   }
@@ -729,6 +749,12 @@ export function layoutElements({
 
   const insideY = (y) => y != null && y >= -OUT && y <= height + OUT;
   const insideX = (x) => x != null && x >= -OUT && x <= width + OUT;
+  /**
+   * تقاطع رأسي: يكفي أن يمتد الشكل عبر الإطار ولو كان طرفاه خارجه. صندوق عرض/طلب
+   * يمتد 2×ATR قد يتجاوز أعلى الشاشة وأسفلها معاً عند تكبير سعري ⇒ الحارس القديم
+   * (`insideY(yTop) && insideY(yBot)` كلاهما كاذب) كان يُسقط منطقة تغطي الشاشة.
+   */
+  const spansY = (a, b) => a != null && b != null && Math.max(a, b) >= -OUT && Math.min(a, b) <= height + OUT;
 
   /**
    * نهاية رسم العنصر: لا تتجاوز مؤشر الوقت في وضع التتبع.
@@ -782,7 +808,10 @@ export function layoutElements({
 
 
     // ---- علامة النشأة: تُظهر مكان تكوّن العنصر حتى قبل أن يصبح معروفاً
-    if (el.createdAt != null && el.availableAt != null && el.createdAt < el.availableAt && el.shape !== 'marker') {
+    // خط الاتجاه مستثنى: `el.price` له هو `projected` (قيمة آخر شمعة في النافذة)
+    // لا سعر الخط عند زمن النشأة ⇒ الماسة كانت تُرسم بعيداً عن الخط بألف سعر.
+    if (el.createdAt != null && el.availableAt != null && el.createdAt < el.availableAt
+      && el.shape !== 'marker' && el.shape !== 'trendline') {
       const x = tx(el.createdAt);
       const y = py(el.price ?? el.high ?? el.low);
       if (insideX(x) && insideY(y)) {
@@ -806,7 +835,7 @@ export function layoutElements({
       // ومستوى السيولة من الشاشة بينما جسم النطاق ظاهر — استبعاده كان يُخفي نطاقاً حياً.
       const yBandTop = el.high != null ? py(el.high) : null;
       const yBandBot = el.low != null ? py(el.low) : null;
-      if (!insideY(yRef) && !insideY(yLiq) && !insideY(yBandTop) && !insideY(yBandBot)) { culled += 1; continue; }
+      if (!insideY(yRef) && !insideY(yLiq) && !spansY(yBandTop, yBandBot)) { culled += 1; continue; }
       // النطاق القديم (شارت الشاشة نفسها): تعبئة من نقاط اللمس الحقيقية حتى مستوى السيولة
       if (el.shape === 'band') {
         const yTop = yBandTop;
@@ -849,17 +878,19 @@ export function layoutElements({
       if (!tr || tr.points.length < 2) { culled += 1; continue; }
       const p0 = tr.points[0];
       const startTime = el.availableAt ?? p0.time;
+      /**
+       * المحرك القديم يبني `trendline.points` بلا `index` (engine.mjs:341) بينما
+       * نفس النقاط في `touchPoints` تحمله. غياب الفهرس كان يُسقط فرع حساب الميل
+       * فيُستخدم `projected` (قيمة **آخر شمعة في النافذة**) طرفاً أيمن حتى في وضع
+       * التتبع ⇒ تسرب مستقبل. يُشتق الفهرس من الزمن عند الحاجة، بلا اختراع بيانات.
+       */
+      const i0 = p0.index ?? (indexAtTime ? indexAtTime(p0.time) : null);
       let x0 = tx(p0.time);
       let y0 = py(p0.price);
-      /**
-       * سعر المحرك عند أي لحظة: p0.price + slope × (index(t) − p0.index).
-       * تقييم الخط عند طرفه المرسوم بدل إعادة استخدام سعر النقطة الأولى هو ما
-       * يجعل الميل البصري مطابقاً لميل المحرك ويمر الخط بنقاطه فعلاً.
-       */
       const priceAt = (t) => {
-        if (tr.slope == null || p0.index == null || t == null || !indexAtTime) return null;
+        if (tr.slope == null || i0 == null || t == null || !indexAtTime) return null;
         const idx = indexAtTime(t);
-        return idx == null ? null : p0.price + tr.slope * (idx - p0.index);
+        return idx == null ? null : p0.price + tr.slope * (idx - i0);
       };
       // اقتصاص يسار: الخط الممتد من قبل النطاق يُعاد إسقاطه على حافته
       if (x0 != null && x0 < 0 && viewStartTime != null) {
@@ -874,29 +905,26 @@ export function layoutElements({
       }
       let x1 = null;
       let y1 = null;
-      if (tr.slope != null && cursorIndex != null && p0.index != null) {
-        const idx = Math.max(cursorIndex, p0.index);
-        const priceEnd = p0.price + tr.slope * (idx - p0.index);
+      if (tr.slope != null && cursorIndex != null && i0 != null) {
+        const idx = Math.max(cursorIndex, i0);
+        const priceEnd = p0.price + tr.slope * (idx - i0);
         const tEnd = timeAtIndex(idx);
         if (tEnd != null) {
           x1 = tx(tEnd);
           y1 = py(priceEnd);
         }
       }
-      if (x1 == null && tr.projected != null) {
+      // لا سقوط إلى `projected` في وضع التتبع: قيمته محسوبة عند آخر شمعة في النافذة
+      // (مستقبل بالنسبة للمؤشر) والخط يُرسم حينها كأنه يعرف سعره.
+      if (x1 == null && tr.projected != null && !replay) {
         x1 = width;
         y1 = py(tr.projected);
       }
       if (x0 == null || y0 == null || x1 == null || y1 == null) { culled += 1; continue; }
-      if (!insideY(y0) && !insideY(y1)) { culled += 1; continue; }
+      if (!spansY(y0, y1)) { culled += 1; continue; }
       segments.push({ id: el.id, x1: x0, y1: y0, x2: x1, y2: y1, color: el.color, width: lineWidth * (selected ? 2.2 : 1.6), alpha: a * 0.95, dashed: false });
-      if (showTouches) {
-        for (const p of tr.points) {
-          const x = tx(p.time);
-          const y = py(p.price);
-          if (insideX(x) && insideY(y)) markers.push({ id: el.id, kind: 'pivot', shape: 'circle', x, y, color: el.color, alpha: a, size: 2.4 });
-        }
-      }
+      // نقاط خط الاتجاه هي نفس نقاط الارتكاز المبنية كعناصر علامة: كان رسمها هنا
+      // نسخة ثانية فوق نفس الإحداثيات، وتسرق أولوية النقر من علامة القمة/القاع.
       pushLabel(`${TYPE_META[el.typeId].short} ${tr.points.length} نقاط`, x0 + 3, y0 - 4, el.color);
       drawn += 1;
       continue;
@@ -945,7 +973,7 @@ export function layoutElements({
     const yTop = py(el.high);
     const yBot = py(el.low);
     if (yTop == null || yBot == null) { culled += 1; continue; }
-    if (!insideY(yTop) && !insideY(yBot)) { culled += 1; continue; }
+    if (!spansY(yTop, yBot)) { culled += 1; continue; }
     const isFvg = el.typeId === 'fvg';
     if (isFvg && !showFvg) continue;
     const fillAlpha = (isFvg ? 0.10 : 0.16) * a;

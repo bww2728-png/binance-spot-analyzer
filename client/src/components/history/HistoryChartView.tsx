@@ -140,7 +140,10 @@ export default function HistoryChartView({
           return Math.max(0, Math.min(last, lo));
         },
         width: chart.paneSize().width,
-        height,
+        // الارتفاع من الـpane نفسه لا من خاصية الإنشاء: `height` داخل هذا الإغلاق
+        // يبقى على قيمة التحميل الأولى، فملء الشاشة كان يجعل كل ما تحت الارتفاع
+        // القديم يُحتسب «خارج النطاق» ويُستبعد.
+        height: chart.paneSize().height,
         cursorTime: rs[rs.length - 1].time,
         cursorIndex: rs.length - 1,
         style: st,

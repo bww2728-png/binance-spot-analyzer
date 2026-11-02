@@ -659,3 +659,135 @@ test('mergeFilters يحصّن القيم التالفة من localStorage بلا
   assert.equal(mergeFilters({ minTouches: 5, side: 'above' }).minTouches, 5);
   assert.equal(mergeFilters({ side: 'below' }).side, 'below');
 });
+
+/* ------------------------------------------------------------------ */
+/* انحدار: خط الاتجاه بلا index، الإبطال في العميل، تقاطع الإطار       */
+/* ------------------------------------------------------------------ */
+
+test('خط اتجاه المحرك القديم (بلا index في النقاط) يُرسم حتى المؤشر لا بقيمة النافذة', () => {
+  const rows = candleSeries(60);
+  const zone = legacyZone({
+    id: 'tl-legacy',
+    kind: 'trendline_bsl',
+    availableAt: rows[8].time,
+    createdAt: rows[5].time,
+    // engine.mjs:341 يُصدر النقاط بـ{time, price} فقط — بلا index
+    trendline: {
+      points: [
+        { time: rows[5].time, price: 101 },
+        { time: rows[15].time, price: 99 },
+        { time: rows[25].time, price: 97 }
+      ],
+      slope: -0.2,
+      errorAtr: 0.3,
+      projected: 90
+    },
+    touchPoints: [
+      { index: 5, time: rows[5].time, price: 101, availableAt: rows[8].time },
+      { index: 15, time: rows[15].time, price: 99, availableAt: rows[18].time }
+    ]
+  });
+  const { elements } = buildElements({ engine: 'legacy', zones: [zone] });
+  const axis = axisFor(rows);
+  const style = defaultFilters().appearance;
+  const layout = layoutElements({
+    elements, ...axis, width: 1038, height: 500,
+    cursorTime: rows[29].time, cursorIndex: 29, replay: true, style
+  });
+  const seg = layout.segments.find((s) => s.id === 'zone:tl-legacy');
+  assert.ok(seg, 'الخط يُرسم');
+  assert.ok(Math.abs(seg.x2 - axis.tx(rows[29].time)) < 0.5, 'الطرف الأيمن عند المؤشر لا عند آخر شمعة');
+  assert.ok(seg.x2 < 1038, 'لا امتداد إلى حافة الشارت');
+  assert.ok(Math.abs(seg.y1 - axis.py(100.4)) < 0.5, 'البداية عند سعر الخط لحظة المعرفة');
+  assert.ok(Math.abs(seg.y2 - axis.py(96.2)) < 0.5, 'النهاية عند سعر الخط عند المؤشر');
+  assert.ok(seg.y2 < axis.py(90), 'قيمة projected (90) غير مستخدمة في التتبع');
+});
+
+test('invalidatedAt لا يُعاد اختلاقه من invalidation.at في طبقة العميل', () => {
+  const zone = legacyZone({
+    id: 'v2-swept',
+    state: 'swept',
+    sweptAt: 1_000_900,
+    invalidatedAt: null,
+    // شكل مخرجات v2: invalidation.at يساوي sweptAt تماماً
+    invalidation: { reason: 'سُحبت السيولة', at: 1_000_900 }
+  });
+  const { elements } = buildElements({ engine: 'legacy', zones: [zone] });
+  const el = elements.find((e) => e.id === 'zone:v2-swept');
+  assert.equal(el.sweptAt, 1_000_900);
+  assert.equal(el.invalidatedAt, null, 'السويب لا يُعرض إبطالاً');
+  assert.equal(el.endAt, 1_000_900, 'نهاية العمر من السويب');
+});
+
+test('منطقة تغطي كامل الإطار رأسياً تُرسم ولا تُستبعد', () => {
+  const rows = candleSeries(60);
+  const tall = v2Supply({
+    id: 'tall-supply',
+    zoneBox: { high: 1000, low: -1000 }, // py: 500-2000=-1500 و500+2000=2500
+    high: 1000,
+    low: -1000,
+    price: 0,
+    liquidity: 0,
+    availableAt: rows[2].time,
+    createdAt: rows[2].time
+  });
+  const { elements } = buildElements({ engine: 'v2', zones: [tall] });
+  const axis = axisFor(rows);
+  const layout = layoutElements({
+    elements, ...axis, width: 1000, height: 500,
+    cursorTime: rows[59].time, cursorIndex: 59, replay: false, style: defaultFilters().appearance
+  });
+  const rect = layout.rects.find((r) => r.id === 'zone:tall-supply');
+  assert.ok(rect, 'الصندوق الذي يغطي الشاشة يجب أن يُرسم');
+  assert.equal(layout.culled, 0);
+});
+
+test('IDM غير المؤكد لا يُعرض «مؤكداً» ولا بتاريخ تأكيد مخترع', () => {
+  const pending = v2Event({ key: 'idm:15', type: 'idm', confirmed: false, brokenIndex: null, brokenTime: null, evidence: { kind: 'low', brokenIndex: null, confirmed: false } });
+  const built = buildElements({ engine: 'v2', zones: [v2Supply()], structureEvents: [pending] });
+  const el = built.elements.find((e) => e.id === 'event:idm:15');
+  assert.equal(el.state, 'candidate');
+  assert.equal(el.confirmedAt, null, 'لا تأكيد لم يقع');
+
+  // IDM مؤكد: زمن التأكيد هو زمن كسر الحركة لا زمن الارتداد
+  const confirmed = v2Event({ key: 'idm:20', type: 'idm', confirmed: true, brokenIndex: 30, brokenTime: 1_000_500, evidence: { kind: 'high', brokenIndex: 30, confirmed: true } });
+  const built2 = buildElements({ engine: 'v2', zones: [v2Supply()], structureEvents: [confirmed] });
+  const el2 = built2.elements.find((e) => e.id === 'event:idm:20');
+  assert.equal(el2.state, 'confirmed');
+  assert.equal(el2.confirmedAt, 1_000_500);
+});
+
+test('«إخفاء العناصر المنتهية» لا يُخفي العلامات والأحداث اللحظية', () => {
+  const rows = candleSeries(30);
+  const zone = legacyZone({
+    id: 'swept-1', state: 'swept', sweptAt: rows[12].time, invalidatedAt: null,
+    availableAt: rows[5].time, createdAt: rows[2].time,
+    touchPoints: [
+      { index: 3, time: rows[3].time, price: 101, availableAt: rows[6].time },
+      { index: 9, time: rows[9].time, price: 100.4, availableAt: rows[12].time }
+    ]
+  });
+  const { elements } = buildElements({ engine: 'legacy', zones: [zone] });
+  const filters = defaultFilters();
+  filters.showHistory = false;
+  const r = selectElements(elements, { cursorTime: rows[29].time, replay: false, filters });
+  const ids = r.visible.map((e) => e.id);
+  assert.ok(!ids.includes('zone:swept-1'), 'المنطقة المنتهية تُخفى');
+  assert.equal(ids.filter((id) => id.startsWith('touch:')).length, 2, 'العلامات اللحظية تبقى');
+});
+
+test('mergeFilters يرفض المصفوفات والنصوص ويقيّد الشفافية والسماكة', () => {
+  const m = mergeFilters({
+    timeTo: [],
+    timeFrom: '123',
+    minTouches: '5',
+    priceMax: [1, 2],
+    appearance: { opacity: 0, lineWidth: 99 }
+  });
+  assert.equal(m.timeTo, null, 'مصفوفة فارغة لا تصبح 0');
+  assert.equal(m.timeFrom, null, 'نص رقمي لا يُقبل كمدى');
+  assert.equal(m.minTouches, defaultFilters().minTouches);
+  assert.equal(m.priceMax, null);
+  assert.equal(m.appearance.opacity, 0.15, 'الحد الأدنى لمدى اللوحة');
+  assert.equal(m.appearance.lineWidth, 3, 'الحد الأعلى لمدى اللوحة');
+});
