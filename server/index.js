@@ -35,6 +35,7 @@ import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
 import { startRetention } from './services/retention.mjs';
 import { createTwoTierCache } from './services/twoTierCache.mjs';
+import { createEnsureSettings } from './services/settingsDefaults.mjs';
 import {
   startInventorySaver, loadInventory, loadBacktestRun
 } from './services/inventoryStore.mjs';
@@ -364,6 +365,12 @@ const serializeSettings = (s) => ({
   ...s,
   sound_enabled: s.sound_enabled ? 1 : 0
 });
+
+/**
+ * كان يُستدعى بلا تعريف ⇒ `/api/settings` يعيد 500 دائماً.
+ * المنطق في `services/settingsDefaults.mjs` ليُختبر بلا خادم.
+ */
+const ensureSettings = createEnsureSettings(db.settings);
 
 const handle = (fn) => (req, res) => {
   fn(req, res).catch(e => {

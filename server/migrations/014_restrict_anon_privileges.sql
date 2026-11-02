@@ -61,7 +61,12 @@ begin
     execute format('revoke all on public.%I from anon', t.tablename);
   end loop;
   for t in
-    select sequence_name from information_schema.sequences where sequence_schema = 'public'
+    -- نفس سبب 013b: `information_schema.sequences` تُسقط تسلسلات أعمدة identity (وكل
+    -- تسلسلات هذا المخطط كذلك) فتُرجع صفر صفوف ⇒ يبقى anon محتفظاً بـnextval().
+    select c.relname as sequence_name
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'S'
   loop
     execute format('revoke all on sequence public.%I from anon', t.sequence_name);
   end loop;

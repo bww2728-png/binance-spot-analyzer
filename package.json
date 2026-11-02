@@ -4,14 +4,16 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "server": "node server/index.js",
+    "server": "node --env-file-if-exists=.env server/index.js",
     "client": "npm run dev --prefix client",
     "dev": "concurrently -k \"npm:server\" \"npm:client\"",
     "build": "npm ci --prefix client && npm run build --prefix client && npm ci --omit=dev --prefix server",
     "test": "node --test --test-timeout=30000 server/tests/*.test.mjs",
     "test:client": "npm test --prefix client",
     "lint": "npm run lint --prefix client",
-    "start": "node server/index.js"
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "db:bundle": "node server/tools/db-bundle.mjs",
+    "env:init": "node server/tools/setup-env.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

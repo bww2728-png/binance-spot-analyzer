@@ -31,7 +31,16 @@ begin
   for t in select tablename from pg_tables where schemaname = 'public' loop
     execute format('grant all on public.%I to service_role', t.tablename);
   end loop;
-  for t in select sequence_name from information_schema.sequences where sequence_schema = 'public' loop
+  for t in
+    -- التعداد من الكتالوج لا من `information_schema.sequences`: تلك الواجهة تُسقط تسلسلات
+    -- أعمدة identity (وكل تسلسلات هذا المخطط كذلك) فتُرجع صفر صفوف بلا أي خطأ — عيب مُثبت
+    -- بالتشغيل على PostgreSQL 16: الهيكل يُنشأ و`information_schema.sequences` = 0 صفوف،
+    -- فيبقى service_role بلا USAGE على التسلسل ويفشل كل إدراج يحتاجه.
+    select c.relname as sequence_name
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'S'
+  loop
     execute format('grant all on sequence public.%I to service_role', t.sequence_name);
   end loop;
 end $$;
