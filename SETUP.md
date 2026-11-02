@@ -134,3 +134,26 @@ select has_table_privilege('anon','public.liquidity_workbench_candles','insert')
   ثم حدّث `.env` على كل جهاز.
 - `013b`/`014` غير مُطبَّقين على مشاريع قديمة؛ نفّذهما فقط بعد التأكد من مضبوطية
   المفتاح السري، وإلا توقف الحفظ بلا إشارة في `/readyz`.
+
+---
+
+## 7) ملاحظة شبكية مُقاسة (تخص `psql` لا التطبيق)
+
+مشروع Supabase يعطي في تبويب `Direct connection` عنواناً مثل
+`db.<ref>.supabase.co`، وهذا العنوان **IPv6 فقط**. على شبكات بلا IPv6 (حالة شائعة على
+Windows) تفشل المحاولة بلا رسالة واضحة:
+
+```
+TcpTestSucceeded=False      # لا سجل A، وجهازك بلا مسار ::/0
+```
+
+الحل: استخدم عنوان **Session pooler** من نفس النافذة (يعمل على IPv4):
+
+```powershell
+$env:PGPASSWORD="<db-password>"; $env:PGSSLMODE="require"
+psql -h aws-0-<region>.pooler.supabase.com -p 5432 `
+     -U postgres.<ref> -d postgres -f server/migrations/fresh-install.sql
+```
+
+هذا **لا يؤثر على التطبيق**: الخادم يتكلم مع Supabase عبر HTTPS (`/rest/v1`) لا عبر
+منفذ Postgres، لذا يعمل على أي شبكة. الملاحظة تخص فقط من يريد تنفيذ SQL من سطر الأوامر.
