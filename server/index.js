@@ -1756,7 +1756,13 @@ app.get('/api/liquidity-history', handle(async (req, res) => {
     return res.status(202).json({ status: 'computing', ...params, startedAt: state.startedAt });
   }
   if (state.kind === 'error') {
-    return res.status(503).json({ error: state.message, retryable: true, ...params });
+    return res.status(503).json({
+      error: state.message,
+      retryable: true,
+      transient: Boolean(state.transient),
+      retryAfterSec: state.retryAfterSec ?? null,
+      ...params
+    });
   }
   const value = state.value;
   // الحمولة كبيرة (~مئات آلاف الأرقام): gzip عند توفره في Accept-Encoding
