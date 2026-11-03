@@ -34,7 +34,30 @@ const SYMBOL_RE = /^[A-Z0-9]{1,20}$/;
 // فv2 على 90 يوماً يحتاج نحو ساعة. التاريخ الثابت لا يبرر حرق إعادة حساب متكرر:
 // نتائج v2 تُخزَّن يوماً كاملاً (وstale-while-revalidate يخدم القديم أثناء التحديث).
 const jobTimeoutMs = (engine, days) => (engine === 'v2' ? Math.max(120, days) * 60_000 : 25 * 60_000);
-const FAILURE_COOLDOWN_MS = 30 * 60_000; // بعد فشل: خطأ ظاهر وتهدئة بدل حلقة إعادة إدراج تستهلك المعالج
+const FAILURE_COOLDOWN_MS = 30 * 60_000; // بعد فشل حقيقي: خطأ ظاهر وتهدئة بدل حلقة إعادة إدراج تستهلك المعالج
+/**
+ * الانقطاع الشبكي ليس حكماً على العمق: خطأ اتصال واحد (UND_ERR_CONNECT_TIMEOUT)
+ * كان يقفل الشاشة 30 دقيقة برسالة «جرّب عمقاً أصغر» وهي مضلّلة — العمق بريء.
+ * لذلك: إعادة محاولة قصيرة للدفعة، ثم تهدئة قصيرة تُعيد المحاولة تلقائياً.
+ */
+const TRANSIENT_COOLDOWN_MS = 90_000;
+const FETCH_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 800;
+
+/** أخطاء الشبكة/المهلة فقط — لا تُصنَّف أخطاء المحرك أو الذاكرة هنا */
+const TRANSIENT_CODES = new Set([
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH'
+]);
+
+export function isTransientNetworkError(error) {
+  if (!error) return false;
+  const name = String(error.name ?? '');
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const codes = [error.code, error.cause?.code, error.cause?.cause?.code].filter(Boolean).map(String);
+  if (codes.some((code) => TRANSIENT_CODES.has(code))) return true;
+  return /fetch failed|socket hang up|network error/i.test(String(error.message ?? ''));
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'liquidityHistoryCompute.worker.mjs');
@@ -43,13 +66,25 @@ const ENGINE_VERSIONS = { legacy: 'liquidity-engine-v1', v2: 'liquidity-engine-v
 
 const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
 
-export function createLiquidityHistoryService({ klines, now = () => Date.now(), ttlMs: ttlOverride, warmup = true } = {}) {
+export function createLiquidityHistoryService({
+  klines,
+  now = () => Date.now(),
+  ttlMs: ttlOverride,
+  warmup = true,
+  fetchAttempts = FETCH_ATTEMPTS,
+  retryDelayMs = RETRY_DELAY_MS,
+  transientCooldownMs = TRANSIENT_COOLDOWN_MS
+} = {}) {
   if (typeof klines !== 'function') throw new Error('liquidity-history: klines is required');
+  const attempts = Math.max(1, Number(fetchAttempts) || 1);
+  const delayMs = Math.max(0, Number(retryDelayMs) || 0);
+  const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
   const ttlFor = (engine) => (engine === 'v2' ? 24 * 60 * 60_000 : (ttlOverride ?? TTL_MS));
 
   const cache = new Map();      // key → { value, expiresAt }
   const jobs = new Map();       // key → { startedAt, promise }
   const cooldown = new Map();   // key → failedUntil (منع حلقة فشل↔إعادة إدراج)
+  const lastFailure = new Map(); // key → { message, transient, at } — لتفسير التهدئة للمستخدم
   const lightQueue = [];        // مهام العمق ≤30 يوماً — عامل مستقل
   const heavyQueue = [];        // مهام العمق >30 يوماً — عامل مستقل
   let lightRunning = false;
@@ -65,13 +100,28 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     const batches = new Array(starts.length);
     let failure = null;
     let cursor = 0;
+    /** دفعة واحدة مع إعادة محاولة للأخطاء الشبكية العابرة فقط (لا أخطاء المحرك) */
+    const fetchBatch = async (startTime) => {
+      let lastError;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          return await klines(symbol, '1m', BATCH, startTime);
+        } catch (error) {
+          lastError = error;
+          const canRetry = attempt < attempts && isTransientNetworkError(error);
+          if (!canRetry) break;
+          if (delayMs > 0) await wait(delayMs);
+        }
+      }
+      throw lastError;
+    };
     const worker = async () => {
       while (failure == null) {
         const i = cursor;
         cursor += 1;
         if (i >= starts.length) return;
         try {
-          batches[i] = await klines(symbol, '1m', BATCH, starts[i]);
+          batches[i] = await fetchBatch(starts[i]);
         } catch (error) {
           failure = failure ?? error;
         }
@@ -112,7 +162,9 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
         workerData: { engineKey, symbol, timeframe, bars, buf: flat.buffer },
         // وسم كومة حاد: تجاوز العامل حدّه يُنهيه وحده بخطأ نظيف (تهدئة) بدل
         // أن تتجاوز ذاكرة العملية المشتركة حد الحاوية فيُسقط التطبيق كله.
-        resourceLimits: { maxOldGenerationSizeMb: engineKey === 'v2' ? 128 : 512 }
+        // v2: القياس الحقيقي 14d ≈ 190MB، وكان السقف 128MB فيموت العامل بـOOM
+        // ويُقفل الشارت 30 دقيقة بلا سبب مفهوم. 256MB فوق القياس بهامش آمن.
+        resourceLimits: { maxOldGenerationSizeMb: engineKey === 'v2' ? 256 : 512 }
       });
       const timer = setTimeout(() => {
         worker.terminate();
@@ -194,9 +246,12 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
         try {
           const value = await runJob(key, params);
           cooldown.delete(key);
+          lastFailure.delete(key);
           resolve(value);
         } catch (error) {
-          cooldown.set(key, now() + FAILURE_COOLDOWN_MS);
+          const transient = isTransientNetworkError(error);
+          cooldown.set(key, now() + (transient ? transientCooldownMs : FAILURE_COOLDOWN_MS));
+          lastFailure.set(key, { message: String(error?.message ?? error).slice(0, 200), transient, at: now() });
           reject(error);
         }
       }
@@ -218,6 +273,9 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
       entry.resolve = resolve;
       entry.reject = reject;
     }).finally(() => jobs.delete(key));
+    // طلب fire-and-forget (المسار عبر request) لا ينتظر الوعد: بلا هذا الالتقاط
+    // يصعد فشل العامل كـunhandledRejection يُسجَّل [fatal] في السجل.
+    entry.promise.catch(() => {});
     jobs.set(key, entry);
     (params.days <= 30 ? lightQueue : heavyQueue).push(entry);
     void pump(params.days <= 30 ? 'light' : 'heavy');
@@ -233,7 +291,16 @@ export function createLiquidityHistoryService({ klines, now = () => Date.now(), 
     const key = `${symbol}|${engine}|${days}`;
     const failedUntil = cooldown.get(key);
     if (failedUntil && failedUntil > now()) {
-      return { kind: 'error', message: `تعذر إكمال الحساب لهذا العمق — يعاد المحاولة تلقائياً بعد دقائق، أو جرّب عمقاً أصغر` };
+      const failure = lastFailure.get(key);
+      const retryAfterSec = Math.max(1, Math.ceil((failedUntil - now()) / 1000));
+      return {
+        kind: 'error',
+        transient: Boolean(failure?.transient),
+        retryAfterSec,
+        message: failure?.transient
+          ? `تعذّر جلب الشموع من Binance (انقطاع اتصال مؤقت) — تُعاد المحاولة تلقائياً بعد ${retryAfterSec} ثانية`
+          : `تعذر إكمال الحساب لهذا العمق — يعاد المحاولة تلقائياً بعد دقائق، أو جرّب عمقاً أصغر`
+      };
     }
     const cached = cache.get(key);
     if (cached) {
