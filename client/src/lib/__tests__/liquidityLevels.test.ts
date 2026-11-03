@@ -4,8 +4,15 @@ import {
   aggregateCandles,
   buildLevels,
   buildTrends,
+  clampViewBox,
+  isFullView,
+  levelDeviation,
   makeScale,
-  makeY
+  makeY,
+  mergeLevelsByGap,
+  panViewBox,
+  pickLevelNear,
+  zoomViewBox
 } from '../liquidityLevels';
 
 const T0 = 1_700_000_000;
@@ -281,3 +288,130 @@ describe('buildTrends', () => {
     expect(new Set(lines.map((l) => l.id)).size).toBe(lines.length);
   });
 });
+
+describe('viewBox (pan/zoom)', () => {
+  const bounds = { x: 14, y: 18, w: 1108, h: 472 };
+
+  it('keeps the plot aspect ratio and clamps inside bounds', () => {
+    const vb = clampViewBox({ x: -50, y: 900, w: 400, h: 10 }, bounds);
+    expect(vb.x).toBe(bounds.x);
+    expect(vb.y).toBe(bounds.y + bounds.h - vb.h);
+    expect(vb.w).toBe(400);
+    expect(vb.h / vb.w).toBeCloseTo(bounds.h / bounds.w, 12);
+  });
+
+  it('never zooms out past the bounds nor in past the minimum width', () => {
+    const out = zoomViewBox({ ...bounds }, 10, { x: 500, y: 300 }, bounds);
+    expect(out.w).toBe(bounds.w);
+    const inn = zoomViewBox({ ...bounds }, 0.0001, { x: 500, y: 300 }, bounds);
+    expect(inn.w).toBeGreaterThan(0);
+    expect(inn.w).toBeLessThanOrEqual(bounds.w);
+    expect(inn.h / inn.w).toBeCloseTo(bounds.h / bounds.w, 12);
+  });
+
+  it('keeps the anchor point under the cursor when zooming', () => {
+    const vb = { x: 300, y: 200, w: 400, h: 400 * (bounds.h / bounds.w) };
+    const anchor = { x: 520, y: 260 };
+    const zoomed = zoomViewBox(vb, 0.5, anchor, bounds);
+    const before = (anchor.x - vb.x) / vb.w;
+    const after = (anchor.x - zoomed.x) / zoomed.w;
+    expect(after).toBeCloseTo(before, 9);
+  });
+
+  it('pans by the requested amount and stops at the edges', () => {
+    const vb = { x: 100, y: 100, w: 300, h: 300 * (bounds.h / bounds.w) };
+    expect(panViewBox(vb, 10, 5, bounds).x).toBe(110);
+    const far = panViewBox(vb, 1e6, 1e6, bounds);
+    expect(far.x).toBe(bounds.x + bounds.w - far.w);
+    expect(far.x).toBeLessThanOrEqual(bounds.x + bounds.w - far.w + 1e-9);
+  });
+
+  it('ignores non-finite input and reports the full view', () => {
+    const same = zoomViewBox({ ...bounds }, Number.NaN, { x: Number.NaN, y: 0 }, bounds);
+    expect(same).toEqual(bounds);
+    expect(isFullView({ ...bounds }, bounds)).toBe(true);
+    expect(isFullView({ ...bounds, w: 900 }, bounds)).toBe(false);
+  });
+});
+
+describe('mergeLevelsByGap (display only)', () => {
+  const mk = (id: string, ref: number, touches: number, mergedCount = 1) => ({
+    id,
+    kind: 'horizontal_bsl',
+    side: 'bsl' as const,
+    ref,
+    stop: ref + 1,
+    touchTimes: [T0 + HOUR, T0 + 2 * HOUR, T0 + 3 * HOUR],
+    touchPrices: [ref, ref, ref],
+    touches,
+    state: 'candidate',
+    atr: 1,
+    confidence: 0.5,
+    mergedCount
+  });
+
+  it('merges levels closer than the gap and keeps the strongest as owner', () => {
+    const merged = mergeLevelsByGap([mk('a', 100, 3), mk('b', 100.4, 9), mk('c', 100.9, 5)], 0.45);
+    expect(merged).toHaveLength(2);
+    const byId = new Map(merged.map((l) => [l.id, l]));
+    expect(byId.get('b')?.mergedCount).toBe(2);
+    expect(byId.get('c')?.mergedCount).toBe(1);
+    expect(byId.has('a')).toBe(false);
+  });
+
+  it('does not drift: a chain of near levels cannot merge past the anchor gap', () => {
+    const chain = [mk('a', 100.0, 3), mk('b', 100.2, 3), mk('c', 100.4, 3), mk('d', 100.6, 3)];
+    const merged = mergeLevelsByGap(chain, 0.25);
+    expect(merged.length).toBeGreaterThan(1);
+    for (const group of merged) {
+      const members = chain.filter((l) => Math.abs(l.ref - group.ref) <= 0.25);
+      expect(members.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('does not mutate the input levels', () => {
+    const input = [mk('a', 100, 3), mk('b', 100.2, 4)];
+    const copy = JSON.parse(JSON.stringify(input));
+    const merged = mergeLevelsByGap(input, 1);
+    expect(input).toEqual(copy);
+    expect(merged).toHaveLength(1);
+  });
+
+  it('returns everything when the gap is zero or invalid', () => {
+    const input = [mk('a', 100, 3), mk('b', 100.001, 3)];
+    expect(mergeLevelsByGap(input, 0)).toHaveLength(2);
+    expect(mergeLevelsByGap(input, Number.NaN)).toHaveLength(2);
+    expect(mergeLevelsByGap([], 5)).toEqual([]);
+  });
+});
+
+describe('pickLevelNear / levelDeviation', () => {
+  const level = (ref: number) => ({
+    id: `l${ref}`,
+    kind: 'horizontal_ssl',
+    side: 'ssl' as const,
+    ref,
+    stop: ref - 2,
+    touchTimes: [T0 + HOUR, T0 + 2 * HOUR, T0 + 3 * HOUR],
+    touchPrices: [ref, ref * 1.001, ref],
+    touches: 3,
+    state: 'swept',
+    atr: 1,
+    confidence: 0.6,
+    mergedCount: 1
+  });
+
+  it('picks the closest level inside the tolerance', () => {
+    const levels = [level(100), level(101)];
+    expect(pickLevelNear(levels, 100.6, 0.7)?.ref).toBe(101);
+    expect(pickLevelNear(levels, 100.6, 0.4)).toBeNull();
+    expect(pickLevelNear(levels, Number.NaN, 1)).toBeNull();
+  });
+
+  it('reports the maximum touch deviation as a ratio', () => {
+    expect(levelDeviation(level(100))).toBeCloseTo(0.001, 12);
+    expect(levelDeviation({ ...level(100), touchPrices: [] })).toBe(0);
+  });
+});
+
+

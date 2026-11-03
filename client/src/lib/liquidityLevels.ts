@@ -271,3 +271,131 @@ export function buildTrends(
   }
   return out;
 }
+
+/* ------------------------------------------------------------------ *
+ * نافذة العرض: تكبير/تحريك (دوال خالصة، تختبر بلا متصفح)
+ * ------------------------------------------------------------------ */
+
+/** نافذة العرض في فضاء الرسم (1200×520). نسبتها ثابتة دائماً = نسبة منطقة الرسم. */
+export interface ViewBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** أضيق نافذة مسموحة بالساعات البكسلية (تُبقي الشموع قابلة للقراءة) */
+export const MIN_VIEW_W = 48;
+
+const finite = (v: number) => Number.isFinite(v);
+
+/**
+ * يحصر النافذة داخل الحدود ويحفظ نسبتها. النسبة تُفرض من `bounds`
+ * كي لا تتشوّه الدوائر (نقطة الوقف) ولا تتغيّر سماكة الخطوط.
+ */
+export function clampViewBox(vb: ViewBox, bounds: ViewBox, minW = MIN_VIEW_W): ViewBox {
+  const maxW = Math.max(1e-6, bounds.w);
+  const minWidth = Math.min(Math.max(minW, 1e-6), maxW);
+  const ratio = bounds.h / maxW;
+  const requested = finite(vb.w) ? vb.w : maxW;
+  const w = Math.min(maxW, Math.max(minWidth, requested));
+  const h = w * ratio;
+  const x = Math.min(bounds.x + maxW - w, Math.max(bounds.x, finite(vb.x) ? vb.x : bounds.x));
+  const y = Math.min(bounds.y + bounds.h - h, Math.max(bounds.y, finite(vb.y) ? vb.y : bounds.y));
+  return { x, y, w, h };
+}
+
+/** تكبير حول نقطة مرساة: النقطة تحت المؤشر تبقى في مكانها */
+export function zoomViewBox(
+  vb: ViewBox,
+  factor: number,
+  anchor: { x: number; y: number },
+  bounds: ViewBox,
+  minW = MIN_VIEW_W
+): ViewBox {
+  const f = finite(factor) && factor > 0 ? factor : 1;
+  const maxW = Math.max(1e-6, bounds.w);
+  const minWidth = Math.min(Math.max(minW, 1e-6), maxW);
+  const w = Math.min(maxW, Math.max(minWidth, vb.w * f));
+  const k = w / (vb.w || maxW);
+  const ax = finite(anchor.x) ? anchor.x : vb.x + vb.w / 2;
+  const ay = finite(anchor.y) ? anchor.y : vb.y + vb.h / 2;
+  const x = ax - (ax - vb.x) * k;
+  const y = ay - (ay - vb.y) * k;
+  return clampViewBox({ x, y, w, h: w * (bounds.h / maxW) }, bounds, minW);
+}
+
+/** تحريك النافذة بمقدار فضاء الرسم (موجب = يمين/أسفل) */
+export function panViewBox(vb: ViewBox, dx: number, dy: number, bounds: ViewBox, minW = MIN_VIEW_W): ViewBox {
+  const mx = finite(dx) ? dx : 0;
+  const my = finite(dy) ? dy : 0;
+  return clampViewBox({ ...vb, x: vb.x + mx, y: vb.y + my }, bounds, minW);
+}
+
+export const isFullView = (vb: ViewBox, bounds: ViewBox): boolean =>
+  Math.abs(vb.x - bounds.x) < 1e-6 && Math.abs(vb.y - bounds.y) < 1e-6 && Math.abs(vb.w - bounds.w) < 1e-6;
+
+/* ------------------------------------------------------------------ *
+ * التحديدات: الدمج البصري واختيار الخط
+ * ------------------------------------------------------------------ */
+
+const strengthOf = (l: LevelItem): number => l.touches * 1e6 + (l.confidence ?? 0);
+
+/**
+ * دمج بصري **للعرض فقط**: أي مستويين متجاورين تفصلهما مسافة أصغر من `minGap`
+ * يصيران خطاً واحداً مملوكاً للأقوى (لمسات أكثر ← ثقة أعلى)، مع جمع عدّادات
+ * الدمج كي يظهر للمستخدم كم منطقة حقيقية يقف خلف الخط. لا يُحذف أي مستوى من
+ * البيانات ولا تتغيّر أي قيمة من المحرك — التغيير على مستوى الرسم فقط.
+ */
+export function mergeLevelsByGap(levels: readonly LevelItem[], minGap: number): LevelItem[] {
+  const gap = finite(minGap) && minGap > 0 ? minGap : 0;
+  if (!levels.length) return [];
+  // الأقوى أولاً: يصبح «مرساة» المجموعة، والانضمام يُقاس بمسافته عن المرساة
+  // لا عن آخر عنصر — فلا تتمدّد المجموعة عبر سلسلة تفصلها مسافات متراكمة.
+  const ordered = [...levels].sort(
+    (a, b) => strengthOf(b) - strengthOf(a) || b.ref - a.ref || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+  if (gap === 0) return ordered;
+  const groups: Array<{ anchor: number; members: LevelItem[] }> = [];
+  for (const level of ordered) {
+    const group = groups.find((g) => Math.abs(level.ref - g.anchor) <= gap);
+    if (group) group.members.push(level);
+    else groups.push({ anchor: level.ref, members: [level] });
+  }
+  return groups
+    .map((group) => {
+      const owner = group.members[0];
+      const mergedCount = group.members.reduce((sum, level) => sum + Math.max(1, level.mergedCount), 0);
+      return mergedCount === Math.max(1, owner.mergedCount) ? owner : { ...owner, mergedCount };
+    })
+    .sort((a, b) => b.ref - a.ref);
+}
+
+/** أقرب مستوى لسعر معيّن داخل تسامح — لاختيار الخط عند التحويم/النقر */
+export function pickLevelNear(
+  levels: readonly LevelItem[],
+  price: number,
+  tolerance: number
+): LevelItem | null {
+  if (!finite(price) || !finite(tolerance) || tolerance < 0) return null;
+  let best: LevelItem | null = null;
+  let bestDistance = Infinity;
+  for (const level of levels) {
+    const distance = Math.abs(level.ref - price);
+    if (distance <= tolerance && distance < bestDistance) {
+      best = level;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/** أقصى انحراف بين أسعار اللمسات والخط (نسبة) — دليل رقمي على مطابقة التحديد */
+export function levelDeviation(level: LevelItem): number {
+  let max = 0;
+  for (const price of level.touchPrices) {
+    const dev = Math.abs(price - level.ref) / (level.ref || 1);
+    if (dev > max) max = dev;
+  }
+  return max;
+}
