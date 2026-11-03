@@ -42,6 +42,9 @@ import {
 import { createShadow } from './services/shadow.mjs';
 import {
   mergeZones, replaceSymbolScan, boundByNewest, shouldStartRotation, capState,
+  pruneMissingKeys, resolveIdentityTolerance,
+  IDENTITY_TOLERANCE_MIN, IDENTITY_TOLERANCE_MAX,
+  DEFAULT_IDENTITY_TOLERANCE_PCT, DEFAULT_STALE_GRACE_MS,
   DEFAULT_HISTORY_MAX_ZONES, DEFAULT_LIVE_MAX_ZONES
 } from './services/zoneStore.mjs';
 import { candidateZoneId, createCandidateCollector } from './services/zoneIdCandidate.mjs';
@@ -901,7 +904,9 @@ const liquidityState = {
   error: null,
   /** حالة الماسح الاحتياطي: عدد المفاتيح الناقصة من إجمالي (رمز × فريم) */
   liveFallbackMissing: null,
-  liveFallbackTotal: null
+  liveFallbackTotal: null,
+  /** نتيجة آخر إسقاط لمناطق مفاتيح غادرت المخزن (وليس للسقف) */
+  liveStale: null
 };
 
 /** الحد الذي يبقى محفوظاً من تغذية المراجعة الراجعة (لا نحتاج أكثر للحساب) */
@@ -997,6 +1002,30 @@ const HISTORY_MAX_ZONES = Number(process.env.LIQUIDITY_HISTORY_MAX_ZONES || DEFA
 const LIVE_MAX_ZONES = Number(process.env.LIQUIDITY_LIVE_MAX_ZONES || DEFAULT_LIVE_MAX_ZONES);
 
 /**
+ * هوية المنطقة من محتواها: الرقم في `id` (`cluster-low-2`) يتغيّر مع انزلاق النافذة،
+ * فيبقى للمستوى الواحد صفّان أو أربعة. الدمج الآن بمفتاح (رمز|فريم|نوع|سعر) بتسامح
+ * 0.02% — أعلى من أقصى انزلاق مُقاس (0.012%) وأدنى من أقرب مستويين حقيقيين (0.033%).
+ */
+const ZONE_IDENTITY_TOLERANCE = resolveIdentityTolerance(
+  process.env.LIQUIDITY_ZONE_ID_TOLERANCE || DEFAULT_IDENTITY_TOLERANCE_PCT
+);
+if (process.env.LIQUIDITY_ZONE_ID_TOLERANCE != null) {
+  const raw = Number(process.env.LIQUIDITY_ZONE_ID_TOLERANCE);
+  if (!Number.isFinite(raw) || raw <= 0 || raw !== ZONE_IDENTITY_TOLERANCE) {
+    console.warn(`[liquidity-zones] LIQUIDITY_ZONE_ID_TOLERANCE=${process.env.LIQUIDITY_ZONE_ID_TOLERANCE} خارج الحدود الآمنة [${IDENTITY_TOLERANCE_MIN}, ${IDENTITY_TOLERANCE_MAX}] — المُطبَّق ${ZONE_IDENTITY_TOLERANCE}`);
+  }
+}
+
+/**
+ * مهلة السماح قبل إسقاط مناطق مفتاح غادر مخزن الشموع، تُحسب من **لحظة أول غياب**.
+ * القياس: 3,503 مفتاحاً من 3,766 لم يُبذر (شبكة)، فبقيت مناطق 1m بعمر 5 ساعات تُعرض
+ * كأنها حالية.
+ */
+const LIVE_STALE_GRACE_MS = Number(process.env.LIQUIDITY_LIVE_STALE_GRACE_MS || DEFAULT_STALE_GRACE_MS);
+/** عمر مفتاح ⟶ أول لحظة رُصد فيها غائباً (يملكها `pruneStaleLiveZones`) */
+const liveKeyAbsentSince = new Map();
+
+/**
  * ★2: كل كم عمل نفحص ثبات هوية المنطقة. 6006 عملية لكل دورة، وعيّنة كل 120 تعني ~50
  * عيّنة في الدورة (‎+0.8% كلفة CPU) وهو ما يكفي لتجمّع دليل حقيقي في ساعات.
  */
@@ -1037,7 +1066,9 @@ const shadowCompareIdentitySamples = (sample) => {
   }
 };
 
-const mergeLiquidityResults = (rows, incoming) => mergeZones(rows, incoming);
+const mergeLiquidityResults = (rows, incoming) => mergeZones(rows, incoming, {
+  tolerancePct: ZONE_IDENTITY_TOLERANCE
+});
 
 /**
  * ★2 — قياس المعرّف المرشَّح (من محتوى المنطقة لا من ترتيبها). قياس فقط:
@@ -1446,6 +1477,12 @@ const runLiquidityHistoryRotation = async () => {
        * يقرأه)، وتراكم المسح القديم بجانب الجديد كان يُنتج ~833 منطقة لكل زوج أي
        * ~700MB للدورة الواحدة على حاوية حدّها 1GB — وهو سبب موت الحاوية.
        */
+      /**
+       * ملاحظة مقصودة: لا يُمرَّر تسامح الهوية هنا. مسار التاريخ يستبدل لقطة الرمز
+       * كاملةً (`replaceSymbolScan`)، و`scanHistory` تُنتج عمداً نسخاً للمستوى عبر
+       * لحظات مختلفة (`createdAt` مختلف). تمرير التسامح كان سيدمج تلك النسخ ويغيّر
+       * أعداد شاشة «المناطق القديمة» بلا قياس ⇒ التغيير محصور في المخزون الحيّ.
+       */
       liquidityState.historyResults = boundByNewest(
         replaceSymbolScan(liquidityState.historyResults, symbol, ALL_TIMEFRAMES, pairZones),
         HISTORY_MAX_ZONES
@@ -1475,6 +1512,66 @@ const runLiquidityHistoryRotation = async () => {
 };
 
 /**
+ * إسقاط مناطق المفاتيح التي غادرت مخزن الشموع (بعد مهلة السماح).
+ *
+ * يُستدعى من الماسح الاحتياطي (كل 10 دقائق): أرخص مكان يرى الحالة الفعلية للمخزن، ولا
+ * يضيف أي عمل داخل حلقة الكشف الحادثة. المفتاح «غائب» = لا شموع كافية في المخزن الآن،
+ * أي أن الكشف له لن يُنتج شيئاً، فبقاء صفوفه يعني عرض سعر قديم كأنه حالي.
+ */
+const pruneStaleLiveZones = () => {
+  const now = Date.now();
+  /**
+   * المفتاح «غائب» ليس مجرد غياب الشموع: مفتاح مبذور ثم تجمّد (فجوة بلا إعادة بذر)
+   * يبقى `size=400` بلا تحديث، فوجوده وحده لا يثبت حداثته. الشرط: شموع كافية **و**
+   * آخر شمعة عمرها ≤ 3 فريمات. الفحص لا يُسقط شيئاً بنفسه — الغياب يُقيَّد بمهلة.
+   */
+  const hasKey = (symbol, timeframe) => {
+    if (marketStreams.candles.size(symbol, timeframe) < LIQUIDITY_MIN_BARS) return false;
+    const last = marketStreams.candles.lastOpen(symbol, timeframe);
+    const frameMs = TF_MS[timeframe];
+    if (!Number.isFinite(last) || !frameMs) return true; // لا حكم ⇒ لا إسقاط
+    return now - last <= frameMs * 3;
+  };
+  const before = liquidityState.liveResults.length;
+  let res;
+  try {
+    res = pruneMissingKeys(liquidityState.liveResults, {
+      hasKey,
+      now,
+      graceMs: LIVE_STALE_GRACE_MS,
+      absentSince: liveKeyAbsentSince
+    });
+  } catch (e) {
+    // خطأ في التنظيف لا يجوز أن يُسقط العملية (المستدعي `void` بلا try)
+    liquidityState.liveStale = { error: e.message, at: now, graceMs: LIVE_STALE_GRACE_MS };
+    console.error('[liquidity-zones] فشل إسقاط المناطق القديمة:', e.message);
+    return null;
+  }
+  liquidityState.liveResults = res.rows;
+  liquidityState.liveStale = {
+    stale: res.stale,
+    dropped: res.dropped,
+    kept: res.kept,
+    absentKeys: liveKeyAbsentSince.size,
+    graceMs: LIVE_STALE_GRACE_MS,
+    at: now
+  };
+  if (res.dropped > 0) {
+    const msg = `إسقاط ${res.dropped} منطقة لمفاتيح غادرت المخزن (بقي ${res.kept} من ${before}، داخل المهلة ${res.stale})`;
+    console.log(`[liquidity-zones] ${msg}`);
+    // أثر دائم: تغيير مخزون يقرأه محرك القرار يجب ألا يبقى في سجل الذاكرة وحده
+    void saveLiquidityEvent('liquidity_stale_pruned', null, msg, {
+      dropped: res.dropped,
+      kept: res.kept,
+      stale: res.stale,
+      graceMs: LIVE_STALE_GRACE_MS,
+      absentKeys: liveKeyAbsentSince.size
+    });
+  }
+  return res;
+};
+
+/**
  * الماسح الاحتياطي منخفض التردد (كل 10 دقائق): لا يعيد الكشف الكامل لكل الأزواج إن كان
  * المخزن كاملاً، بل يتحقق من المفاتيح الناقصة/الفجوات فقط ويُصرّح بـ`skipReason` عند التخطي.
  * يبقى مساراً احتياطياً/إصلاحياً — المسار الحادث هو المستمع على إغلاق الشمعة.
@@ -1500,6 +1597,8 @@ const runLiquidityFallbackScan = async () => {
   }
   liquidityState.liveFallbackMissing = missing.length;
   liquidityState.liveFallbackTotal = targets.length * ALL_TIMEFRAMES.length;
+  // قبل أي تخطٍّ: تنظيف صفوف مفاتيح لم تعد في المخزن (لا يمسّ مفاتيح حاضرة)
+  pruneStaleLiveZones();
   if (!missing.length) {
     liquidityState.liveSkipReason = 'المخزن كامل — لا مفاتيح ناقصة، تخطّي الكشف الكامل';
     liquidityJob.beat({ extra: { mode: 'fallback', missing: 0, total: liquidityState.liveFallbackTotal, skipReason: liquidityState.liveSkipReason } });
@@ -1557,6 +1656,9 @@ app.get('/api/liquidity-zones/status', handle(async (_req, res) => {
       /** حالة المسار الحادث: طابور المفاتيح المتغيّرة + الماسح الاحتياطي */
       event: { ...liveEventState, queued: liveKeyQueue.size() },
       fallback: { missing: liquidityState.liveFallbackMissing, total: liquidityState.liveFallbackTotal, intervalMs: LIQUIDITY_FALLBACK_MS },
+      /** مناطق مفاتيح غادرت المخزن: داخل مهلة السماح ← `stale`، بعدها ← أُسقطت */
+      stale: liquidityState.liveStale,
+      identityTolerancePct: ZONE_IDENTITY_TOLERANCE,
       legacyRest: LIQUIDITY_LEGACY_REST
     },
     history: {
