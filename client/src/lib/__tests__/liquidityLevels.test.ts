@@ -267,4 +267,17 @@ describe('buildTrends', () => {
     ];
     expect(buildTrends(zones, range)).toHaveLength(0);
   });
+
+  it('deduplicates copies of the same trendline id', () => {
+    const pts = [
+      { time: T0 + HOUR, price: 100 },
+      { time: T0 + 2 * HOUR, price: 101 },
+      { time: T0 + 3 * HOUR, price: 102 }
+    ];
+    const zones = [trend(pts), { ...trend(pts), state: 'confirmed' }];
+    const lines = buildTrends(zones, range);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].id).toBe('tr1');
+    expect(new Set(lines.map((l) => l.id)).size).toBe(lines.length);
+  });
 });

@@ -241,6 +241,7 @@ export function buildTrends(
 ): TrendItem[] {
   const minPoints = opts.minPoints ?? MIN_TREND_POINTS;
   const out: TrendItem[] = [];
+  const seen = new Set<string>();
   for (const zone of zones ?? []) {
     if (!zone) continue;
     const kind = String(zone.kind ?? '');
@@ -256,8 +257,12 @@ export function buildTrends(
     }
     points.sort((a, b) => a.t - b.t);
     if (points.length < minPoints) continue;
+    // مسار التاريخ يعيد نسخاً لنفس المنطقة — مفتاح React ومفتاح الرسم يجب أن يكونا فريدين
+    const id = String(zone.id ?? `${kind}-${points[0].t}`);
+    if (seen.has(id)) continue;
+    seen.add(id);
     out.push({
-      id: String(zone.id ?? `${kind}-${points[0].t}`),
+      id,
       kind,
       side: sideOf(kind),
       points,
