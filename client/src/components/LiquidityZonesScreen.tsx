@@ -6,6 +6,7 @@ import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
 import LiquidityHistorySection from './LiquidityHistoryChart';
 import LiquidityLevelsSection from './LiquidityLevelsChart';
+import ManualLiquidityWorkspace from './ManualLiquidityWorkspace';
 import { useScreenState } from '../lib/useScreenState';
 
 export default function LiquidityZonesScreen() {
@@ -79,6 +80,7 @@ export default function LiquidityZonesScreen() {
         <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>الافتراضي: أعلى ثقة أولاً</span>
       </div>
       {/* الشارت التاريخي (1m) — في أعلى الشاشة: الميزة الأساسية للتحقق البصري */}
+      <ManualLiquidityWorkspace />
       <LiquidityHistorySection engine="legacy" symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
       {/* الشارت التاريخي الإضافي — مستقل تماماً: خط 1px + نقطة الوقف + خط اتجاه من 3 نقاط */}
       <LiquidityLevelsSection symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />

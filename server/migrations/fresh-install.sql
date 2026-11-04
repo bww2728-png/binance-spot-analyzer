@@ -1,10 +1,10 @@
 -- =============================================================================
 -- ملف تركيب لقاعدة بيانات جديدة — مُولَّد آلياً، لا تُحرّره يدوياً.
 -- أعِد توليده بـ: npm run db:bundle
--- الترتيب: 000_full_schema.sql → 001_identity_by_default.sql → 002_health_samples.sql → 007_liquidity_workbench.sql → 008_liquidity_workbench_points.sql → 009_liquidity_workbench_point_time_nullable.sql → 010_liquidity_workbench_anon_write.sql → 011_liquidity_workbench_grants.sql → 012_liquidity_workbench_point_links_service_write.sql → 013_liquidity_workbench_anon_write_convention.sql → 013b_grant_service_role.sql → 014_restrict_anon_privileges.sql
+-- الترتيب: 000_full_schema.sql → 001_identity_by_default.sql → 002_health_samples.sql → 007_liquidity_workbench.sql → 008_liquidity_workbench_points.sql → 009_liquidity_workbench_point_time_nullable.sql → 010_liquidity_workbench_anon_write.sql → 011_liquidity_workbench_grants.sql → 012_liquidity_workbench_point_links_service_write.sql → 013_liquidity_workbench_anon_write_convention.sql → 013b_grant_service_role.sql → 014_restrict_anon_privileges.sql → 015_manual_liquidity_drawings.sql
 --
 -- التنفيذ: Supabase Dashboard ← SQL Editor ← الصق الملف كاملاً ← Run
--- التحقق بعده: السطور المعلَّقة في نهاية القسم الأخير (014).
+-- التحقق بعده: السطور المعلَّقة في نهاية القسم الأخير (015).
 -- =============================================================================
 
 
@@ -685,4 +685,26 @@ commit;
 -- ثم اختبار سلبي بمفتاح anon مباشرة على PostgREST:
 --   GET /rest/v1/events_log?select=id&limit=1     ⇒ [] فارغة أو 401/403
 -- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- 015_manual_liquidity_drawings.sql
+-- -----------------------------------------------------------------------------
+create table if not exists public.liquidity_manual_drawings (
+  drawing_id text not null,
+  symbol text not null check (symbol ~ '^[A-Z0-9]{3,20}$'),
+  timeframe text not null check (timeframe in ('1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w')),
+  drawing_type text not null check (drawing_type in ('line','circle','arrow','break','rectangle','text')),
+  payload jsonb not null,
+  created_at bigint not null,
+  updated_at bigint not null,
+  primary key (symbol, timeframe, drawing_id)
+);
+
+create index if not exists idx_liquidity_manual_drawings_chart
+  on public.liquidity_manual_drawings (symbol, timeframe, updated_at desc);
+
+alter table public.liquidity_manual_drawings enable row level security;
+
+grant all on public.liquidity_manual_drawings to service_role;
 

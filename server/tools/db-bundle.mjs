@@ -3,7 +3,7 @@
  *
  * السبب: المخطط موزّع على ترحيلات متعددة، وحالة قاعدة جديدة تحتاج ترتيباً محدداً
  * (الجداول الأساسية ← المختبر ← منح service_role ← تضييق anon). لصق ملف واحد في
- * Supabase SQL Editor أقل عرضة للخطأ من لصق 9 ملفات يدوياً.
+ * Supabase SQL Editor أقل عرضة للخطأ من لصق 13 ملفاً يدوياً.
  *
  * الاستخدام:
  *   npm run db:bundle            # يكتب server/migrations/fresh-install.sql
@@ -41,7 +41,8 @@ const ORDER = [
   '012_liquidity_workbench_point_links_service_write.sql',
   '013_liquidity_workbench_anon_write_convention.sql',
   '013b_grant_service_role.sql',
-  '014_restrict_anon_privileges.sql'
+  '014_restrict_anon_privileges.sql',
+  '015_manual_liquidity_drawings.sql'
 ];
 
 const missing = ORDER.filter((f) => !fs.existsSync(path.join(migrationsDir, f)));
@@ -57,7 +58,7 @@ const parts = [
   `-- الترتيب: ${ORDER.join(' → ')}`,
   '--',
   '-- التنفيذ: Supabase Dashboard ← SQL Editor ← الصق الملف كاملاً ← Run',
-  '-- التحقق بعده: السطور المعلَّقة في نهاية القسم الأخير (014).',
+  '-- التحقق بعده: السطور المعلَّقة في نهاية القسم الأخير (015).',
   '-- =============================================================================',
   ''
 ];

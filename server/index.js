@@ -59,6 +59,8 @@ import { createLiquidityWorkbench } from './services/liquidityWorkbench.mjs';
 import { createLiquidityHistoryService } from './services/liquidityHistory.mjs';
 import { withDurablePersistence } from './services/liquidityWorkbenchRepository.mjs';
 import { createLiquidityWorkbenchRouter } from './routes/liquidityWorkbenchRouter.mjs';
+import { createManualLiquidityRouter } from './routes/manualLiquidityRouter.mjs';
+import { createManualLiquidityService } from './services/manualLiquidity.mjs';
 import { TF_MS } from './market/candleStore.mjs';
 import { compareEngines, summarizeSample, createParityCollector } from './services/liquidityShadowV2.mjs';
 
@@ -1881,6 +1883,16 @@ app.get('/api/liquidity-history', handle(async (req, res) => {
     res.type('json').send(payload);
   }
 }));
+
+const manualLiquidity = createManualLiquidityService({
+  klines: (symbol, timeframe, limit, startTime, endTime) => db.binance.klines(symbol, timeframe, limit, startTime, endTime),
+  repository: {
+    listManualDrawings: (context) => db.manualLiquidityDrawings.list(context),
+    upsertManualDrawing: (row) => db.manualLiquidityDrawings.upsert(row),
+    deleteManualDrawing: (context) => db.manualLiquidityDrawings.remove(context)
+  }
+});
+app.use('/api/manual-liquidity', createManualLiquidityRouter({ getService: () => manualLiquidity }));
 
 app.get('/api/liquidity-zones/:id', handle(async (req, res) => {
   const id = String(req.params.id);

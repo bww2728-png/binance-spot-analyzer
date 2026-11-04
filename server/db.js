@@ -462,6 +462,25 @@ const db = {
     },
     upsertChunk: (rows) => rest('/symbols?on_conflict=symbol&select=*', { method: 'POST', body: rows, prefer: 'resolution=merge-duplicates,return=representation' })
   },
+  manualLiquidityDrawings: {
+    list: async ({ symbol, timeframe }) => {
+      const query = new URLSearchParams({
+        symbol: `eq.${symbol}`,
+        timeframe: `eq.${timeframe}`,
+        select: '*',
+        order: 'updated_at.asc,drawing_id.asc',
+        limit: '5000'
+      });
+      return rest(`/liquidity_manual_drawings?${query}`);
+    },
+    upsert: async (row) => rest('/liquidity_manual_drawings?on_conflict=symbol,timeframe,drawing_id&select=*', {
+      method: 'POST', body: row, prefer: 'resolution=merge-duplicates,return=representation'
+    }),
+    remove: ({ symbol, timeframe, drawingId }) => {
+      const query = new URLSearchParams({ symbol: `eq.${symbol}`, timeframe: `eq.${timeframe}`, drawing_id: `eq.${drawingId}` });
+      return rest(`/liquidity_manual_drawings?${query}`, { method: 'DELETE', prefer: 'return=minimal' });
+    }
+  },
   liquidityWorkbench: {
     listScans: async (symbol) => {
       const q = new URLSearchParams({ symbol: `eq.${symbol}`, select: '*', order: 'computed_at.desc', limit: '14' });

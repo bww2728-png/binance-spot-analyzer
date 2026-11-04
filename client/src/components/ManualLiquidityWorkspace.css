@@ -1,0 +1,6 @@
+.manual-chart-controls button,.manual-chart-controls select,.manual-chart-controls input{min-height:36px}
+.manual-chart-surface{touch-action:pan-x pan-y}
+.manual-chart-overlay{position:absolute;inset:0;overflow:visible}
+.manual-drawing-handle{cursor:grab;pointer-events:all}
+.manual-drawing-handle:active{cursor:grabbing}
+@media(max-width:640px){.manual-chart-toolbar{position:sticky;top:0;z-index:5}.manual-chart-surface{min-height:420px}}
