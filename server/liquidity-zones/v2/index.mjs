@@ -73,7 +73,17 @@ function supplyDemandToZone(sd, { symbol, timeframe, candles, endIndex, opts, st
     trendline: null,
     zoneBox: { high: Number(sd.zoneHigh), low: Number(sd.zoneLow) },
     bodyBox: { high: Number(sd.bodyHigh), low: Number(sd.bodyLow) },
-    fvgs: (sd.fvgs ?? []).map(f => ({ index: f.index, kind: f.kind, top: f.top, bottom: f.bottom })),
+    // تمرير الحقول محايد تماماً: لا يغيّر أي قاعدة كشف/قبول/رفض، فقط لا يُسقط
+    // زمن إبطال الفجوة الذي يحسبه `detectFvgs` أصلاً (imbalance.mjs:188).
+    // إسقاطه كان يجعل أي FVG ممتلئ يُرسم حياً إلى آخر الشمعة وزمن حالته لا يتغيّر أبداً.
+    fvgs: (sd.fvgs ?? []).map(f => ({
+      index: f.index,
+      kind: f.kind,
+      top: f.top,
+      bottom: f.bottom,
+      time: f.time,
+      invalidatedAt: f.invalidatedAt
+    })),
     form: sd.form,
     invalidation: null,
     structureEvents: related,

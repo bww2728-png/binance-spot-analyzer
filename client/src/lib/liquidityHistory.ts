@@ -1,28 +1,96 @@
 /**
  * الشارت التاريخي (1m) لمحركي السيولة — طبقة العميل.
- * الحمولة شموع مدمجة [time,o,h,l,c,v] ومناطق مُسقطة بحقول الرسم فقط.
+ * الحمولة شموع مدمجة [time,o,h,l,c,v] ومناطق بحقول المحرك كما هي (بلا اشتقاق مخفي)
+ * + `availableAt` (أول لحظة يمكن فيها معرفة العنصر) + أحداث البنية مرة واحدة.
  */
 
 export type LiquidityHistoryEngine = 'legacy' | 'v2';
+
+export interface HistoryTouchPoint {
+  index: number | null;
+  time: number;
+  price: number;
+  /** زمن تأكيد البيفوت (بعد شموع rightBars) — لا يُعرض قبل وقوعه */
+  availableAt: number | null;
+}
+
+export interface HistoryFvg {
+  index: number | null;
+  time: number | null;
+  kind: string | null;
+  top: number;
+  bottom: number;
+  availableAt: number | null;
+  invalidatedAt: number | null;
+}
+
+export interface HistoryStructureEvent {
+  key: string;
+  type: string;
+  index: number;
+  time: number;
+  price: number;
+  brokenLevel: number | null;
+  brokenPivotIndex: number | null;
+  brokenPivotTime: number | null;
+  brokenIndex: number | null;
+  brokenTime: number | null;
+  confirmBasis: string | null;
+  external: boolean;
+  priorBos: number | null;
+  idmLevel: number | null;
+  availableAt: number | null;
+  confirmed: boolean;
+  evidence: Record<string, unknown> | null;
+}
 
 export interface LiquidityHistoryZone {
   id: string;
   kind: string;
   state: string;
-  direction: string;
-  referenceLevel: number;
+  direction: string | null;
+  referenceLevel: number | null;
   referenceAlt: number | null;
-  liquidityLevel: number;
+  liquidityLevel: number | null;
+  retailStop: number | null;
   zoneBox: { high: number; low: number } | null;
   bodyBox: { high: number; low: number } | null;
+  /** زمن نشأة العنصر السعري (قد يسبق لحظة المعرفة) */
   createdAt: number | null;
+  /** زمن تأكيد المحرك الفعلي — منفصل عن createdAt */
+  confirmedAt: number | null;
+  /** ساعة الخادم عند الحساب — لا يدخل في قرار العرض التاريخي */
+  detectedAt: number | null;
   sweptAt: number | null;
-  confidence: number;
-  touches: number;
+  invalidatedAt: number | null;
+  invalidation: Record<string, unknown> | null;
+  /** أول لحظة يمكن فيها معرفة المنطقة (تأكيد آخر بيفوت / تكون FVG) */
+  availableAt: number | null;
+  availableAtBasis: 'created' | 'pivot_confirm' | 'fvg_formed' | string;
+  confidence: number | null;
+  touches: number | null;
   timeframe: string;
   engine?: string;
-  touchPoints: Array<{ time: number; price: number }>;
-  trendline: { points: Array<{ time: number; price: number }>; projected: number } | null;
+  touchPoints: HistoryTouchPoint[];
+  trendline: {
+    points: Array<{ index: number | null; time: number; price: number }>;
+    projected: number | null;
+    slope: number | null;
+    errorAtr: number | null;
+    maxDeviationAtr: number | null;
+  } | null;
+  staircase: { valid: boolean; breaks: Array<{ index: number; time: number; reactionPrice: number }>; missingAt: number } | null;
+  finalBreak: { breakTime: number | null; reactionPrice: number } | null;
+  breakSteps: Array<{ index?: number; time?: number | null; reactionPrice?: number }>;
+  atr: number | null;
+  distanceAtr: number | null;
+  prominenceAtr: number | null;
+  reasons: string[];
+  premium: Record<string, unknown> | null;
+  form: string | null;
+  fvgs: HistoryFvg[];
+  structureEventKeys: string[];
+  source: string;
 }
 
 export interface LiquidityHistoryResponse {
@@ -40,9 +108,13 @@ export interface LiquidityHistoryResponse {
   totalZones: number;
   zonesCapped: boolean;
   zones: LiquidityHistoryZone[];
+  structureEvents: HistoryStructureEvent[];
+  meta: { rightBars: number | null; computedAt: number | null };
   candles: Array<[number, number, number, number, number, number]>;
   computeMs: number;
+  totalMs?: number;
   cached: boolean;
+  stale?: boolean;
 }
 
 export function fetchLiquidityHistory(opts: {

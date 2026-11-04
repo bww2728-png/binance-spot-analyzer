@@ -13,7 +13,77 @@ export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 
 // تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
+
+/**
+ * مفتاح الخادم العام (anon) — **يُبقى منفصلاً بحكم عقد قائم**.
+ *
+ * `liquidityWorkbench` يكتب بمفتاح `anon` عمداً وفق «اتفاقية الكتابة العامة» الموثّقة في
+ * `010_liquidity_workbench_anon_write.sql` و`013_..._anon_write_convention.sql`، ويوجد
+ * اختبار صريح يمنع تحويله إلى مفتاح الخدمة
+ * (`tests/liquidityWorkbenchDb.test.mjs` → «routes all operations through the public key
+ * regardless of service key presence»). لا يُغيَّر هذا العقد هنا.
+ */
+export function selectPublicKey(env = process.env) {
+  return env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
+}
+
+/**
+ * تفعيل هوية الخدمة **مشروط بإقرار صريح من المشغّل**، لا بمجرد وجود المفتاح.
+ *
+ * سبب ذلك مُثبت بالمراجعة: جداول المشروع التسعة أُنشئت بمنفّذ ترحيلات لا يطبّق الامتيازات
+ * الافتراضية (منصوص عليه في `011_liquidity_workbench_grants.sql:1-2`)، وأغلب منح
+ * `service_role` في المستودع محصور بجداول المختبر. فلو كفى وجود المفتاح لتفعيل الهوية
+ * لتحوّل كل `rest()` إلى 401/403 **مع `/readyz` أخضر** (`storageConfigured()` يفحص الوجود
+ * فقط). لذلك: ضبط المتغيّرة وحده لا يفعل شيئاً — يلزم إقرار منفصل بعد تطبيق
+ * `013b_grant_service_role.sql`.
+ */
+export const SERVICE_ROLE_OPT_IN_ENV = 'SUPABASE_SERVICE_ROLE_CONFIRMED';
+
+/**
+ * مفتاح الخادم العام للأغراض العامة — دالة نقية قابلة للاختبار (لا تقرأ البيئة بنفسها).
+ *
+ * `SERVICE_ROLE` يُستخدم فقط عند الإقرار الصريح، وإلا فالمفتاح العام (السلوك الحالي حرفياً).
+ */
+export function selectStorageKey(env = process.env) {
+  const service = String(env[`${SERVICE_ROLE_OPT_IN_ENV}`] ?? '') === '1'
+    ? (env.SUPABASE_SERVICE_ROLE_KEY || '')
+    : '';
+  return service || selectPublicKey(env);
+}
+
+const SUPABASE_KEY = selectStorageKey();
+/** مفتاح workbench: يبقى عاماً بالعقد، لا يتأثر بوجود مفتاح الخدمة. */
+const WORKBENCH_KEY = selectPublicKey();
+/**
+ * هل الخادم يعمل فعلاً بهوية خدمة؟ **مشتقة من الهوية لا من الوجود**.
+ *
+ * فحص `Boolean(env.X)` كان يُنتج `true` لو ضُبط المتغيّر بمفتاح عام (نسخ/لصق)، فتُعلن
+ * المرحلة 1 «ناجحة» ثم يُطبَّق تضييق RLS على قاعدة لا يملك الخادم فيها هوية خدمة ⇒ انقطاع
+ * تام. الدالة تقارن القيمتين ولا تطبع أياً منهما.
+ */
+export function isUsingServiceRole(env = process.env) {
+  if (String(env[SERVICE_ROLE_OPT_IN_ENV] ?? '') !== '1') return false;
+  const service = env.SUPABASE_SERVICE_ROLE_KEY || '';
+  return Boolean(service) && service !== selectPublicKey(env);
+}
+
+/**
+ * هل التخزين مُهيّأ فعلاً؟ **المصدر الواحد للحقيقة**.
+ *
+ * السبب: فحص الجاهزية في `index.js` كان يعيد بناء نفس الشرط نصّاً
+ * (`SUPABASE_URL && SUPABASE_ANON_KEY`)، فأغفل الاحتياط `VITE_SUPABASE_PUBLISHABLE_KEY`
+ * الموجود هنا. الأثر: نشر يضبط المفتاح عبر `VITE_` فقط يعمل تخزينه فعلياً وتُعلنه
+ * `/readyz` معطّلاً (503 كاذب دائم). وكذلك بعد خطة التقوية (`SUPABASE_SERVICE_ROLE_KEY`)
+ * لكان الشرط القديم يسقط بينما الخادم يعمل.
+ */
+export const storageConfigured = () => Boolean(process.env.SUPABASE_URL && SUPABASE_KEY);
+
+/**
+ * هل مفتاح المختبر (العام) موجود؟ مسار `restWorkbench` يستخدم مفتاحاً **مختلفاً** عن
+ * مفتاح التخزين العام، فوجود مفتاح خدمة وحده يجعل التخزين يعمل والمختبر يفشل
+ * (`apikey: ''`) بلا أي إشارة. هذه الدالة تُغذّي تحذيراً في `/readyz`.
+ */
+export const publicKeyConfigured = () => Boolean(WORKBENCH_KEY);
 
 const keyAuthHeaders = (key) => key.startsWith('sb_publishable_') || key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` };
 const baseHeaders = {
@@ -43,12 +113,13 @@ async function rest(path, { method = 'GET', body, prefer } = {}) {
 
 // اصطلاح المشروع: قراءة وكتابة جداول المختبر الآلية بمفتاح النشر العام عبر RLS
 // (منصة Verdent المُدارة لا تتيح مفتاح service-role، والجداول بيانات سوق آلية بلا بيانات مستخدمين)
+// ملاحظة: هذا المفتاح **عام بالعقد** ولا يتأثر بوجود SERVICE_ROLE — انظر WORKBENCH_KEY.
 async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
     method,
     headers: {
-      apikey: SUPABASE_KEY,
-      ...keyAuthHeaders(SUPABASE_KEY),
+      apikey: WORKBENCH_KEY,
+      ...keyAuthHeaders(WORKBENCH_KEY),
       'Content-Type': 'application/json',
       ...(prefer ? { Prefer: prefer } : {})
     },
@@ -331,15 +402,16 @@ const db = {
     },
     /** السجل العميق للقطات الآلية: صفحات تنازلية بلا سقف الـ60 (للتبويب التاريخي)
      * جلب مصغر: ts,symbol,meta فقط — meta الضخم هو المطلوب والباقي حشو يضخم النقل */
-    autoHistory: async ({ symbol, from, to, limit, offset } = {}) => {
+    autoHistory: async ({ symbol, from, to, limit, offset, beforeId, orderById = false } = {}) => {
       const q = new URLSearchParams({
-        type: 'eq.auto_zones_snapshot', select: 'id,ts,symbol,meta', order: 'ts.desc,id.desc',
+        type: 'eq.auto_zones_snapshot', select: 'id,ts,symbol,meta', order: orderById ? 'id.desc' : 'ts.desc,id.desc',
         limit: String(Math.min(Number(limit) || 200, 500))
       });
       if (symbol) q.set('symbol', `eq.${String(symbol).toUpperCase()}`);
       if (from) q.set('ts', `gte.${Number(from)}`);
       if (to) q.set('ts', `lte.${Number(to)}`);
       if (offset) q.set('offset', String(Number(offset)));
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
       return rest(`/events_log?${q}`);
     },
     /** صورة شارت محفوظة لحظة التحديد الآلي — حدث إلحاقي (نفس نمط case_images) */
@@ -628,9 +700,10 @@ const db = {
       },
       prefer: 'return=representation'
     }),
-    list: async ({ symbol, limit } = {}) => {
-      const q = new URLSearchParams({ type: 'like.decision_*', select: '*', order: 'ts.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
+    list: async ({ symbol, limit, beforeId, orderById = false } = {}) => {
+      const q = new URLSearchParams({ type: 'like.decision_*', select: '*', order: orderById ? 'id.desc' : 'ts.desc,id.desc', limit: String(Math.min(Number(limit) || 500, 1000)) });
       if (symbol) q.set('symbol', `eq.${symbol.toUpperCase()}`);
+      if (beforeId != null) q.set('id', `lt.${Number(beforeId)}`);
       const rows = await rest(`/events_log?${q}`);
       return rows.map(toCardRow);
     },

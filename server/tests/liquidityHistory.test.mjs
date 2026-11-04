@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createLiquidityHistoryService } from '../services/liquidityHistory.mjs';
+import { createLiquidityHistoryService, isTransientNetworkError } from '../services/liquidityHistory.mjs';
 
 /** شموع 1m اصطناعية على شكل صفوف Binance الخام [openTime,o,h,l,c,v,...] */
 const makeRawCandles = (fromMs, count, base = 100) => Array.from({ length: count }, (_, i) => {
@@ -128,6 +128,93 @@ test('a failing Binance batch propagates a clean error, cools down, then recover
   clock += 31 * 60_000; // انقضت التهدئة: التعافي يعيد الجلب فعلياً
   const result = await svc.getHistory(validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 }));
   assert.ok(result.bars > 9000);
+});
+
+test('transient network failure is retried, then blocked for a short window with an accurate message', async () => {
+  let shouldFail = true;
+  let calls = 0;
+  let clock = 1_800_000_000_000;
+  const svc = createLiquidityHistoryService({
+    klines: async (...args) => {
+      calls += 1;
+      if (shouldFail) {
+        const error = new Error('fetch failed');
+        error.code = 'UND_ERR_CONNECT_TIMEOUT';
+        throw error;
+      }
+      return makeRawCandles(args[3], args[2]);
+    },
+    now: () => clock,
+    retryDelayMs: 0
+  });
+  const params = validCandles({ symbol: 'BTCUSDT', engine: 'v2', days: 7 });
+  await assert.rejects(() => svc.getHistory(params), /fetch failed/);
+  assert.ok(calls >= 2, 'الدفعة تُعاد محاولتها قبل إعلان الفشل');
+
+  const blocked = svc.request(params);
+  assert.equal(blocked.kind, 'error');
+  assert.equal(blocked.transient, true);
+  assert.ok(blocked.retryAfterSec <= 90, 'الانقطاع الشبكي يُهدَّأ 90 ثانية لا 30 دقيقة');
+  assert.match(blocked.message, /Binance/);
+  assert.doesNotMatch(blocked.message, /عمقاً أصغر/, 'لا نلوم العمق على انقطاع شبكة');
+
+  clock += 91_000; // قصيرة: تعود المحاولة تلقائياً وحدها
+  shouldFail = false;
+  const callsBefore = calls;
+  assert.equal(svc.request(params).kind, 'computing', 'بعد التهدئة القصيرة يُعاد الإدراج');
+  const result = await svc.getHistory(params);
+  assert.ok(result.bars > 9000);
+  assert.ok(calls > callsBefore);
+});
+
+test('non-transient failure keeps the long cooldown and the depth message', async () => {
+  let clock = 1_800_000_000_000;
+  const svc = createLiquidityHistoryService({
+    klines: async () => { throw new Error('binance offline'); },
+    now: () => clock,
+    retryDelayMs: 0
+  });
+  const params = validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 });
+  await assert.rejects(() => svc.getHistory(params), /binance offline/);
+  const blocked = svc.request(params);
+  assert.equal(blocked.transient, false);
+  assert.match(blocked.message, /عمقاً أصغر/);
+  assert.ok(blocked.retryAfterSec > 90, 'الخطأ غير الشبكي يحتفظ بتهدئة 30 دقيقة');
+  clock += 20 * 60_000;
+  assert.equal(svc.request(params).kind, 'error', 'لا تُعاد المحاولة قبل انقضاء التهدئة الطويلة');
+});
+
+test('isTransientNetworkError classifies network faults only', () => {
+  const withCode = (message, code) => { const error = new Error(message); if (code) error.code = code; return error; };
+  assert.equal(isTransientNetworkError(withCode('fetch failed')), true);
+  assert.equal(isTransientNetworkError(withCode('boom', 'UND_ERR_CONNECT_TIMEOUT')), true);
+  assert.equal(isTransientNetworkError(withCode('boom', 'ECONNRESET')), true);
+  const timeout = new Error('aborted');
+  timeout.name = 'TimeoutError';
+  assert.equal(isTransientNetworkError(timeout), true);
+  assert.equal(isTransientNetworkError(withCode('binance offline')), false);
+  assert.equal(isTransientNetworkError(withCode('شموع تاريخية غير كافية')), false);
+  assert.equal(isTransientNetworkError(withCode('Worker terminated due to reaching memory limit', 'ERR_WORKER_OUT_OF_MEMORY')), false);
+  assert.equal(isTransientNetworkError(null), false);
+});
+
+test('a failing background job never surfaces as unhandledRejection', async () => {
+  const seen = [];
+  const onUnhandled = (reason) => seen.push(String(reason?.message ?? reason));
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const svc = createLiquidityHistoryService({
+      klines: async () => { throw new Error('binance offline'); },
+      now: () => 1_800_000_000_000,
+      retryDelayMs: 0
+    });
+    const params = validCandles({ symbol: 'BTCUSDT', engine: 'legacy', days: 7 });
+    assert.equal(svc.request(params).kind, 'computing', 'الطلب الحقيقي لا ينتظر الوعد');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(seen, [], 'فشل مهمة خلفية لا يصعد كـunhandledRejection');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });
 
 test('too-few candles is an explicit error, not an empty success', async () => {

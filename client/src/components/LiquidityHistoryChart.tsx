@@ -1,433 +1,59 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CandlestickSeries,
-  HistogramSeries,
-  createChart,
-  type IChartApi,
-  type ISeriesApi,
-  type UTCTimestamp
-} from 'lightweight-charts';
-import { CHART_COLORS, HOLLOW_CANDLES } from './MiniChart';
-import { KIND_COLORS } from './LiquidityV2Chart';
-import { attachZonePrimitive } from './ZoneBoxesPrimitive';
-import { fetchLiquidityHistory, type LiquidityHistoryResponse, type LiquidityHistoryZone } from '../lib/liquidityHistory';
+  buildElements,
+  defaultFilters,
+  filterOptions,
+  hiddenTotal,
+  mergeFilters,
+  selectElements,
+  stepIndex,
+  type HistoryFilters
+} from '../../../shared/historyModel.mjs';
+import { fetchLiquidityHistory, type LiquidityHistoryResponse } from '../lib/liquidityHistory';
+import HistoryChartView, { type CandleRow } from './history/HistoryChartView';
+import HistoryFiltersPanel from './history/HistoryFiltersPanel';
+import HistoryDetailPanel from './history/HistoryDetailPanel';
 
 /**
- * الشارت التاريخي (فريم الدقيقة فقط) لمحركي السيولة.
+ * الشارت التاريخي (1m) — منظومة عرض وتتبع لمخرجات محرك واحد فقط.
  *
- * طبقة الرسم هنا **نسخة مطابقة لمنطق شارت كل شاشة** — لا أسلوب مستقل:
- * - engine='legacy': منطق MultiZoneChart — صناديق من نقاط اللمس الحقيقية حتى
- *   شمعة المسح، حد الوقف عند مستوى السيولة، نقاط اللمس على الحافة، وأخضر لSSL
- *   وأحمر لBSL حسب النوع.
- * - engine='v2': منطق LiquidityV2Chart — KIND_COLORS حسب النوع، صناديق
- *   العرض/الطلب المؤكدة بسقف وامتداد محدود، خطوط BSL/SSL بمرجع صلب وسيولة
- *   متقطعة، خطوط اتجاه من نقاطها حتى إسقاطها، خفوت بالأقدمية وتعتيم المسحوبة.
+ * - engine='legacy' ⇒ نتائج `detectLiquidityZones` وحدها.
+ * - engine='v2'     ⇒ نتائج `detectLiquidityZonesV2` وحدها (+ أحداث البنية وFVG).
+ * لا يُنقل نوع أو حدث أو خاصية بين المحركين، ولا يُعاد أي حساب كشف هنا.
  *
- * مضادات التكدس: سقوف مرسومة معلنة، اقتطاع بنطاق السعر والزمن المرئيين،
- * عدّاد «مرئي/إجمالي»، مفتاح ألوان عربي، وفلاتر (المسحوبة/خطوط الاتجاه/الصناديق).
- * لا تعديل على أي قاعدة كشف في المحركين — عرض فقط.
+ * التتبع حتمي: المؤشر فهرس شمعة، والعرض دالة نقية من (البيانات، الفلاتر، المؤشر)
+ * بلا أي اعتماد على ساعة الجهاز.
  */
 
-type CandleRow = { time: number; open: number; high: number; low: number; close: number; volume: number };
-type Coordinate = { tx: (time: number) => number | null; py: (price: number) => number | null };
+const FILTERS_STORAGE = (engine: string) => `liquidityHistory:filters:v2:${engine}`;
 
-export interface HistoryFilters {
-  showSwept: boolean;
-  showTrendlines: boolean;
-  showBoxes: boolean;
-}
-
-const DEFAULT_FILTERS: HistoryFilters = { showSwept: true, showTrendlines: true, showBoxes: true };
-
-// حدود امتداد الشارت الحي (BOX_MAX_BARS/LINE_MIN_ALPHA)، دون سقف يخفي مناطق التاريخ.
-const BOX_MAX_BARS = 80;
-const LINE_MIN_ALPHA = 0.4;
-const MAX_LABELS = 12;
-
-const stateRank = (s: string) => (s === 'confirmed' ? 0 : s === 'candidate' ? 1 : s === 'swept' ? 2 : 3);
-const createdAtSec = (z: LiquidityHistoryZone) => tsSeconds(z.createdAt) ?? 0;
-
-const KIND_SHORT: Record<string, string> = {
-  horizontal_bsl: 'BSL',
-  horizontal_ssl: 'SSL',
-  trendline_bsl: 'خط BSL',
-  trendline_ssl: 'خط SSL',
-  supply: 'عرض',
-  demand: 'طلب'
-};
-
-const fmtPrice = (p: number) => new Intl.NumberFormat('en-US', {
-  maximumFractionDigits: Math.abs(p) >= 1000 ? 2 : Math.abs(p) >= 1 ? 4 : 6
-}).format(p);
-
-const tsSeconds = (value: number | null | undefined) => {
-  const time = Number(value);
-  if (!Number.isFinite(time) || time <= 0) return null;
-  return time > 1e12 ? Math.floor(time / 1000) : Math.floor(time);
-};
-
-/** لون المنطقة حسب النوع فقط — المعيار الثابت في شارتي الشاشتين */
-const kindRgb = (kind: string) => (kind.includes('ssl') ? '8,153,129' : '242,54,69');
-
-type DrawPayload = {
-  candles: CandleRow[];
-  zones: LiquidityHistoryZone[];
-  engineKey: 'legacy' | 'v2';
-  filters: HistoryFilters;
-  chartHeight: number;
-  visFrom: number;
-  visTo: number;
-};
-
-function drawZones(ctx: CanvasRenderingContext2D, coordinate: Coordinate, payload: DrawPayload, counter?: { current: HTMLSpanElement | null }) {
-  const { candles, zones, engineKey, filters, chartHeight, visFrom, visTo } = payload;
-  if (counter?.current) counter.current.textContent = '…';
-  if (!candles.length) return;
-  const firstTime = candles[0].time;
-  const lastTime = candles[candles.length - 1].time;
-  const timeSpan = Math.max(1, lastTime - firstTime);
-  let drawn = 0;
-  const total = zones.length;
-  const offscreen = (yA: number | null, yB: number | null) => {
-    const vals = [yA, yB].filter((v): v is number => v != null);
-    if (!vals.length) return true;
-    return vals.every(v => v < -40) || vals.every(v => v > chartHeight + 40);
-  };
-
-  // ---- مسار v2: منطق LiquidityV2Chart حرفياً ----
-  if (engineKey === 'v2') {
-    const shown = zones.filter(z => filters.showSwept || z.state !== 'swept');
-    const boxZones = shown
-      .filter(z => (z.kind === 'supply' || z.kind === 'demand') && z.zoneBox && (z.state === 'confirmed' || z.state === 'swept'))
-      .sort((a, b) =>
-        stateRank(a.state) - stateRank(b.state) ||
-        (b.confidence ?? 0) - (a.confidence ?? 0) ||
-        createdAtSec(b) - createdAtSec(a));
-    const lineZones = shown
-      .filter(z => z.kind === 'horizontal_bsl' || z.kind === 'horizontal_ssl' || z.kind.startsWith('trendline'))
-      .filter(z => !z.kind.startsWith('trendline') || filters.showTrendlines)
-      .sort((a, b) =>
-        stateRank(a.state) - stateRank(b.state) ||
-        (b.confidence ?? 0) - (a.confidence ?? 0) ||
-        createdAtSec(b) - createdAtSec(a));
-
-    // صناديق العرض/الطلب: من وقت الاكتشاف بامتداد محدود (80 شمعة × دقيقة)
-    for (const z of boxZones) {
-      if (!filters.showBoxes) break;
-      const col = KIND_COLORS[z.kind];
-      const created = tsSeconds(z.createdAt);
-      if (created == null || created > visTo) continue;
-      const yTop = coordinate.py(z.zoneBox!.high);
-      const yBot = coordinate.py(z.zoneBox!.low);
-      if (offscreen(yTop, yBot) || yTop == null || yBot == null) continue;
-      const xFrom = coordinate.tx(Math.max(created, visFrom));
-      const xTo = coordinate.tx(Math.min(lastTime, created + BOX_MAX_BARS * 60));
-      if (xFrom == null || xTo == null || xTo <= xFrom) continue;
-      const alpha = z.state === 'swept' ? 0.10 : 0.14 + Math.min(z.confidence, 0.99) * 0.18;
-      const rgb = z.kind === 'supply' ? '249,115,22' : '59,130,246';
-      ctx.fillStyle = `rgba(${rgb},${alpha})`;
-      ctx.fillRect(xFrom, yTop, xTo - xFrom, Math.max(yBot - yTop, 1));
-      ctx.strokeStyle = col.line;
-      ctx.globalAlpha = z.state === 'swept' ? 0.4 : 0.85;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(xFrom, yTop, xTo - xFrom, Math.max(yBot - yTop, 1));
-      ctx.globalAlpha = 1;
-      const yBodyTop = coordinate.py(z.bodyBox?.high ?? NaN);
-      const yBodyBot = coordinate.py(z.bodyBox?.low ?? NaN);
-      if (z.bodyBox && z.bodyBox.high > z.bodyBox.low && yBodyTop != null && yBodyBot != null) {
-        ctx.setLineDash([2, 3]);
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-        ctx.strokeRect(xFrom, yBodyTop, xTo - xFrom, Math.max(yBodyBot - yBodyTop, 1));
-        ctx.setLineDash([]);
-      }
-      drawn += 1;
-    }
-
-    // خطوط BSL/SSL وخطوط الاتجاه
-    let labels = 0;
-    for (const z of lineZones) {
-      const col = KIND_COLORS[z.kind] ?? { line: '#94a3b8', fill: '', label: '' };
-      const created = tsSeconds(z.createdAt);
-      if (created == null || created > visTo) continue;
-      const xEnd = coordinate.tx(lastTime);
-      const xStart = coordinate.tx(Math.max(created, visFrom));
-      if (xEnd == null || xStart == null) continue;
-      const lifeAlpha = LINE_MIN_ALPHA + (1 - LINE_MIN_ALPHA) * Math.min(1, Math.max(0, (created - firstTime) / timeSpan));
-
-      if (z.kind.startsWith('trendline')) {
-        const pts = z.trendline?.points ?? [];
-        if (pts.length < 2 || !z.trendline) continue;
-        const p0 = coordinate.py(pts[0].price);
-        const pProj = coordinate.py(z.trendline.projected);
-        if (offscreen(p0, pProj) || p0 == null || pProj == null) continue;
-        const x0 = coordinate.tx(tsSeconds(pts[0].time) ?? created);
-        if (x0 == null) continue;
-        ctx.strokeStyle = col.line;
-        ctx.lineWidth = 1.6;
-        ctx.globalAlpha = lifeAlpha * (z.state === 'swept' ? 0.35 : 0.9);
-        ctx.beginPath();
-        ctx.moveTo(x0, p0);
-        ctx.lineTo(xEnd, pProj);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        ctx.lineWidth = 1;
-        ctx.fillStyle = col.line;
-        for (const p of pts) {
-          const xp = coordinate.tx(tsSeconds(p.time) ?? created);
-          const yp = coordinate.py(p.price);
-          if (xp != null && yp != null) ctx.fillRect(xp - 1.5, yp - 1.5, 3, 3);
-        }
-        drawn += 1;
-        continue;
-      }
-
-      // BSL/SSL الأفقية: مرجع صلب + سيولة متقطعة + الخط الفرعي عند اختلافه المعنوي
-      const yRef = coordinate.py(z.referenceLevel);
-      const yLiq = coordinate.py(z.liquidityLevel);
-      if (yRef == null && yLiq == null) continue;
-      if (offscreen(yRef, yLiq)) continue;
-      const alpha = lifeAlpha * (z.state === 'swept' ? 0.35 : 0.95);
-      if (yRef != null) {
-        ctx.strokeStyle = col.line;
-        ctx.lineWidth = 1.4;
-        ctx.globalAlpha = alpha;
-        ctx.beginPath();
-        ctx.moveTo(xStart, yRef);
-        ctx.lineTo(xEnd, yRef);
-        ctx.stroke();
-      }
-      if (yLiq != null) {
-        ctx.setLineDash([5, 4]);
-        ctx.globalAlpha = alpha * 0.8;
-        ctx.beginPath();
-        ctx.moveTo(xStart, yLiq);
-        ctx.lineTo(xEnd, yLiq);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      const alt = z.referenceAlt;
-      if (Number.isFinite(alt as number) && Math.abs((alt as number) - z.referenceLevel) > Math.abs(z.referenceLevel) * 0.001) {
-        const yAlt = coordinate.py(alt as number);
-        if (yAlt != null) {
-          ctx.setLineDash([2, 4]);
-          ctx.globalAlpha = alpha * 0.5;
-          ctx.beginPath();
-          ctx.moveTo(xStart, yAlt);
-          ctx.lineTo(xEnd, yAlt);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-      }
-      ctx.globalAlpha = 1;
-      if (labels < MAX_LABELS && yRef != null) {
-        ctx.font = '10px sans-serif';
-        ctx.fillStyle = col.line;
-        ctx.globalAlpha = Math.max(0.55, alpha);
-        ctx.fillText(`${KIND_SHORT[z.kind] ?? z.kind} ${fmtPrice(z.referenceLevel)}`, xStart + 3, yRef - 4);
-        ctx.globalAlpha = 1;
-        labels += 1;
-      }
-      drawn += 1;
-    }
-  } else {
-    // ---- مسار legacy: منطق MultiZoneChart حرفياً ----
-    // صندوق لكل منطقة من أول لمسة إلى آخر لمسة (أو شمعة المسح)، حد الوقف عند
-    // مستوى السيولة، ونقاط اللمس على الحافة. المنطقة بلا لمسات كافية تُتخطى
-    // كما في شارت الشاشة نفسه.
-    const ordered = zones
-      .filter(z => filters.showSwept || z.state !== 'swept')
-      .sort((a, b) => stateRank(a.state) - stateRank(b.state) || createdAtSec(b) - createdAtSec(a));
-    for (const z of ordered) {
-      const allTouches = (z.touchPoints ?? []).slice().sort((a, b) => a.time - b.time);
-      if (allTouches.length < 2) continue;
-      const touches = allTouches.filter(p => p.time >= visFrom && p.time <= visTo);
-      const bullish = z.kind.includes('ssl');
-      const rgb = kindRgb(z.kind);
-      const confirmed = z.state === 'confirmed';
-      const sweptTime = z.state === 'swept' && z.sweptAt ? tsSeconds(z.sweptAt) : null;
-      const timeStart = allTouches[0].time;
-      const timeEnd = sweptTime ?? allTouches[allTouches.length - 1].time;
-      const visibleStart = Math.max(timeStart, visFrom);
-      const visibleEnd = Math.min(timeEnd, visTo);
-      if (visibleEnd <= visibleStart) continue;
-      const xStart = coordinate.tx(visibleStart);
-      const xEnd = coordinate.tx(visibleEnd);
-      if (xStart == null || xEnd == null || xEnd <= xStart) continue;
-      const stop = Number.isFinite(z.liquidityLevel) ? z.liquidityLevel : (bullish ? Math.min(...allTouches.map(p => p.price)) : Math.max(...allTouches.map(p => p.price)));
-      const prices = allTouches.map(p => p.price);
-      const priceLow = bullish ? Math.min(...prices) : Math.min(...prices, stop);
-      const priceHigh = bullish ? Math.max(...prices, stop) : Math.max(...prices);
-      const yTop = coordinate.py(priceHigh);
-      const yBot = coordinate.py(priceLow);
-      if (offscreen(yTop, yBot) || yTop == null || yBot == null) continue;
-      const alpha = confirmed ? 0.16 : 0.10;
-      ctx.fillStyle = `rgba(${rgb},${alpha})`;
-      ctx.fillRect(xStart, yTop, xEnd - xStart, Math.max(yBot - yTop, 1));
-      ctx.strokeStyle = `rgba(${rgb},${confirmed ? 0.9 : 0.55})`;
-      ctx.lineWidth = confirmed ? 2 : 1;
-      ctx.globalAlpha = z.state === 'swept' ? 0.4 : 1;
-      ctx.strokeRect(xStart, yTop, xEnd - xStart, Math.max(yBot - yTop, 1));
-      // حد الوقف: متقطع عند مستوى السيولة داخل الصندوق
-      const yStop = coordinate.py(stop);
-      if (yStop != null) {
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = `rgba(${rgb},0.7)`;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(xStart, yStop);
-        ctx.lineTo(xEnd, yStop);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      // نقاط اللمس على الحافة
-      ctx.fillStyle = `rgba(${rgb},${confirmed ? 0.95 : 0.7})`;
-      for (const p of touches) {
-        const xp = coordinate.tx(p.time);
-        const yp = coordinate.py(p.price);
-        if (xp != null && yp != null) ctx.fillRect(xp - 1.5, yp - 1.5, 3, 3);
-      }
-      ctx.globalAlpha = 1;
-      drawn += 1;
-    }
+function loadFilters(engine: string): HistoryFilters {
+  try {
+    const raw = localStorage.getItem(FILTERS_STORAGE(engine));
+    if (!raw) return defaultFilters();
+    return mergeFilters(JSON.parse(raw));
+  } catch {
+    return defaultFilters();
   }
-
-  if (counter?.current) counter.current.textContent = `${drawn}/${total}`;
 }
 
-function HistoryChart({ data, height, filters }: { data: LiquidityHistoryResponse; height: number; filters: HistoryFilters }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
-  const dataRef = useRef<DrawPayload>({
-    candles: [], zones: [], engineKey: data.engineKey, filters, chartHeight: height,
-    visFrom: 0, visTo: Number.POSITIVE_INFINITY
-  });
-  const counterRef = useRef<HTMLSpanElement | null>(null);
-  const hasViewedRef = useRef(false);
-  const candleRows = useMemo<CandleRow[]>(() => data.candles.map(([time, open, high, low, close, volume]) => ({
-    time, open, high, low, close, volume
-  })), [data]);
-
-  // مفتاح يعيد الرسم عند تغيير الفلاتر (الرسم داخل primitive يحدث مع إعادة رسم الشارت)
-  const rowsKey = `${filters.showSwept}|${filters.showTrendlines}|${filters.showBoxes}`;
-
-  useEffect(() => {
-    const element = containerRef.current;
-    if (!element) return;
-    const chart = createChart(element, {
-      width: element.clientWidth,
-      height,
-      layout: { background: { color: CHART_COLORS.bg }, textColor: CHART_COLORS.text, fontSize: 11 },
-      grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
-      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.24 } },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
-      crosshair: { mode: 0 }
-    });
-    const candleSeries = chart.addSeries(CandlestickSeries, { ...HOLLOW_CANDLES });
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceScaleId: 'volume',
-      priceFormat: { type: 'volume' },
-      lastValueVisible: false,
-      priceLineVisible: false
-    });
-    chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-    attachZonePrimitive(candleSeries, 'bottom', (context, coordinate) => {
-      // نطاق الرؤية الزمني لحظياً لتخطي المناطق خارج النافذة المعروضة
-      try {
-        const vr = chart.timeScale().getVisibleRange();
-        if (vr) {
-          dataRef.current.visFrom = Number(vr.from);
-          dataRef.current.visTo = Number(vr.to);
-        }
-      } catch { /* النطاق غير جاهز بعد */ }
-      drawZones(context, coordinate, dataRef.current, counterRef);
-    });
-    chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
-    volumeSeriesRef.current = volumeSeries;
-    const observer = new ResizeObserver(() => {
-      if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight });
-        dataRef.current.chartHeight = containerRef.current.clientHeight;
-      }
-    });
-    observer.observe(element);
-    return () => {
-      observer.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      candleSeriesRef.current = null;
-      volumeSeriesRef.current = null;
-      hasViewedRef.current = false;
-    };
-  }, [height]);
-
-  useEffect(() => {
-    dataRef.current = {
-      candles: candleRows,
-      zones: data.zones,
-      engineKey: data.engineKey,
-      filters,
-      chartHeight: dataRef.current.chartHeight || height,
-      visFrom: dataRef.current.visFrom,
-      visTo: dataRef.current.visTo
-    };
-    const candleSeries = candleSeriesRef.current;
-    const volumeSeries = volumeSeriesRef.current;
-    const chart = chartRef.current;
-    if (!candleSeries || !volumeSeries || !chart || !candleRows.length) return;
-    candleSeries.setData(candleRows.map((c) => ({ ...c, time: Math.floor(c.time) as UTCTimestamp })));
-    volumeSeries.setData(candleRows.map((c) => ({
-      time: Math.floor(c.time) as UTCTimestamp,
-      value: c.volume,
-      color: c.close >= c.open ? 'rgba(8,153,129,.3)' : 'rgba(242,54,69,.3)'
-    })));
-    if (!hasViewedRef.current) {
-      const visible = 3 * 1440; // آخر 3 أيام تقريباً — والتمرير إلى الماضي متاح
-      chart.timeScale().setVisibleLogicalRange({
-        from: Math.max(0, candleRows.length - visible),
-        to: candleRows.length + 10
-      });
-      hasViewedRef.current = true;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candleRows, data, rowsKey]);
-
-  const isV2 = data.engineKey === 'v2';
-  return (
-    <div className="relative overflow-hidden rounded-xl" style={{ background: 'var(--surface-0)' }}>
-      <div ref={containerRef} style={{ height, minHeight: height }} />
-      <div className="absolute top-2 right-2 z-10 flex flex-wrap gap-x-2.5 gap-y-0.5 max-w-[80%] rounded-md px-2 py-1 text-[10px]" style={{ background: 'rgba(10,14,22,.8)', color: '#e2e8f0' }}>
-        <span><b style={{ color: '#f23645' }}>▬</b> BSL</span>
-        <span><b style={{ color: '#089981' }}>▬</b> SSL</span>
-        {isV2 && <span><b style={{ color: '#f97316' }}>▬</b> عرض</span>}
-        {isV2 && <span><b style={{ color: '#3b82f6' }}>▬</b> طلب</span>}
-        <span><b style={{ color: '#94a3b8' }}>┄</b> مستوى السيولة</span>
-        <span style={{ opacity: 0.75 }}>شفاف = مسحوبة</span>
-      </div>
-      <div className="absolute top-2 left-2 z-10 rounded px-2 py-1 text-[10px] font-semibold" style={{ background: 'rgba(10,14,22,.8)', color: '#fff' }}>
-        {data.symbol} · 1m · {data.days} يوماً · {data.bars.toLocaleString('en-US')} شمعة · مناطق مرئية <span ref={counterRef}>—</span> / {data.totalZones}
-        {data.gaps > 0 && <span style={{ color: '#fbbf24' }}> · فجوات: {data.gaps.toLocaleString('en-US')}</span>}
-        {data.zonesCapped && <span style={{ color: '#fbbf24' }}> · مُرسلة {data.zones.length}</span>}
-      </div>
-      <div className="absolute bottom-1 left-2 z-10 text-[9px]" style={{ color: 'var(--text-3)' }}>
-        مصدر البيانات: Binance Spot · {data.engine} · للعرض والتحقق اليدوي فقط
-      </div>
-    </div>
-  );
-}
+const fmtDateTime = (sec: number | null) => (sec == null ? '—' : new Date(sec * 1000).toLocaleString('ar', { dateStyle: 'short', timeStyle: 'short' }));
 
 export default function LiquidityHistorySection({ engine, symbol }: { engine: 'legacy' | 'v2'; symbol: string }) {
-  // مفتوح افتراضياً: الخادم يُسخّن نتائج العمق الافتراضي عند الإقلاع، والكاش يجعل
-  // الفتح شبه فوري — وعند بارد تظهر حالة تجهيز واضحة مع استطلاع تلقائي.
   const [open, setOpen] = useState(true);
   const [days, setDays] = useState(engine === 'v2' ? 14 : 90);
   const [data, setData] = useState<LiquidityHistoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [fullscreen, setFullscreen] = useState(false);
-  const [filters, setFilters] = useState<HistoryFilters>(DEFAULT_FILTERS);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filters, setFilters] = useState<HistoryFilters>(() => loadFilters(engine));
+  const [cursorIndex, setCursorIndex] = useState<number | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(4);
+  const [stepBars, setStepBars] = useState(1);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [stats, setStats] = useState({ drawn: 0, culled: 0, labelSkips: 0 });
   const wrapRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -440,6 +66,9 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
     try {
       const result = await fetchLiquidityHistory({ symbol, engine, days: depthDays, signal: controller.signal });
       setData(result);
+      setCursorIndex(null);
+      setSelectedId(null);
+      setPlaying(false);
     } catch (e) {
       if (!controller.signal.aborted) setError(String((e as Error)?.message ?? e));
     } finally {
@@ -452,6 +81,14 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // مفتاح الهوية: يمنع بقاء رسم/شموع من رمز أو عمق سابق
+  const dataKey = data ? `${data.symbol}|${data.engineKey}|${data.days}|${data.from}|${data.to}` : '';
+
+  // فلترة محفوظة لكل واجهة على حدة — لا تتسرّب من القديم إلى الجديد
+  useEffect(() => {
+    try { localStorage.setItem(FILTERS_STORAGE(engine), JSON.stringify(filters)); } catch { /* التخزين اختياري */ }
+  }, [filters, engine]);
+
   useEffect(() => {
     const onFsChange = () => setFullscreen(document.fullscreenElement === wrapRef.current);
     document.addEventListener('fullscreenchange', onFsChange);
@@ -463,45 +100,110 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
     else void wrapRef.current?.requestFullscreen();
   };
 
-  const lastCandle = data?.candles.length ? new Date(data.candles[data.candles.length - 1][0] * 1000).toLocaleString('ar') : '';
+  const candles = useMemo<CandleRow[]>(() => (data?.candles ?? []).map(([time, open, high, low, close, volume]) => ({
+    time, open, high, low, close, volume
+  })), [data]);
 
-  const filterChip = (key: keyof HistoryFilters, label: string) => (
-    <button
-      onClick={() => setFilters(f => ({ ...f, [key]: !f[key] }))}
-      className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold"
-      style={{
-        background: filters[key] ? 'var(--accent-soft)' : 'var(--surface-0)',
-        color: filters[key] ? 'var(--accent)' : 'var(--text-3)',
-        border: '1px solid var(--border-1)'
-      }}
-    >
-      {filters[key] ? '✓ ' : '✕ '}{label}
-    </button>
+  const built = useMemo(() => buildElements({
+    engine,
+    zones: (data?.zones ?? []) as unknown[],
+    structureEvents: (data?.structureEvents ?? []) as unknown[]
+  }), [data, engine]);
+
+  const lastIndex = Math.max(0, candles.length - 1);
+  const cursor = cursorIndex == null ? lastIndex : Math.max(0, Math.min(lastIndex, cursorIndex));
+  const replay = candles.length > 0 && cursor < lastIndex;
+  const rows = useMemo(() => (replay ? candles.slice(0, cursor + 1) : candles), [candles, cursor, replay]);
+  const cursorTime = rows.length ? rows[rows.length - 1].time : 0;
+  const cursorPrice = rows.length ? rows[rows.length - 1].close : null;
+
+  // ATR مرجعي للفلتر: وسيط ATR المعلن من المحرك (بلا اشتقاق جديد)
+  const atrRef = useMemo(() => {
+    const list = built.elements.map((e) => e.atr).filter((v): v is number => v != null && v > 0).sort((a, b) => a - b);
+    return list.length ? list[Math.floor(list.length / 2)] : null;
+  }, [built.elements]);
+
+  const selection = useMemo(() => selectElements(built.elements, {
+    filters,
+    cursorTime,
+    replay,
+    cursorPrice,
+    atrRef
+  }), [built.elements, filters, cursorTime, replay, cursorPrice, atrRef]);
+
+  const options = useMemo(() => filterOptions(built.elements), [built.elements]);
+
+  // ---- التشغيل: تقدّم حتمي بخطوة ثابتة، ولا يلمس أي قرار أو محرك
+  useEffect(() => {
+    if (!playing || !candles.length) return;
+    const id = setInterval(() => {
+      setCursorIndex((i) => {
+        const from = i == null ? lastIndex : i;
+        return stepIndex(from, stepBars, candles.length);
+      });
+    }, Math.max(60, Math.round(1000 / speed)));
+    return () => clearInterval(id);
+  }, [playing, speed, stepBars, candles.length, lastIndex]);
+
+  useEffect(() => {
+    if (playing && cursor >= lastIndex) setPlaying(false);
+  }, [playing, cursor, lastIndex]);
+
+  const jumpTo = useCallback((time: number) => {
+    if (!candles.length) return;
+    // بحث ثنائي على زمن الشموع (مرتّب تصاعدياً) — لا افتراض على ترتيب المصفوفة
+    let lo = 0;
+    let hi = candles.length - 1;
+    if (time <= candles[0].time) { setCursorIndex(0); setPlaying(false); return; }
+    if (time >= candles[hi].time) { setCursorIndex(null); setPlaying(false); return; }
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (candles[mid].time === time) { setCursorIndex(mid); setPlaying(false); return; }
+      if (candles[mid].time < time) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    setCursorIndex(Math.max(0, Math.min(candles.length - 1, lo)));
+    setPlaying(false);
+  }, [candles]);
+
+  const selected = useMemo(
+    () => built.elements.find((e) => e.id === selectedId) ?? null,
+    [built.elements, selectedId]
   );
+
+  const lastCandleLabel = data?.candles.length ? fmtDateTime(data.candles[data.candles.length - 1][0]) : '';
+  const hidden = hiddenTotal(selection.counts);
+
+  const onStats = useCallback((next: { drawn: number; culled: number; labelSkips: number }) => {
+    setStats((prev) => (prev.drawn === next.drawn && prev.culled === next.culled && prev.labelSkips === next.labelSkips ? prev : next));
+  }, []);
 
   return (
     <section className="rounded-xl p-3 sm:p-4 space-y-3" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)' }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-[13px] font-bold" style={{ color: 'var(--text-1)' }}>
-            الشارت التاريخي — فريم الدقيقة فقط {symbol ? `· ${symbol}` : ''}
+            الشارت التاريخي — محرك {engine === 'legacy' ? 'القديم (legacy) وحده' : 'v2 وحده'} · 1m {symbol ? `· ${symbol}` : ''}
           </div>
           <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-3)' }}>
-            مناطق المحرك {engine === 'legacy' ? 'الحالي' : 'v2'} مرسومة بمنطق شارت هذه الشاشة نفسه (الألوان بالنوع: BSL أحمر / SSL أخضر{engine === 'v2' ? '، عرض برتقالي / طلب أزرق' : ''}). التمرير إلى الماضي متاح والمناطق مثبتة على أزمنتها.{engine === 'v2' ? ' عمق v2 الأقصى 14 يوماً بحدود ذاكرة منصة النشر — للتحقق على 3 أشهر استخدم شارت المحرك الحالي.' : ' أول حساب يستغرق دقائق ثم تُخزَّن النتيجة على الخادم.'}
+            يعرض مخرجات هذا المحرك فقط: {engine === 'legacy'
+              ? 'BSL/SSL أفقي وخطوط اتجاه من نقاط لمس حقيقية. لا أحداث بنية ولا FVG ولا عرض/طلب (لا ينتجها هذا المحرك).'
+              : 'BSL/SSL وخطوط اتجاه وعرض/طلب وأحداث IDM/BOS/CHoCH وفجوات FVG.'}
+            {' '}التتبع شمعة بشمعة يعرض كل عنصر عند لحظة معرفته الحقيقية فقط.
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <select
             value={days}
-            onChange={e => { const v = Number(e.target.value); setDays(v); if (open) void load(v); }}
+            onChange={(e) => { const v = Number(e.target.value); setDays(v); if (open) void load(v); }}
             className="px-2.5 py-1.5 rounded-lg text-[12px]"
             style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
             title="عمق التاريخ بالأيام"
           >
-            {(engine === 'v2' ? [7, 14] : [30, 60, 90, 120]).map(d => <option key={d} value={d}>{d} يوماً</option>)}
+            {(engine === 'v2' ? [7, 14] : [30, 60, 90, 120]).map((d) => <option key={d} value={d}>{d} يوماً</option>)}
           </select>
           <button
-            onClick={() => setOpen(o => !o)}
+            onClick={() => setOpen((o) => !o)}
             className="px-3 py-2 rounded-lg text-[12px] font-semibold"
             style={{ background: open ? 'var(--surface-0)' : 'var(--accent-soft)', color: open ? 'var(--text-2)' : 'var(--accent)', border: '1px solid var(--border-1)' }}
           >
@@ -527,12 +229,6 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        {filterChip('showSwept', 'المسحوبة')}
-        {filterChip('showTrendlines', 'خطوط الاتجاه')}
-        {engine === 'v2' && filterChip('showBoxes', 'صناديق العرض/الطلب')}
-      </div>
-
       {error && (
         <div className="rounded-lg px-3 py-2 text-[12px] flex items-center justify-between gap-2" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>
           <span>{error}</span>
@@ -541,20 +237,162 @@ export default function LiquidityHistorySection({ engine, symbol }: { engine: 'l
       )}
       {loading && (
         <div className="rounded-lg px-3 py-3 text-[12px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>
-          جارٍ تجهيز الشارت التاريخي: جلب شموع الدقيقة من Binance دفعةً بعد دفعة ثم حساب مناطق المحرك على خيط منفصل — أول حساب يستغرق {engine === 'v2' ? 'دقائق معدودة' : 'دقائق'} ثم تُخزَّن النتيجة على الخادم. يمكنك ترك الصفحة مفتوحة حتى الاكتمال.
+          جارٍ تجهيز الشارت التاريخي: جلب شموع الدقيقة من Binance دفعةً بعد دفعة ثم حساب مناطق المحرك على خيط منفصل — أول حساب يستغرق {engine === 'v2' ? 'دقائق معدودة' : 'دقائق'} ثم تُخزَّن النتيجة على الخادم.
         </div>
       )}
 
       <div ref={wrapRef} style={fullscreen ? { background: 'var(--surface-0)', padding: 8 } : undefined}>
-        {open && data && (
-          <>
-            <HistoryChart data={data} height={fullscreen ? Math.max(480, window.innerHeight - 140) : 560} filters={filters} />
-            <div className="text-[10.5px] px-1 pt-1" style={{ color: 'var(--text-3)' }}>
-              آخر شمعة: {lastCandle} · النطاق من {new Date(data.from * 1000).toLocaleDateString('ar')} إلى {new Date(data.to * 1000).toLocaleDateString('ar')}
-              {' '}· إجمالي المناطق {data.totalZones}
-              {data.cached ? ' · نتيجة مخزنة' : ' · حساب جديد'}
+        {open && data && candles.length > 0 && (
+          <div className="space-y-2">
+            {/* أدوات التتبع */}
+            <div className="rounded-xl px-2.5 py-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-1)' }}>
+              <button
+                onClick={() => { setCursorIndex(0); setPlaying(false); }}
+                className="px-2 py-1 rounded-lg font-semibold"
+                style={{ background: 'var(--surface-1)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}
+                title="العودة إلى بداية الفترة"
+              >⏮ البداية</button>
+              <button
+                onClick={() => { setPlaying(false); setCursorIndex(stepIndex(cursor, -stepBars, candles.length)); }}
+                className="px-2 py-1 rounded-lg font-semibold"
+                style={{ background: 'var(--surface-1)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}
+                title="خطوة للخلف"
+              >◀ {stepBars > 1 ? stepBars : 'شمعة'}</button>
+              <button
+                onClick={() => {
+                  if (playing) { setPlaying(false); return; }
+                  if (cursor >= lastIndex) setCursorIndex(Math.max(0, lastIndex - Math.max(60, stepBars)));
+                  setPlaying(true);
+                }}
+                className="px-3 py-1 rounded-lg font-bold"
+                style={{ background: playing ? 'var(--down-soft)' : 'var(--accent)', color: playing ? 'var(--down)' : '#fff' }}
+              >{playing ? '⏸ إيقاف مؤقت' : '▶ تشغيل'}</button>
+              <button
+                onClick={() => { setPlaying(false); setCursorIndex(stepIndex(cursor, stepBars, candles.length)); }}
+                className="px-2 py-1 rounded-lg font-semibold"
+                style={{ background: 'var(--surface-1)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}
+                title="خطوة للأمام"
+              >{stepBars > 1 ? stepBars : 'شمعة'} ▶</button>
+              <button
+                onClick={() => { setPlaying(false); setCursorIndex(null); }}
+                className="px-2 py-1 rounded-lg font-semibold"
+                style={{ background: 'var(--surface-1)', color: 'var(--text-2)', border: '1px solid var(--border-1)' }}
+                title="آخر شمعة (العرض الكامل)"
+              >آخر شمعة ⏭</button>
+
+              <label className="flex items-center gap-1">
+                <span style={{ color: 'var(--text-3)' }}>خطوة</span>
+                <select
+                  value={stepBars}
+                  onChange={(e) => setStepBars(Number(e.target.value))}
+                  className="px-1.5 py-1 rounded-lg num"
+                  style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+                >
+                  {[1, 5, 15, 60, 240].map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-1">
+                <span style={{ color: 'var(--text-3)' }}>سرعة</span>
+                <select
+                  value={speed}
+                  onChange={(e) => setSpeed(Number(e.target.value))}
+                  className="px-1.5 py-1 rounded-lg num"
+                  style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}
+                >
+                  {[1, 2, 4, 8, 16].map((v) => <option key={v} value={v}>{v}×</option>)}
+                </select>
+              </label>
+
+              <input
+                type="range"
+                min={0}
+                max={lastIndex}
+                value={cursor}
+                onChange={(e) => { setPlaying(false); setCursorIndex(Number(e.target.value)); }}
+                className="flex-1 min-w-[140px]"
+                title="شريط التتبع الزمني"
+              />
+
+              <span className="num" style={{ color: replay ? '#b45309' : 'var(--text-2)' }}>
+                {replay ? 'تتبع: ' : 'العرض الكامل: '}{fmtDateTime(cursorTime)}
+                {' · '}شمعة {cursor.toLocaleString('en-US')} / {lastIndex.toLocaleString('en-US')}
+              </span>
+              {replay && (
+                <button
+                  onClick={() => { setPlaying(false); setCursorIndex(null); }}
+                  className="px-2 py-1 rounded-lg text-[10.5px]"
+                  style={{ background: 'var(--warn-soft)', color: '#b45309' }}
+                >عرض كل التاريخ</button>
+              )}
             </div>
-          </>
+
+            {/* الشارت */}
+            <div className="relative overflow-hidden rounded-xl" style={{ background: 'var(--surface-0)' }}>
+              <HistoryChartView
+                rows={rows}
+                dataKey={`${dataKey}|${replay ? 'r' : 'f'}`}
+                elements={selection.visible}
+                style={filters.appearance}
+                replay={replay}
+                altInReplay={filters.untimed}
+                selectedId={selectedId}
+                height={fullscreen ? Math.max(420, window.innerHeight - 320) : 520}
+                onSelect={setSelectedId}
+                onStats={onStats}
+              />
+              <div className="absolute top-2 right-2 z-10 flex flex-wrap gap-x-2.5 gap-y-0.5 max-w-[80%] rounded-md px-2 py-1 text-[10px] pointer-events-none" style={{ background: 'rgba(10,14,22,.82)', color: '#e2e8f0' }}>
+                {options.types.filter((t) => filters.types[t.id] !== false).map((t) => (
+                  <span key={t.id}><b style={{ color: t.color }}>▬</b> {t.label}</span>
+                ))}
+                <span style={{ opacity: 0.75 }}>شفاف = مسحوبة/مبطلة · ◆ = لحظة النشأة</span>
+              </div>
+              <div className="absolute top-2 left-2 z-10 rounded px-2 py-1 text-[10px] font-semibold pointer-events-none" style={{ background: 'rgba(10,14,22,.82)', color: '#fff' }}>
+                {data.symbol} · 1m · {data.days} يوماً · {data.bars.toLocaleString('en-US')} شمعة
+                {' · '}بعد الفلاتر <span className="num">{selection.counts.visible}</span>/{selection.counts.total}
+                {hidden > 0 && <span style={{ color: '#fbbf24' }}> · مخفي {hidden}</span>}
+                <span style={{ color: '#93c5fd' }}> · على الشارت {stats.drawn}{stats.culled > 0 ? ` · خارج النافذة ${stats.culled}` : ''}</span>
+                {stats.labelSkips > 0 && <span style={{ color: '#94a3b8' }}> · تسميات متداخلة {stats.labelSkips}</span>}
+                {replay && <span style={{ color: '#fbbf24' }}> · تتبع</span>}
+              </div>
+              <div className="absolute bottom-1 left-2 z-10 text-[9px] pointer-events-none" style={{ color: 'var(--text-3)' }}>
+                مصدر البيانات: Binance Spot · {data.engine} · للعرض والتحقق اليدوي فقط
+              </div>
+            </div>
+
+            {/* لوحة التفاصيل */}
+            {selected && (
+              <HistoryDetailPanel
+                element={selected}
+                data={data}
+                cursorTime={cursorTime}
+                replay={replay}
+                onClose={() => setSelectedId(null)}
+                onJump={jumpTo}
+              />
+            )}
+
+            {/* الفلاتر */}
+            <HistoryFiltersPanel
+              open={filtersOpen}
+              onToggle={() => setFiltersOpen((v) => !v)}
+              options={options}
+              filters={filters}
+              meta={built.meta}
+              counts={selection.counts}
+              range={{ from: data.from, to: data.to }}
+              onChange={(next) => setFilters(next)}
+              onReset={() => setFilters(defaultFilters())}
+            />
+
+            <div className="text-[10.5px] px-1" style={{ color: 'var(--text-3)' }}>
+              آخر شمعة: {lastCandleLabel} · النطاق من {new Date(data.from * 1000).toLocaleDateString('ar')} إلى {new Date(data.to * 1000).toLocaleDateString('ar')}
+              {' '}· إجمالي المناطق من المحرك {data.totalZones}
+              {data.zonesCapped ? ' · مُرسلة ' + data.zones.length : ' · كل المناطق مُرسلة (بلا سقف صامت)'}
+              {data.cached ? ' · نتيجة مخزنة' : ' · حساب جديد'}
+              {data.gaps > 0 && <span style={{ color: '#b45309' }}> · فجوات زمنية في الشموع: {data.gaps.toLocaleString('en-US')}</span>}
+              {' '}· أزمنة المعرفة (availableAt) من قاعدة تأكيد البيفوت في المحرك (rightBars={data.meta?.rightBars ?? '—'})
+            </div>
+          </div>
         )}
         {open && !data && !loading && !error && (
           <div className="rounded-lg py-10 text-center text-[12px]" style={{ color: 'var(--text-3)', background: 'var(--surface-0)' }}>

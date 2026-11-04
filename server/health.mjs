@@ -96,16 +96,29 @@ const clampIntervalMs = (ms) => {
   return Math.min(Math.max(value, 30_000), 24 * 60 * 60 * 1000);
 };
 
-/** حد الذاكرة الفعلي للحاوية (cgroup v2 ثم v1) — null إن لم يُتاح */
-function containerLimits() {
+/**
+ * حد الذاكرة الفعلي للحاوية (cgroup v2 ثم v1) — null إن لم يُتاح.
+ *
+ * العيب الذي أُصلح: قراءة `cpu.max` كانت **خارج** أي حماية. وجود `memory.max` مع غياب
+ * `cpu.max` (كنترولر CPU غير مُفعَّل في cgroup v2) يرمي ENOENT من داخل `snapshot()`
+ * فتُسقط `/api/health/deep` بالكامل وتُفشل كل عيّنة صحة دورية — أي أن فحص الصحة نفسه
+ * يصبح نقطة فشل واحدة. حدّ الذاكرة يبقى صالحاً بلا حدّ CPU، فلا مبرر لإسقاط القياس.
+ *
+ * `readFile` قابل للحقن ليُختبر السلوك على أنظمة ملفات مختلفة بلا حاوية حقيقية.
+ */
+export function readContainerLimits({ readFile = (p) => readFileSync(p, 'utf8') } = {}) {
   const read = (p) => {
-    try { return Number(readFileSync(p, 'utf8').trim()); } catch { return NaN; }
+    try { return Number(readFile(p).trim()); } catch { return NaN; }
   };
   const v2 = read('/sys/fs/cgroup/memory.max');
   if (Number.isFinite(v2) && v2 > 0) {
-    const cpuMax = readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/);
-    const quota = Number(cpuMax[0]) / Number(cpuMax[1] || 1);
-    return { memoryLimitMb: Math.round(v2 / 1048576), cpuCores: Number.isFinite(quota) && quota > 0 ? quota : null };
+    let cpuCores = null;
+    try {
+      const cpuMax = readFile('/sys/fs/cgroup/cpu.max').trim().split(/\s+/);
+      const quota = Number(cpuMax[0]) / Number(cpuMax[1] || 1);
+      if (Number.isFinite(quota) && quota > 0) cpuCores = quota;
+    } catch { /* كنترولر CPU غير مُتاح — القياس يبقى صالحاً بلا حصّة */ }
+    return { memoryLimitMb: Math.round(v2 / 1048576), cpuCores };
   }
   const v1 = read('/sys/fs/cgroup/memory/memory.limit_in_bytes');
   if (Number.isFinite(v1) && v1 > 0 && v1 < 2 ** 62) {
@@ -113,6 +126,8 @@ function containerLimits() {
   }
   return { memoryLimitMb: null, cpuCores: null };
 }
+
+const containerLimits = () => readContainerLimits();
 
 /** ذاكرة المضيف المتاحة (للسياق) */
 function hostMemory() {
@@ -456,7 +471,7 @@ export function createHealth({ startedAt = Date.now(), stalls = {}, log = consol
   /** ربط مزوّد قسم الشموع المجمّعة (يُعرض في كل لقطة صحة) */
   function setCandlesProvider(fn) { candlesProvider = typeof fn === 'function' ? fn : null; }
 
-  return { register, snapshot, startSampler, notePersist, mark, resetLag, gcSnapshot, heapSpaces, addSection, sections, setCandlesProvider };
+  return { register, snapshot, startSampler, notePersist, mark, resetLag, gcSnapshot, heapSpaces, addSection, sections, setCandlesProvider, counters: () => ({ ...counters }) };
 }
 
 export default createHealth;
