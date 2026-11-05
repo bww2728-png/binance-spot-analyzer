@@ -116,6 +116,7 @@ export function createManualLiquidityService({ klines, repository, now = () => D
       if (delta > intervalMs / 1000) gaps += Math.max(1, Math.round(delta / (intervalMs / 1000)) - 1);
     }
     const firstMs = resultRows[0].time * 1000;
+    const hasOlder = firstMs - intervalMs >= rangeStart;
     const closedBars = resultRows.filter((candle) => candle.complete).length;
     const value = {
       symbol: context.symbol,
@@ -133,8 +134,8 @@ export function createManualLiquidityService({ klines, repository, now = () => D
       invalidRows,
       duplicateRows,
       pages: 1,
-      hasOlder: firstMs > rangeStart,
-      nextBefore: firstMs > rangeStart ? resultRows[0].time : null,
+      hasOlder,
+      nextBefore: hasOlder ? resultRows[0].time : null,
       candles: resultRows,
       cached: false
     };

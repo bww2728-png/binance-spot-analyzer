@@ -48,6 +48,19 @@ test('fetches historical pages, sorts and validates candles, marks the active ca
   assert.equal(calls.length, 1);
 });
 
+test('does not request an extra history page when the 90-day boundary is reached', async () => {
+  const rangeStart = fixedNow - 90 * 24 * 60 * 60 * 1000;
+  const service = createManualLiquidityService({
+    repository: validRepository(),
+    now: () => fixedNow,
+    klines: async (_symbol, _timeframe, _limit, startTime) => [candle(Math.ceil(startTime / MINUTE) * MINUTE)]
+  });
+  const result = await service.candles({ symbol: 'BTCUSDT', timeframe: '1m', before: Math.floor((rangeStart + MINUTE) / 1000) });
+  assert.equal(result.bars, 1);
+  assert.equal(result.hasOlder, false);
+  assert.equal(result.nextBefore, null);
+});
+
 test('reports temporal gaps and rejects invalid request or source results', async () => {
   const repository = validRepository();
   const service = createManualLiquidityService({

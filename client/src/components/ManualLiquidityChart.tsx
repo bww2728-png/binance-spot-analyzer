@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CandlestickSeries,
   HistogramSeries,
@@ -11,6 +11,7 @@ import type { ManualCandle, ManualDrawing, ManualPoint, ManualDrawingType } from
 import { CHART_COLORS, HOLLOW_CANDLES } from './MiniChart';
 
 type ChartPoint = { x: number; y: number };
+type DraftShape = { type: 'line' | 'break' | 'rectangle'; start: ChartPoint; cursor: ChartPoint };
 type HoverCandle = ManualCandle | null;
 
 type Props = {
@@ -47,13 +48,25 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
   const candlesRef = useRef(candles);
   const chartSizeRef = useRef({ width: 0, height: 0 });
   const clickPointsRef = useRef<ManualPoint[]>([]);
+  const draftRef = useRef<DraftShape | null>(null);
   const dragRef = useRef<{ drawingId: string; anchorIndex: number; pointerId: number } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drawingDraft, setDrawingDraft] = useState<DraftShape | null>(null);
   const [hover, setHover] = useState<{ candle: HoverCandle; price: number | null }>({ candle: null, price: null });
   const [, redraw] = useState(0);
 
   propsRef.current = { activeTool, activeLiquidity, activeBreakType, activeColor, onCreate, onSelect, onMoveAnchor, onMoveEnd, onHoverCandle };
   candlesRef.current = candles;
+
+  const updateDrawingDraft = useCallback((draft: DraftShape | null) => {
+    draftRef.current = draft;
+    setDrawingDraft(draft);
+  }, []);
+
+  useEffect(() => {
+    clickPointsRef.current = [];
+    updateDrawingDraft(null);
+  }, [activeTool, updateDrawingDraft]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -98,6 +111,8 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
       const price = point ? candlesSeries.coordinateToPrice(point.y) : null;
       propsRef.current.onHoverCandle(row);
       setHover({ candle: row, price: price == null ? null : Number(price) });
+      const draft = draftRef.current;
+      if (draft && point) updateDrawingDraft({ ...draft, cursor: { x: point.x, y: point.y } });
     };
     chart.subscribeCrosshairMove(crosshair);
 
@@ -110,9 +125,14 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
       const point = { time: Math.floor(Number(time)), price: Number(price) };
       const needsTwo = ['line', 'break', 'rectangle'].includes(state.activeTool);
       clickPointsRef.current = [...clickPointsRef.current, point];
-      if (needsTwo && clickPointsRef.current.length < 2) return;
+      if (needsTwo && clickPointsRef.current.length < 2) {
+        const draftPoint = { x: param.point.x, y: param.point.y };
+        updateDrawingDraft({ type: state.activeTool as DraftShape['type'], start: draftPoint, cursor: draftPoint });
+        return;
+      }
       const anchors = clickPointsRef.current.slice(0, needsTwo ? 2 : 1);
       clickPointsRef.current = [];
+      updateDrawingDraft(null);
       const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
       const color = state.activeTool === 'arrow' ? (state.activeLiquidity === 'BSL' ? '#f23645' : '#089981')
         : state.activeTool === 'break' ? (state.activeBreakType === 'wick' ? '#f59e0b' : '#2563eb')
@@ -222,6 +242,7 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
     const anchors = points as ChartPoint[];
     const color = colorFor(drawing);
     const selected = selectedId === drawing.id;
+    const interactive = activeTool === 'select';
     const title = `${drawingLabel(drawing)}${drawing.note ? ` · ${drawing.note}` : ''}`;
     const select = (event: React.PointerEvent<SVGElement>) => {
       event.stopPropagation();
@@ -232,31 +253,31 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
     if (drawing.type === 'line' || drawing.type === 'break') {
       const a = anchors[0];
       const b = anchors[1];
-      shape = <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={color} strokeWidth={drawing.type === 'break' ? 2 : 2.5} strokeDasharray={drawing.type === 'break' ? '5 4' : undefined} pointerEvents="stroke" onPointerDown={select} />;
+      shape = <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={color} strokeWidth={drawing.type === 'break' ? 2 : 2.5} strokeDasharray={drawing.type === 'break' ? '5 4' : undefined} pointerEvents={interactive ? 'stroke' : 'none'} onPointerDown={interactive ? select : undefined} />;
     } else if (drawing.type === 'rectangle') {
       const a = anchors[0];
       const b = anchors[1];
       const x = Math.min(a.x, b.x);
       const y = Math.min(a.y, b.y);
-      shape = <rect x={x} y={y} width={Math.max(2, Math.abs(a.x - b.x))} height={Math.max(2, Math.abs(a.y - b.y))} fill={color} fillOpacity={drawing.fillOpacity ?? 0.18} stroke={color} strokeWidth={2} pointerEvents="all" onPointerDown={select} />;
+      shape = <rect x={x} y={y} width={Math.max(2, Math.abs(a.x - b.x))} height={Math.max(2, Math.abs(a.y - b.y))} fill={color} fillOpacity={drawing.fillOpacity ?? 0.18} stroke={color} strokeWidth={2} pointerEvents={interactive ? 'all' : 'none'} onPointerDown={interactive ? select : undefined} />;
     } else if (drawing.type === 'circle') {
       const p = anchors[0];
       const radius = Math.max(6, xFor(drawing.anchors[0].time + (drawing.radiusBars ?? 4) * timeframeSeconds) != null ? Math.abs((xFor(drawing.anchors[0].time + (drawing.radiusBars ?? 4) * timeframeSeconds) ?? p.x) - p.x) / 2 : 8);
-      shape = <circle cx={p.x} cy={p.y} r={radius} fill="none" stroke={color} strokeWidth={2.5} pointerEvents="stroke" onPointerDown={select} />;
+      shape = <circle cx={p.x} cy={p.y} r={radius} fill="none" stroke={color} strokeWidth={2.5} pointerEvents={interactive ? 'stroke' : 'none'} onPointerDown={interactive ? select : undefined} />;
     } else if (drawing.type === 'arrow') {
       const p = anchors[0];
       const up = drawing.liquidityType === 'BSL';
       const tipY = p.y;
       const baseY = up ? p.y + 38 : p.y - 38;
       const label = drawingLabel(drawing);
-      shape = <g pointerEvents="all" onPointerDown={select}>
+      shape = <g pointerEvents={interactive ? 'all' : 'none'} onPointerDown={interactive ? select : undefined}>
         <line x1={p.x} y1={baseY} x2={p.x} y2={tipY} stroke={color} strokeWidth={2.5} />
         <path d={up ? `M ${p.x - 7} ${tipY + 11} L ${p.x} ${tipY} L ${p.x + 7} ${tipY + 11}` : `M ${p.x - 7} ${tipY - 11} L ${p.x} ${tipY} L ${p.x + 7} ${tipY - 11}`} fill="none" stroke={color} strokeWidth={2.5} />
         <text x={p.x + 7} y={baseY} fill={color} fontSize="11" fontWeight="bold">{label}</text>
       </g>;
     } else if (drawing.type === 'text') {
       const p = anchors[0];
-      shape = <text x={p.x + 5} y={p.y - 6} fill={color} stroke="#0b1220" strokeWidth="3" paintOrder="stroke" fontSize="13" pointerEvents="all" onPointerDown={select}>{drawing.label || drawing.note}</text>;
+      shape = <text x={p.x + 5} y={p.y - 6} fill={color} stroke="#0b1220" strokeWidth="3" paintOrder="stroke" fontSize="13" pointerEvents={interactive ? 'all' : 'none'} onPointerDown={interactive ? select : undefined}>{drawing.label || drawing.note}</text>;
     }
     return <g key={drawing.id}>
       <title>{title}</title>
@@ -264,6 +285,7 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
       {selected && anchors.map((p, index) => <circle key={`${drawing.id}-${index}`} cx={p.x} cy={p.y} r="5" fill="#fff" stroke={color} strokeWidth="2" className="manual-drawing-handle" onPointerDown={(event) => beginAnchorDrag(event, drawing.id, index)} onPointerMove={moveAnchorDrag} onPointerUp={endAnchorDrag} onPointerCancel={endAnchorDrag} />)}
     </g>;
   };
+  const draftColor = drawingDraft?.type === 'break' ? (activeBreakType === 'wick' ? '#f59e0b' : '#2563eb') : activeColor;
 
   return <div className="relative h-[520px] min-h-[420px] w-full overflow-hidden rounded-xl" style={{ background: 'var(--surface-0)' }}>
     <div ref={hostRef} className="absolute inset-0" />
@@ -271,6 +293,12 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
       <defs><clipPath id="manual-chart-clip"><rect x="0" y="0" width={plotWidth} height={plotHeight} /></clipPath></defs>
       <g clipPath="url(#manual-chart-clip)" style={{ pointerEvents: 'none' }}>
         {drawings.map(renderDrawing)}
+        {drawingDraft && <>
+          {drawingDraft.type === 'rectangle'
+            ? <rect x={Math.min(drawingDraft.start.x, drawingDraft.cursor.x)} y={Math.min(drawingDraft.start.y, drawingDraft.cursor.y)} width={Math.max(2, Math.abs(drawingDraft.start.x - drawingDraft.cursor.x))} height={Math.max(2, Math.abs(drawingDraft.start.y - drawingDraft.cursor.y))} fill={draftColor} fillOpacity={0.12} stroke={draftColor} strokeWidth={2} strokeDasharray="5 4" />
+            : <line x1={drawingDraft.start.x} y1={drawingDraft.start.y} x2={drawingDraft.cursor.x} y2={drawingDraft.cursor.y} stroke={draftColor} strokeWidth={2.5} strokeDasharray={drawingDraft.type === 'break' ? '5 4' : undefined} />}
+          <circle cx={drawingDraft.start.x} cy={drawingDraft.start.y} r={4} fill={draftColor} stroke="#fff" strokeWidth={1.5} />
+        </>}
       </g>
       {selectedId && <g style={{ pointerEvents: 'all' }}>{drawings.filter((drawing) => drawing.id === selectedId).map(renderDrawing)}</g>}
     </svg>
@@ -279,7 +307,7 @@ export default function ManualLiquidityChart({ candles, drawings, activeTool, ac
       {hover.price != null && ` · ${hover.price.toPrecision(8)}`}
     </div>
     <div className="absolute top-2 right-2 z-10 rounded bg-slate-950/80 px-2 py-1 text-[10px] text-slate-100" dir="rtl">
-      {activeTool === 'select' ? 'تحديد/تحريك' : `أداة الرسم: ${activeTool} · انقر الشارت${['line', 'break', 'rectangle'].includes(activeTool) ? ' مرتين لتحديد الطرفين' : ''}`}
+      {drawingDraft ? 'تم تحديد النقطة الأولى — حرّك المؤشر ثم انقر لتثبيت الطرف الثاني' : activeTool === 'select' ? 'تحديد/تحريك' : `أداة الرسم: ${activeTool} · انقر الشارت${['line', 'break', 'rectangle'].includes(activeTool) ? ' مرتين لتحديد الطرفين' : ''}`}
     </div>
   </div>;
 }

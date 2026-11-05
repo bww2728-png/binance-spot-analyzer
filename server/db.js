@@ -12,7 +12,20 @@ import { summarizeOpportunityHistory } from './services/opportunityHistorySummar
 export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 
 // تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
+function supabaseRestUrl(path) {
+  const configuredUrl = String(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+  let baseUrl;
+  try {
+    const parsedUrl = new URL(configuredUrl);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
+      throw new Error('invalid Supabase URL');
+    }
+    baseUrl = parsedUrl.toString().replace(/\/+$/, '');
+  } catch {
+    throw new Error('عنوان Supabase غير مُهيّأ أو غير صالح (SUPABASE_URL أو VITE_SUPABASE_URL)');
+  }
+  return `${baseUrl}/rest/v1${path}`;
+}
 
 /**
  * مفتاح الخادم العام (anon) — **يُبقى منفصلاً بحكم عقد قائم**.
@@ -76,7 +89,15 @@ export function isUsingServiceRole(env = process.env) {
  * `/readyz` معطّلاً (503 كاذب دائم). وكذلك بعد خطة التقوية (`SUPABASE_SERVICE_ROLE_KEY`)
  * لكان الشرط القديم يسقط بينما الخادم يعمل.
  */
-export const storageConfigured = () => Boolean(process.env.SUPABASE_URL && SUPABASE_KEY);
+export const storageConfigured = () => {
+  if (!SUPABASE_KEY) return false;
+  try {
+    supabaseRestUrl('');
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * هل مفتاح المختبر (العام) موجود؟ مسار `restWorkbench` يستخدم مفتاحاً **مختلفاً** عن
@@ -95,7 +116,7 @@ const baseHeaders = {
 const opportunityHistorySummaryCache = new Map();
 
 async function rest(path, { method = 'GET', body, prefer } = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
+  const res = await fetch(supabaseRestUrl(path), {
     method,
     headers: { ...baseHeaders, ...(prefer ? { Prefer: prefer } : {}) },
     signal: AbortSignal.timeout(20000), // منع تعليق الدورات الحية عند توقف الاتصال
@@ -115,7 +136,7 @@ async function rest(path, { method = 'GET', body, prefer } = {}) {
 // (منصة Verdent المُدارة لا تتيح مفتاح service-role، والجداول بيانات سوق آلية بلا بيانات مستخدمين)
 // ملاحظة: هذا المفتاح **عام بالعقد** ولا يتأثر بوجود SERVICE_ROLE — انظر WORKBENCH_KEY.
 async function restWorkbench(path, { method = 'GET', body, prefer } = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
+  const res = await fetch(supabaseRestUrl(path), {
     method,
     headers: {
       apikey: WORKBENCH_KEY,
@@ -677,7 +698,7 @@ const db = {
      * بالتقدير: قرار السعة كله مبني عليه، وبدونه يبقى الحذف تخميناً.
      */
     count: async () => {
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/health_samples?select=id`, {
+      const res = await fetch(supabaseRestUrl('/health_samples?select=id'), {
         method: 'HEAD',
         headers: { ...baseHeaders, Prefer: 'count=exact' },
         signal: AbortSignal.timeout(20000)
@@ -801,7 +822,7 @@ const db = {
     countByType: async (type, sinceTs = 0) => {
       const q = new URLSearchParams({ select: 'id' });
       if (sinceTs) q.set('ts', `gte.${Number(sinceTs)}`);
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/events_log?type=eq.${encodeURIComponent(type)}&${q}`, {
+      const res = await fetch(supabaseRestUrl(`/events_log?type=eq.${encodeURIComponent(type)}&${q}`), {
         method: 'HEAD',
         headers: { ...baseHeaders, Prefer: 'count=exact' },
         signal: AbortSignal.timeout(20000)
@@ -892,7 +913,7 @@ const db = {
       const strategy2 = engine === 'strategy2';
       const publishedType = strategy2 ? 'strategy2_published' : 'live_opportunity';
       const countQuery = new URLSearchParams({ select: 'id', type: `eq.${publishedType}` });
-      const countResponse = await fetch(`${SUPABASE_URL}/rest/v1/events_log?${countQuery}`, {
+      const countResponse = await fetch(supabaseRestUrl(`/events_log?${countQuery}`), {
         method: 'HEAD',
         headers: { ...baseHeaders, Prefer: 'count=exact' },
         signal: AbortSignal.timeout(20000)
