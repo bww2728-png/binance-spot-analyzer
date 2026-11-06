@@ -12,19 +12,27 @@ import { summarizeOpportunityHistory } from './services/opportunityHistorySummar
 export { setRateLimiter, getRateLimiter } from './net/gate.mjs';
 
 // تُحقن من بيئة الاستضافة (Verdent/Railway) — لا قيم مدمجة في الكود
-function supabaseRestUrl(path) {
-  const configuredUrl = String(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
-  let baseUrl;
+function supabaseBaseUrl(env = process.env) {
+  const configuredUrl = String(env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim();
   try {
     const parsedUrl = new URL(configuredUrl);
     if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
       throw new Error('invalid Supabase URL');
     }
-    baseUrl = parsedUrl.toString().replace(/\/+$/, '');
+    return parsedUrl.toString().replace(/\/+$/, '');
   } catch {
     throw new Error('عنوان Supabase غير مُهيّأ أو غير صالح (SUPABASE_URL أو VITE_SUPABASE_URL)');
   }
-  return `${baseUrl}/rest/v1${path}`;
+}
+
+function supabaseRestUrl(path) {
+  return `${supabaseBaseUrl()}/rest/v1${path}`;
+}
+
+export function getPublicSupabaseConfig(env = process.env) {
+  const anonKey = selectPublicKey(env);
+  if (!anonKey) throw new Error('مفتاح Supabase العام غير مُهيّأ (SUPABASE_ANON_KEY أو VITE_SUPABASE_PUBLISHABLE_KEY)');
+  return { url: supabaseBaseUrl(env), anonKey };
 }
 
 /**

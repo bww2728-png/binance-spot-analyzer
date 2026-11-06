@@ -1,6 +1,6 @@
 import express from 'express';
 
-export function createManualLiquidityRouter({ getService }) {
+export function createManualLiquidityRouter({ getService, getPublicConfig }) {
   const router = express.Router();
   const service = () => {
     const current = getService();
@@ -8,6 +8,16 @@ export function createManualLiquidityRouter({ getService }) {
     return current;
   };
   const contextFrom = (query) => ({ symbol: query.symbol, timeframe: query.timeframe });
+
+  router.get('/config', (_req, res) => {
+    try {
+      const config = getPublicConfig?.();
+      if (!config?.url || !config?.anonKey) throw new Error('إعداد Supabase العام غير مكتمل');
+      return res.set('Cache-Control', 'no-store').json(config);
+    } catch (error) {
+      return res.status(503).json({ error: error?.message ?? 'إعداد Supabase العام غير متاح' });
+    }
+  });
 
   router.get('/candles', async (req, res) => {
     try {

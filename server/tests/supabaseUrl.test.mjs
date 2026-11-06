@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const envNames = ['SUPABASE_URL', 'VITE_SUPABASE_URL', 'SUPABASE_ANON_KEY', 'VITE_SUPABASE_PUBLISHABLE_KEY'];
+const envNames = ['SUPABASE_URL', 'VITE_SUPABASE_URL', 'SUPABASE_ANON_KEY', 'VITE_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
 
 function saveEnvironment() {
   return new Map(envNames.map((name) => [name, process.env[name]]));
@@ -32,6 +32,21 @@ test('missing Supabase URL fails clearly before making a relative fetch', async 
     assert.equal(fetchCalls, 0);
   } finally {
     globalThis.fetch = previousFetch;
+    restoreEnvironment(previous);
+  }
+});
+
+test('public Supabase config exposes only the URL and anon key and rejects missing anon configuration', async () => {
+  const previous = saveEnvironment();
+  try {
+    process.env.SUPABASE_URL = 'https://supabase-test.invalid/';
+    process.env.SUPABASE_ANON_KEY = 'public-anon-key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'must-never-be-returned';
+    const { getPublicSupabaseConfig } = await import(`../db.js?public-supabase-config=${Date.now()}-${Math.random()}`);
+    assert.deepEqual(getPublicSupabaseConfig(), { url: 'https://supabase-test.invalid', anonKey: 'public-anon-key' });
+    delete process.env.SUPABASE_ANON_KEY;
+    assert.throws(() => getPublicSupabaseConfig(), /مفتاح Supabase العام غير مُهيّأ/);
+  } finally {
     restoreEnvironment(previous);
   }
 });

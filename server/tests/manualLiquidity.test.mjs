@@ -111,11 +111,15 @@ test('HTTP routes report storage failures and serve saved data without treating 
   };
   const app = express();
   app.use(express.json());
-  app.use('/api/manual-liquidity', createManualLiquidityRouter({ getService: () => service }));
+  app.use('/api/manual-liquidity', createManualLiquidityRouter({ getService: () => service, getPublicConfig: () => ({ url: 'https://supabase-test.invalid', anonKey: 'test-anon-key' }) }));
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}/api/manual-liquidity`;
   try {
+    const config = await fetch(`${base}/config`);
+    assert.equal(config.status, 200);
+    assert.deepEqual(await config.json(), { url: 'https://supabase-test.invalid', anonKey: 'test-anon-key' });
+    assert.equal(config.headers.get('cache-control'), 'no-store');
     const candles = await fetch(`${base}/candles?symbol=BTCUSDT&timeframe=1m`);
     assert.equal(candles.status, 200);
     const error = await fetch(`${base}/drawings?symbol=BTCUSDT&timeframe=1m`);

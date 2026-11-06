@@ -29,7 +29,7 @@ import { evaluateReadiness } from './readiness.mjs';
 import { cpus } from 'node:os';
 import { createRateLimiter } from './net/limiter.mjs';
 import {
-  setRateLimiter, storageConfigured, isUsingServiceRole, publicKeyConfigured
+  setRateLimiter, storageConfigured, isUsingServiceRole, publicKeyConfigured, getPublicSupabaseConfig
 } from './db.js';
 import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
@@ -1892,7 +1892,10 @@ const manualLiquidity = createManualLiquidityService({
     deleteManualDrawing: (context) => db.manualLiquidityDrawings.remove(context)
   }
 });
-app.use('/api/manual-liquidity', createManualLiquidityRouter({ getService: () => manualLiquidity }));
+app.use('/api/manual-liquidity', createManualLiquidityRouter({
+  getService: () => manualLiquidity,
+  getPublicConfig: getPublicSupabaseConfig
+}));
 
 app.get('/api/liquidity-zones/:id', handle(async (req, res) => {
   const id = String(req.params.id);
