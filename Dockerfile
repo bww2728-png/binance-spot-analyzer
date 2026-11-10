@@ -19,6 +19,13 @@ ENV NODE_ENV=production
 # (heapUsed 118–187MB). لكن القيمة 900 كانت تفوق 88% من حدّ الحاوية المنشورة فعلاً
 # (1024MB، مقيسة من memory.max داخل النشر)، فيقتل الـcgroup العملية قبل أن يضغط V8
 # نفسه — وهو نمط الانهيار التاريخي. 640 يترك ~380MB لغير الـheap.
+#
+# العلاقة بمخزن الشموع (سبب OOM الإنتاجي الأخير): المخزن يحجز لكل مفتاح
+# Float64Array بسعة LIQUIDITY_AGGREGATE_CAPACITY × 64 بايت مقدماً. لذلك:
+#   bytes ≈ keys × capacity × 64 = (رموز النطاق × 14 فريماً) × capacity × 64
+# بلا سقف نطاق كان ~1200 رمز ⇒ 16,800 مفتاح × 500 × 64 ≈ 537MB (قنبلة الإقلاع).
+# مع LIVE_UNIVERSE_LIMIT=300 ⇒ 4,200 مفتاح × 500 × 64 ≈ 134MB (×400 ≈ 107MB)،
+# أي أن 640 يبقى آمناً. لا ترفع الحجم إلا مع خفض capacity/النطاق وبالدليل.
 ENV NODE_OPTIONS=--max-old-space-size=640
 
 # نسخ كامل مجلد الخادم (index/db/research/cases/archive/liquidity/...)

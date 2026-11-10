@@ -28,6 +28,13 @@ const DEFAULT_CONFIG = {
   warmupBars: 220,             // أقل عدد شموع قبل بدء التحليل (1m: تُخفَّض إلى 96 في الاتجاهات)
   analysisWindow: 900,         // نافذة الشموع المعالجة (يشمل تجميع ×8)
   maxSymbols: 462,
+  /**
+   * سقف اشتراكات شموع البث لهذا المحرك (رمز × (فريمات الدخول + 1m)). افتراضي متحفظ:
+   * حصة استراتيجيتي من سعة الاشتراك الموحّدة (maxConns × maxStreamsPerConn = 1,500)
+   * بعد حجز سقف متتبّع الفرص الحية (900) والمختبر (~14). القصّ بالرمز لا بالمفتاح،
+   * ويُعلَن بتحذير واحد مُجمَّع معدود لا سطر لكل رمز.
+   */
+  maxKlines: 600,
   publishLimit: 100,
   historyLimit: 300,
   maxHoldBars: 96,             // أقصى عمر فرصة (شموع فريم الدخول) قبل «انتهت»
@@ -45,6 +52,31 @@ const DEFAULT_CONFIG = {
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * يخطط اشتراكات شموع المحرك مقيّدة بسقف صريح (بدل الاشتراك بلا سقف).
+ *
+ * - القصّ **بالرمز** لا بالمفتاح: يبقى لكل رمز مشترك كل فريماته (فريمات الدخول + 1m
+ *   لسجل الاتجاهات) فلا تصبح تغطية رمز جزئية.
+ * - عدد الفريمات لكل رمز = اتحاد (entryTfs ∪ {'1m'}) فتتكرر شموع 1m بلا كلفة.
+ * - `maxKlines ≤ 0` ⇒ بلا قص إضافي (يعتمد على سقف النطاق الموحّد).
+ *
+ * @param {string[]} symbols
+ * @param {string[]} entryTfs
+ * @param {number} maxKlines
+ * @returns {{ symbols: string[], keys: string[], capped: boolean, cap: number }}
+ */
+export function planStrategy2KlineSubs(symbols, entryTfs, maxKlines) {
+  const list = Array.isArray(symbols) ? symbols : [];
+  const tfs = Array.isArray(entryTfs) && entryTfs.length ? entryTfs : ['1m'];
+  const frames = [...new Set([...tfs, '1m'])];
+  const cap = Number(maxKlines) > 0 ? Math.floor(Number(maxKlines)) : 0;
+  const subCap = cap > 0 ? Math.max(1, Math.floor(cap / frames.length)) : list.length;
+  const picked = list.length > subCap ? list.slice(0, subCap) : list;
+  const keys = [];
+  for (const s of picked) for (const tf of frames) keys.push(`${s}|${tf}`);
+  return { symbols: picked, keys, capped: picked.length < list.length, cap };
+}
 
 /** إصدار منهجية المعايرة — يُحفظ مع كل معايرة للتتبع والمقارنة عبر الزمن */
 export const CALIB_VERSION = 's2-calib-v1';
@@ -167,6 +199,17 @@ export function createStrategyEngine(deps) {
   // تخفيف المعالجة الفورية لكل (رمز|فريم) على حدة — الخانق العام السابق كان يسقط إغلاقات
   // متزامنة لرموز أخرى (إشارة ضائعة حتى الدورة التالية)
   const fastThrottle = new Map(); // "SYM|tf" → آخر إطلاق (ms)
+  /**
+   * مُهدّئ تحذير سقف اشتراكات الشموع: تحذير واحد مُجمَّع معدود (لا سطر لكل رمز)،
+   * يُعاد فقط عند تغيّر عدد المشترك فعلاً أو بعد 10 دقائق.
+   */
+  let subCapWarn = { used: -1, at: 0 };
+  const reportSubCap = (used, total, maxKlines) => {
+    const t = now();
+    if (used === subCapWarn.used && t - subCapWarn.at < 600_000) return;
+    subCapWarn = { used, at: t };
+    log.warn?.(`[strategy2] سقف اشتراكات الشموع (STRATEGY2_MAX_KLINES=${maxKlines}): ${used}/${total} رمزاً مشتركاً — تحذير واحد مُجمَّع لا سطر لكل رمز`);
+  };
 
   const bumpFailure = (key, message) => {
     const f = failures.get(key) ?? { count: 0, last: null, message: null };
@@ -637,10 +680,15 @@ export function createStrategyEngine(deps) {
       } catch { /* الأسعار الاحتياطية اختيارية */ }
 
       if (market) {
-        const kKeys = [];
-        for (const s of symbols) for (const tf of cfg.entryTfs) kKeys.push(`${s}|${tf}`);
-        for (const s of symbols) kKeys.push(`${s}|1m`); // سجل الاتجاهات — شموع الدقيقة لكل العملات
-        market.setKlineSubscriptions(kKeys, 'strategy2');
+        /**
+         * سقف صريح لاشتراكات الشموع (بدل الاشتراك بلا سقف): كان يمرّر كل (رمز × فريم)
+         * بلا حد، فيتضخم اتحاد الـtenants فوق سعة الاشتراك (maxConns × maxStreamsPerConn)
+         * ويشغّل رسائل «max conns reached» مئات المرات. القصّ بالرمز (كل فريمات الرمز معاً)
+         * لا بالمفتاح، فلا يتحوّل رمز إلى تغطية جزئية صامتة.
+         */
+        const plan = planStrategy2KlineSubs(symbols, cfg.entryTfs, cfg.maxKlines);
+        if (plan.capped) reportSubCap(plan.symbols.length, symbols.length, plan.cap);
+        market.setKlineSubscriptions(plan.keys, 'strategy2');
       }
 
       // معالجة متوازية محدودة (تحليل في الذاكرة — البذر REST هو المكلف)
