@@ -4,9 +4,6 @@ import { ZoneCard, ZoneDetail, kindLabel } from './ZoneCards';
 import { TIMEFRAMES, type LiquidityDetection, type LiquidityZoneEngineStatus } from '../lib/types';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
-import LiquidityHistorySection from './LiquidityHistoryChart';
-import LiquidityLevelsSection from './LiquidityLevelsChart';
-import ManualLiquidityWorkspace from './ManualLiquidityWorkspace';
 import { useScreenState } from '../lib/useScreenState';
 
 export default function LiquidityZonesScreen() {
@@ -79,11 +76,6 @@ export default function LiquidityZonesScreen() {
         <button onClick={() => setSortMode(sortMode === 'confidence' ? 'work' : 'confidence')} className="px-3 py-2 rounded-lg text-[11px]" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-2)' }}>{sortMode === 'confidence' ? 'ترتيب العمل' : 'ترتيب الثقة'}</button>
         <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>الافتراضي: أعلى ثقة أولاً</span>
       </div>
-      {/* الشارت التاريخي (1m) — في أعلى الشاشة: الميزة الأساسية للتحقق البصري */}
-      <ManualLiquidityWorkspace />
-      <LiquidityHistorySection engine="legacy" symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
-      {/* الشارت التاريخي الإضافي — مستقل تماماً: خط 1px + نقطة الوقف + خط اتجاه من 3 نقاط */}
-      <LiquidityLevelsSection symbol={symbol.trim().toUpperCase() || 'BTCUSDT'} />
       {error && <div className="rounded-lg px-3 py-2 text-[12px]" style={{ background: 'var(--down-soft)', color: 'var(--down)' }}>{error}</div>}
       <StaleDataBanner />
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
