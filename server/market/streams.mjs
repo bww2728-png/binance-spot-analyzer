@@ -736,13 +736,49 @@ export function createMarketStreams({
 
   /* ================= المزامنة المُوزَّعة — لا قص صامت ================= */
 
-  /** كل الستريمات المطلوبة فعلاً (بلا أي قص) — التوزيع على الاتصالات يتكفل بالحدود */
+  /**
+   * آخر بلاغ تجاوز سعة — لمنع تكرار التحذير في كل مزامنة (تحذير واحد مُجمَّع معدود).
+   * يُعاد البلاغ فقط عند تغيّر عدد المقصوص أو بعد دقيقة.
+   */
+  let overflowReport = { dropped: -1, at: 0 };
+  function reportStreamOverflow(desiredCount, keptCount) {
+    const dropped = desiredCount - keptCount;
+    if (dropped <= 0) return;
+    const t = now();
+    if (dropped === overflowReport.dropped && t - overflowReport.at < 60_000) return;
+    overflowReport = { dropped, at: t };
+    log.warn?.(`[market-streams] تجاوز سعة الاشتراك الموحّدة: ${desiredCount} مطلوب > ${keptCount} مسموح (قُصّ ${dropped}) — ارفع LIVE_UNIVERSE_LIMIT أو MAX_STREAMS_PER_CONN/سقوف المحركات`);
+  }
+
+  /** مُهدّئ بلاغ امتلاء الاتصالات الفعلي (تحذير واحد معدود، لا سطر لكل رمز) */
+  let fullWarn = { skipped: -1, at: 0 };
+  function reportFullCapacity(skipped) {
+    const t = now();
+    if (skipped === fullWarn.skipped && t - fullWarn.at < 60_000) return;
+    fullWarn = { skipped, at: t };
+    log.warn?.(`[market-streams] ${skipped} ستريماً غير مشترك: بلغ سقف الاتصالات (${cfg.maxConns}×${cfg.maxStreamsPerConn})`);
+  }
+
+  /**
+   * كل الستريمات المطلوبة فعلاً، مع **سقف موحّد عبر كل الـtenants**:
+   * الاتحاد ≤ maxConns × maxStreamsPerConn (حدّ بينانس الفعلي). تدفق الصفقات وأسعار
+   * الرموز (المصدر الصحيح لحداثة سعر القرار) تُحفظ كاملة، والشموع — وهي الجزء غير
+   * المحدود الوحيد — تُقصّ لتبقى ضمن المتبقي. القص **مُعلَن معدود** لا صامت.
+   */
   function desiredStreams() {
-    const out = ['!miniTicker@arr'];
-    for (const key of wantedKlines) out.push(klineStreamOf(key));
-    for (const sym of wantedFlow) out.push(aggStreamOf(sym));
-    for (const sym of wantedPrices) out.push(priceStreamOf(sym));
-    return out;
+    const flow = [...wantedFlow].map(aggStreamOf);
+    const price = [...wantedPrices].map(priceStreamOf);
+    const capacity = cfg.maxConns * cfg.maxStreamsPerConn;
+    // الاحتياط = miniTicker@arr + تدفق + أسعار؛ الباقي ميزانية الشموع
+    const klineBudget = Math.max(0, capacity - 1 - flow.length - price.length);
+    const klineList = [];
+    for (const key of wantedKlines) klineList.push(klineStreamOf(key));
+    let klines = klineList;
+    if (klineList.length > klineBudget) {
+      klines = klineList.slice(0, klineBudget);
+      reportStreamOverflow(klineList.length, klineBudget);
+    }
+    return ['!miniTicker@arr', ...klines, ...flow, ...price];
   }
 
   /**
@@ -841,14 +877,14 @@ export function createMarketStreams({
     }
 
     // 3) إسناد الستريمات غير المملوكة — لاصقة (الجديد يذهب لأول اتصال به مساحة)
+    // عند امتلاء كل الاتصالات نعدّ غير المشترك ونُعلن **تحذيراً واحداً مُجمَّعاً معدوداً**
+    // (كان سطراً لكل رمز، فيملأ السجل بمئات الأسطر عند تجاوز السعة — وهو ما رُصد إنتاجياً).
+    let skipped = 0;
     for (const s of desired) {
       if (streamOwner.has(s)) continue;
       let conn = conns.find(c => (connOwned.get(c.id)?.size ?? 0) < cfg.maxStreamsPerConn);
       if (!conn) {
-        if (connOwned.size >= cfg.maxConns) {
-          log.warn?.(`[market-streams] max conns reached (${cfg.maxConns}) — cannot subscribe ${s}`);
-          continue;
-        }
+        if (connOwned.size >= cfg.maxConns) { skipped += 1; continue; }
         openConn(nextConnId);
         nextConnId += 1;
         conn = conns[conns.length - 1];
@@ -857,6 +893,7 @@ export function createMarketStreams({
       streamOwner.set(s, conn.id);
       scheduleOn(conn, 'sub', s);
     }
+    if (skipped) reportFullCapacity(skipped);
   }
 
   /* ================= التسوية الدورية ضد الانجراف ================= */
@@ -1116,6 +1153,10 @@ export function createMarketStreams({
         klineSubs: wantedKlines.size,
         aggTradeSubs: wantedFlow.size,
         priceSubs: wantedPrices.size,
+        /** سعة الاشتراك الموحّدة عبر كل الـtenants (maxConns × maxStreamsPerConn) */
+        streamCapacity: cfg.maxConns * cfg.maxStreamsPerConn,
+        /** الطلب الكلي قبل السقف = شموع + تدفق + أسعار + miniTicker@arr (يُقارن بالسعة) */
+        streamDemand: wantedKlines.size + wantedFlow.size + wantedPrices.size + 1,
         priceSymbols: prices.size,
         analyzedSymbols: analyzed.size,
         analyzedPriced: analyzed.size - stalePrices,

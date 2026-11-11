@@ -59,6 +59,29 @@ docker run -p 8080:8080 binance-spot-analyzer
 > تسجيل دخول المنصة — ولذلك تُقرأ الأدلة التشغيلية من `GET /api/health/deep` أو من
 > عيّنات `health_samples` في قاعدة البيانات المُدارة.
 
+### 4.1) Railway على حدّ حاوية 1GB — قيم موصى بها
+
+سبب سقوط النشرات السابقة (نُشر على خدمة بحدّ 1GB و`NODE_OPTIONS=--max-old-space-size=640`):
+البذر عند الإقلاع كان يغطي كل الأهداف (~1200+) × 14 فريماً ≈ 16,800 مفتاح في المخزن
+المجمّع، وكل مفتاح يحجز `LIQUIDITY_AGGREGATE_CAPACITY × 64B` ⇒ ~537MB، فيبلغ الـheap
+حدّه (`Ineffective mark-compacts near heap limit`) عند ~594MB. زيادةً على ذلك كان اتحاد
+اشتراكات الـtenants يتجاوز سعة البث (6×250=1,500) فتظهر مئات رسائل `max conns reached`.
+
+اضبط متغيّرات البيئة التالية على Railway (Values ← Variables) لتشغيل مستقر:
+
+| المتغيّر | القيمة الموصى بها | الأثر |
+| --- | --- | --- |
+| `LIVE_UNIVERSE_LIMIT` | `300` | يقيّد البذر والمحركات بنطاق العمل: 4,200 مفتاح ≈ 134MB بدل 537MB |
+| `LIQUIDITY_AGGREGATE_CAPACITY` | `400` | عمق الشموع؛ 300×400×64B ≈ 107MB (تنازل موثّق يغيّر النتائج قليلاً) |
+| `STRATEGY2_MAX_KLINES` | `600` | سقف اشتراكات الاستراتيجية بالرمز (≈200 رمزاً) فلا يتضخم الاتحاد |
+| `MAX_STREAMS_PER_CONN` | `250` | سقف كل اتصال (6×250=1,500) — اتركه ما لم تغيّر `maxConns` |
+| `LIGHT_MODE` | غير مضبوط | **لا تضبطه `1`** — يعطّل المحركات (سلوكه الافتراضي كما هو) |
+
+`NODE_OPTIONS=--max-old-space-size=640` مضبوط في `Dockerfile` (≈63% من 1GB) ويُترك كما هو:
+الآن حجم المخزن داخل الميزانية، ورفعه فوق ذلك يعيد نمط قتل الـcgroup قبل ضغط V8.
+بعد النشر تحقّق من `GET /api/health/deep`: `candles.universe ≈ 4,200`، و`seededKeys`
+يقترب منه، و`memory.rss` تحت ~800MB، و`market.streamDemand ≤ market.streamCapacity`.
+
 ## 5) رفع الكود إلى GitHub
 
 ```bash

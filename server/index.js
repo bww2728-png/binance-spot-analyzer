@@ -24,6 +24,7 @@ import { createLiveOpportunityRecovery } from './live-opportunities/recovery.mjs
 import { readAllPages, readAllPagesComplete } from './services/readAllPages.mjs';
 import { createStrategyEngine } from './strategy2/loop.mjs';
 import { createMarketStreams, createKeyQueue } from './market/streams.mjs';
+import { universeLimitFromEnv, capUniverse, UNIVERSE_MIN, UNIVERSE_MAX } from './market/universe.mjs';
 import { createHealth } from './health.mjs';
 import { evaluateReadiness } from './readiness.mjs';
 import { cpus } from 'node:os';
@@ -751,10 +752,27 @@ app.post('/api/zones/:id/note', handle(async (req, res) => {
 //  3) الباركود لم يُعد مُستبعِداً: صار وسم تحذيري يُمرَّر مع الفرصة (التعليم لا الإخفاء)،
 //     وفق القرار المعتمد.
 const TARGETS_TTL_MS = Number(process.env.TARGETS_CACHE_MS) || 60_000;
+
+/**
+ * سقف نطاق العمل (working universe) — العلة الجذرية لسقوط الحاوية على Railway:
+ * `resolveTargets()` بلا سقف كانت تُعيد كل الأهداف الحلال (~1200+)، و`warmUniverseAtBoot`
+ * يبذرها × 14 فريماً ≈ 16,800 مفتاح في المخزن المجمّع عند الإقلاع، وكل مفتاح يحجز
+ * `capacity × 64B` (16,800 × 500 × 64 ≈ 537MB) فينفد heap الـ640MB عند ~594MB.
+ * القيمة تُقرأ من `LIVE_UNIVERSE_LIMIT` وتُقيَّد في [150, 600] (انظر market/universe.mjs).
+ * لا يغيّر أي عتبة قرار — يحدّ عدد الرموز المُحلَّلة والبذور فقط.
+ */
+const LIVE_UNIVERSE_LIMIT = universeLimitFromEnv();
+
 let targetsCache = { at: 0, list: [], source: 'غير محسوبة', halal: 0, haram: 0, uncertain: 0 };
 
+/**
+ * خطّاف يجري عند تغيّر الكاش فقط (حكم شرعي/سوق): يُعيد تسخين رموز النطاق الجديدة فقط.
+ * يُوصَل بعد اكتمال التسخين الأول (انظر warmUniverseAtBoot) فلا يتنافس معه.
+ */
+let onTargetsChanged = () => {};
+
 /** إبطال فوري لكاش المستهدفات بعد أي تغيير في التصنيف */
-const invalidateTargets = () => { targetsCache = { ...targetsCache, at: 0 }; };
+const invalidateTargets = () => { targetsCache = { ...targetsCache, at: 0 }; onTargetsChanged(); };
 
 /**
  * قائمة المستهدفة = الحلال ∩ القابل للتداول فعلاً في السبوت.
@@ -800,7 +818,13 @@ const computeTargets = async () => {
   };
 };
 
-const resolveTargets = async (limit = Number.POSITIVE_INFINITY) => {
+/**
+ * قائمة المستهدفة المحدودة بنطاق العمل.
+ * الافتراضي = `LIVE_UNIVERSE_LIMIT` (وكان بلا سقف ⇒ قنبلة ذاكرة عند البذر).
+ * مرّر `Number.POSITIVE_INFINITY` للحصول على القائمة الكاملة (تشخيص فقط)، أو رقماً صريحاً.
+ * الكاش يحفظ القائمة الكاملة، والقص يقع عند الإرجاع فلا يُقصّ الكاش نفسه.
+ */
+const resolveTargets = async (limit = LIVE_UNIVERSE_LIMIT) => {
   if (Date.now() - targetsCache.at > TARGETS_TTL_MS) {
     const { list, counts, total, halalAll, excluded } = await computeTargets();
     targetsCache = {
@@ -810,7 +834,8 @@ const resolveTargets = async (limit = Number.POSITIVE_INFINITY) => {
     };
   }
   const out = targetsCache.list;
-  return limit === Number.POSITIVE_INFINITY ? out : out.slice(0, limit);
+  if (limit === Number.POSITIVE_INFINITY) return out;
+  return capUniverse(out, limit);
 };
 
 /** آخر قائمة مستهدفات محسوبة (للتشخيص بلا إعادة حساب) */
@@ -819,6 +844,11 @@ const targetsSnapshot = () => targetsCache;
 // ربط التشخيص بالحالة الفعلية
 runtime.targets = () => ({
   count: targetsCache.list.length,
+  // نطاق العمل الفعلي بعد السقف — الفرق عن count هو ما استُبعد لتوفير الذاكرة (لا لتغيير عتبة)
+  universeLimit: LIVE_UNIVERSE_LIMIT,
+  universeMin: UNIVERSE_MIN,
+  universeMax: UNIVERSE_MAX,
+  workingCount: Math.min(LIVE_UNIVERSE_LIMIT, targetsCache.list.length),
   at: targetsCache.at,
   halal: targetsCache.halal,
   excludedNotTradable: targetsCache.excluded ?? null,
@@ -2158,9 +2188,12 @@ if (LIQUIDITY_AGGREGATE && !LIQUIDITY_LEGACY_REST) {
   });
 }
 /**
- * تسخين المخزن المجمّع عند الإقلاع: بذر كل (رمز × فريم) من قائمة التحليل الحالية مرة
- * واحدة على دفعات متسلسلة. لا يبدأ الكشف الحي قبل أن يُبذر فريم كفاية (40 شمعة)؛
- * وإلا يعمل الماسح الاحتياطي. فشل البذر لا يوقف الخادم.
+ * تسخين المخزن المجمّع عند الإقلاع: بذر **نطاق العمل المحدود** (لا كل الأهداف) × كل
+ * الفريمات مرة واحدة على دفعات متسلسلة. لا يبدأ الكشف الحي قبل أن يُبذر فريم كفاية
+ * (40 شمعة)؛ وإلا يعمل الماسح الاحتياطي. فشل البذر لا يوقف الخادم.
+ *
+ * العلة الجذرية (OOM عند ~594MB/640MB): كان يُبذر ~1200 رمز × 14 فريماً ≈ 16,800
+ * مفتاح. الآن: 300 × 14 ≈ 4,200 مفتاح فقط، أي ~134MB بدل ~537MB (بسعة 500).
  */
 const warmState = { queued: 0, seeded: 0, failed: 0, done: false, startedAt: null, error: null };
 /**
@@ -2172,22 +2205,56 @@ const warmState = { queued: 0, seeded: 0, failed: 0, done: false, startedAt: nul
  * أسوأ من غياب الرقم، لأن الحكم يُبنى عليه.
  */
 let warmUniverseTotal = 0;
+/** رموز النطاق التي بُذرت فعلاً — يمنع إعادة البذر عند كل تغيّر كاش (البذر مقصود لا متكرّر) */
+const warmedUniverseSymbols = new Set();
+let warmBusy = false;
+
+/**
+ * تسخين الرموز الجديدة عند تغيّر النطاق فقط: لا يعيد بذر المفاتيح المبذورة (ensureKlineSeed
+ * يتخطاها بلا شبكة)، فالكلفة عند عدم تغيّر النطاق صفر. يُنادى من `onTargetsChanged`.
+ */
+const warmNewUniverseSymbols = async () => {
+  if (LIQUIDITY_LEGACY_REST || !LIQUIDITY_AGGREGATE) return;
+  if (warmBusy) return;
+  warmBusy = true;
+  try {
+    const working = await resolveTargets();
+    const fresh = working.filter(s => !warmedUniverseSymbols.has(s));
+    warmUniverseTotal = working.length * ALL_TIMEFRAMES.length;
+    if (!fresh.length) return;
+    const res = await marketStreams.warmUniverse(fresh, { tfs: ALL_TIMEFRAMES });
+    for (const s of fresh) warmedUniverseSymbols.add(s);
+    console.log(`[liquidity-zones] warmUniverse (تغيّر النطاق): +${fresh.length} رمزاً — ${res.seeded}/${res.queued} مفتاحاً (${res.failed} فشل)`);
+  } catch (e) {
+    console.warn('[liquidity-zones] فشل تسخين الرموز الجديدة:', String(e?.message ?? e).slice(0, 200));
+  } finally {
+    warmBusy = false;
+  }
+};
+
 const warmUniverseAtBoot = async () => {
   if (LIQUIDITY_LEGACY_REST || !LIQUIDITY_AGGREGATE) { warmState.done = true; return; }
   warmState.startedAt = Date.now();
   try {
-    const targets = await resolveTargets();
+    const targets = await resolveTargets(); // محدود بـLIVE_UNIVERSE_LIMIT
     warmUniverseTotal = targets.length * ALL_TIMEFRAMES.length;
     warmState.queued = warmUniverseTotal;
     const res = await marketStreams.warmUniverse(targets, { tfs: ALL_TIMEFRAMES });
+    for (const s of targets) warmedUniverseSymbols.add(s);
     warmState.seeded = res.seeded;
     warmState.failed = res.failed;
     warmState.done = true;
-    console.log(`[liquidity-zones] warmUniverse: ${res.seeded}/${res.queued} مفتاحاً مبذوراً (${res.failed} فشل)`);
+    console.log(`[liquidity-zones] warmUniverse: نطاق العمل ${targets.length} رمزاً (LIVE_UNIVERSE_LIMIT=${LIVE_UNIVERSE_LIMIT}، من ${targetsCache.list.length} هدف) — ${res.seeded}/${res.queued} مفتاحاً مبذوراً (${res.failed} فشل)`);
   } catch (e) {
     warmState.error = String(e?.message ?? e).slice(0, 200);
     warmState.done = true;
     console.warn('[liquidity-zones] فشل تسخين المخزن:', warmState.error);
+  } finally {
+    /**
+     * ربط إعادة البذر بتغيّر النطاق فقط: الخطّاف يُوصَل بعد التسخين الأول، فلا يبدأ
+     * تسخين متزامن معه، ومع تغيّر الحكم الشرعي/السوق يُسخّن الرموز الجديدة وحدها.
+     */
+    onTargetsChanged = () => { void warmNewUniverseSymbols(); };
   }
 };
 setTimeout(() => { void warmUniverseAtBoot(); }, 25_000);
@@ -2539,6 +2606,11 @@ const strategy2Engine = createStrategyEngine({
      * (`memory`) ومن عيّنات `deployment.processMemory`.
      */
     maxSymbols: Number(process.env.STRATEGY2_MAX_SYMBOLS) || 0,
+    /**
+     * سقف اشتراكات شموع المحرك (رمز × (فريمات الدخول + 1m)). يقيّد الاتحاد عبر
+     * الـtenants ضمن سعة الاشتراك (maxConns × maxStreamsPerConn). 0/قيمة غير صالحة ⇒ 600.
+     */
+    maxKlines: Number(process.env.STRATEGY2_MAX_KLINES) || 600,
     analysisWindow: Number(process.env.STRATEGY2_WINDOW) || 400,
     warmupBars: Number(process.env.STRATEGY2_WARMUP) || 200,
     // فريمات الدخول (والأكبر ×8 تلقائياً): افتراضياً من الدقيقة — قابلة للضبط عبر البيئة
