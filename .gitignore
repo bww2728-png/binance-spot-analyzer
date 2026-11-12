@@ -6,6 +6,7 @@ dist/
 *.db-wal
 *.db-shm
 client/dist/
+client/test-results/
 opencode.json
 scripts/
 .verdent/

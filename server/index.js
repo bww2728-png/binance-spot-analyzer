@@ -58,6 +58,7 @@ import { measureIdentityStability, createIdentityCollector } from './services/zo
 import { detectLiquidityZonesV2 } from './liquidity-zones/v2/index.mjs';
 import { createLiquidityWorkbench } from './services/liquidityWorkbench.mjs';
 import { createLiquidityHistoryService } from './services/liquidityHistory.mjs';
+import { createLegacyHistorySnapshotService } from './services/liquidityHistorySnapshot.mjs';
 import { withDurablePersistence } from './services/liquidityWorkbenchRepository.mjs';
 import { createLiquidityWorkbenchRouter } from './routes/liquidityWorkbenchRouter.mjs';
 import { createManualLiquidityRouter } from './routes/manualLiquidityRouter.mjs';
@@ -1912,6 +1913,45 @@ app.get('/api/liquidity-history', handle(async (req, res) => {
   } else {
     res.type('json').send(payload);
   }
+}));
+
+const liquidityHistorySnapshot = createLegacyHistorySnapshotService({
+  klines: (symbol, timeframe, limit, startTime, endTime) => db.binance.klines(symbol, timeframe, limit, startTime, endTime)
+});
+app.get('/api/liquidity-history/snapshot', handle(async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const state = liquidityHistorySnapshot.request({
+    symbol: req.query.symbol,
+    timeframe: req.query.timeframe,
+    startTime: req.query.startTime,
+    endTime: req.query.endTime,
+    snapshotTime: req.query.snapshotTime
+  });
+  if (state.kind === 'computing') {
+    return res.status(202).json({
+      status: 'computing',
+      retryAfterMs: 1000,
+      startedAt: state.startedAt
+    });
+  }
+  if (state.kind === 'error') {
+    return res.status(state.statusCode).json({
+      error: state.message,
+      retryable: state.statusCode >= 500 || state.statusCode === 429,
+      retryAfterSec: state.retryAfterSec ?? null
+    });
+  }
+  const { rawZones, ...publicValue } = state.value;
+  const payload = JSON.stringify(publicValue);
+  if (String(req.headers['accept-encoding'] || '').includes('gzip')) {
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Encoding': 'gzip',
+      Vary: 'Accept-Encoding'
+    });
+    return res.send(zlib.gzipSync(Buffer.from(payload)));
+  }
+  return res.type('json').send(payload);
 }));
 
 const manualLiquidity = createManualLiquidityService({
