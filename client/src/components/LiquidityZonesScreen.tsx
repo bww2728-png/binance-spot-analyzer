@@ -4,10 +4,11 @@ import { ZoneCard, ZoneDetail, kindLabel } from './ZoneCards';
 import { TIMEFRAMES, type LiquidityDetection, type LiquidityZoneEngineStatus } from '../lib/types';
 import { useVisiblePoll } from '../lib/useVisiblePoll';
 import StaleDataBanner from './StaleDataBanner';
+import LegacyHistorySnapshotScreen from './LegacyHistorySnapshotScreen';
 import { useScreenState } from '../lib/useScreenState';
 
 export default function LiquidityZonesScreen() {
-  const [mode, setMode] = useState<'live' | 'history'>('live');
+  const [mode, setMode] = useState<'live' | 'history' | 'snapshot'>('live');
   const [status, setStatus] = useState<LiquidityZoneEngineStatus | null>(null);
   const [rows, setRows] = useState<LiquidityDetection[]>([]);
   const [symbol, setSymbol] = useState('');
@@ -19,9 +20,10 @@ export default function LiquidityZonesScreen() {
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
+      const listMode = mode === 'snapshot' ? 'live' : mode;
       const [s, r] = await Promise.all([
         api.getLiquidityZoneStatus(signal),
-        api.getLiquidityZones({ mode, symbol: symbol.trim().toUpperCase() || undefined, timeframe: timeframe || undefined, kind: kind || undefined, limit: 500 }, signal)
+        api.getLiquidityZones({ mode: listMode, symbol: symbol.trim().toUpperCase() || undefined, timeframe: timeframe || undefined, kind: kind || undefined, limit: 500 }, signal)
       ]);
       if (!signal?.aborted) { setStatus(s); setRows(r.results); setError(''); }
     } catch (e) {
@@ -30,13 +32,13 @@ export default function LiquidityZonesScreen() {
   }, [mode, symbol, timeframe, kind]);
 
   // استقصاء موحّد: يتوقف عند إخفاء الشاشة/التبويب ولا يتراكب مع نفسه
-  useVisiblePoll(load, { intervalMs: 10000 });
+  useVisiblePoll(load, { intervalMs: 10000, enabled: mode !== 'snapshot' });
 
   // شريحة الحالة: الفلاتر والتبويب الداخلي تُحفظ وتُستعاد
   useScreenState('liquidityZones', {
     filters: { mode, symbol, timeframe, kind, sortMode },
     onRestore: (s) => {
-      if (s.filters.mode === 'live' || s.filters.mode === 'history') setMode(s.filters.mode);
+      if (s.filters.mode === 'live' || s.filters.mode === 'history' || s.filters.mode === 'snapshot') setMode(s.filters.mode);
       if (s.filters.symbol != null) setSymbol(s.filters.symbol);
       if (s.filters.timeframe != null) setTimeframe(s.filters.timeframe);
       if (s.filters.kind != null) setKind(s.filters.kind);
@@ -53,6 +55,7 @@ export default function LiquidityZonesScreen() {
     ? (a.workOrder ?? Number.MAX_SAFE_INTEGER) - (b.workOrder ?? Number.MAX_SAFE_INTEGER)
     : b.confidence - a.confidence), [rows, sortMode]);
   const progress = mode === 'live' ? status?.live : status?.history;
+  if (mode === 'snapshot') return <LegacyHistorySnapshotScreen onBack={() => setMode('live')} />;
 
   return (
     <section className="max-w-[1600px] mx-auto px-3 sm:px-5 py-4 space-y-4" dir="rtl">
@@ -70,6 +73,7 @@ export default function LiquidityZonesScreen() {
       <div className="flex flex-wrap items-center gap-2">
         <button onClick={() => setMode('live')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: mode === 'live' ? 'var(--accent-soft)' : 'var(--surface-1)', color: mode === 'live' ? 'var(--accent)' : 'var(--text-2)' }}>التحديدات الحية</button>
         <button onClick={() => setMode('history')} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: mode === 'history' ? 'var(--accent-soft)' : 'var(--surface-1)', color: mode === 'history' ? 'var(--accent)' : 'var(--text-2)' }}>كل تحديدات الباك تيست</button>
+        <button onClick={() => setMode('snapshot')} className="px-3 py-2 rounded-lg text-[12px] font-semibold" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>الشارت التاريخي للمحرك القديم</button>
         <input value={symbol} onChange={e => setSymbol(e.target.value)} placeholder="العملة مثل BTCUSDT" className="px-3 py-2 rounded-lg text-[12px] w-40" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }} />
         <select value={timeframe} onChange={e => setTimeframe(e.target.value)} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}><option value="">كل الفريمات</option>{TIMEFRAMES.map(tf => <option key={tf} value={tf}>{tf}</option>)}</select>
         <select value={kind} onChange={e => setKind(e.target.value)} className="px-3 py-2 rounded-lg text-[12px]" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-1)', color: 'var(--text-1)' }}><option value="">كل الأنواع</option>{Object.entries(kindLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>

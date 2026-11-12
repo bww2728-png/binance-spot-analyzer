@@ -166,3 +166,94 @@ export function fetchLiquidityHistory(opts: {
     }
   })();
 }
+
+export interface LiquidityHistorySnapshotResponse {
+  engineKey: 'legacy';
+  engine: string;
+  symbol: string;
+  timeframe: string;
+  startTime: number;
+  endTime: number;
+  snapshotTime: number;
+  warmupStartTime: number;
+  warmupBars: number;
+  source: string;
+  bars: number;
+  totalZones: number;
+  zones: LiquidityHistoryZone[];
+  quality: {
+    sourceUnit: 'milliseconds';
+    intervalMs: number;
+    receivedRows: number;
+    acceptedBars: number;
+    incompleteBars: number;
+    gapCount: number;
+    missingBars: number;
+    gaps: Array<{ after: number; before: number; missingBars: number }>;
+    firstOpenTime: number | null;
+    lastOpenTime: number | null;
+  };
+  meta: { rightBars: number; computeMs: number; computedAt: number };
+  candles: Array<[number, number, number, number, number, number]>;
+  cached: boolean;
+}
+
+function waitForSnapshot(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('aborted', 'AbortError'));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new DOMException('aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+export async function fetchLiquidityHistorySnapshot(opts: {
+  symbol: string;
+  timeframe: string;
+  startTime: number;
+  endTime: number;
+  snapshotTime: number;
+  signal?: AbortSignal;
+  deadlineMs?: number;
+}): Promise<LiquidityHistorySnapshotResponse> {
+  const query = new URLSearchParams({
+    symbol: opts.symbol,
+    timeframe: opts.timeframe,
+    startTime: String(opts.startTime),
+    endTime: String(opts.endTime),
+    snapshotTime: String(opts.snapshotTime)
+  });
+  const url = `/api/liquidity-history/snapshot?${query.toString()}`;
+  const deadline = Date.now() + (opts.deadlineMs ?? 120_000);
+
+  for (;;) {
+    const response = await fetch(url, { signal: opts.signal, cache: 'no-store' });
+    if (response.status === 202) {
+      const state = await response.json().catch(() => null);
+      if (Date.now() >= deadline) throw new Error('تجاوز تجهيز اللقطة التاريخية المهلة المحددة');
+      await waitForSnapshot(Math.min(5000, Math.max(250, Number(state?.retryAfterMs) || 1000)), opts.signal);
+      continue;
+    }
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const body = await response.json();
+        if (body?.error) message = String(body.error);
+      } catch {
+        message = `HTTP ${response.status}`;
+      }
+      throw new Error(message);
+    }
+    return response.json() as Promise<LiquidityHistorySnapshotResponse>;
+  }
+}

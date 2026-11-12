@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "skills": {
+    "lightweight-charts": {
+      "source": "tradingview/lightweight-charts",
+      "sourceType": "github",
+      "skillPath": ".github/skills/lightweight-charts/SKILL.md",
+      "computedHash": "2056830e0c9f6f69bf95c443ac86456d12b562fdc373c074b33c571bff384aa5",
+      "installMode": "copy"
+    },
+    "lightweight-charts-plugin-authoring": {
+      "source": "tradingview/lightweight-charts",
+      "sourceType": "github",
+      "skillPath": ".github/skills/lightweight-charts-plugin-authoring/SKILL.md",
+      "computedHash": "1c16998beada76380108a6dea8e94cad528c5f90e4e3d334d35f04365c242f81",
+      "installMode": "copy"
+    }
+  }
+}

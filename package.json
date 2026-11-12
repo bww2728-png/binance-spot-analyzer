@@ -16,7 +16,8 @@
     "env:init": "node server/tools/setup-env.mjs"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "fast-check": "^4.10.2"
   },
   "dependencies": {
     "express": "^5.2.1"
