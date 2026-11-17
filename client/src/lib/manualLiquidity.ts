@@ -41,48 +41,10 @@ export type ManualCandleResponse = {
 
 import { TIMEFRAMES } from './types';
 
-type PublicSupabaseConfig = { url: string; anonKey: string };
-type DrawingRow = { drawing_id: string; symbol: string; timeframe: string; drawing_type: ManualDrawingType; payload: ManualDrawing; created_at: number; updated_at: number };
-let publicConfigRequest: Promise<PublicSupabaseConfig> | null = null;
-
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { cache: 'no-store', ...init });
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`);
-  return body as T;
-}
-
-async function getPublicSupabaseConfig() {
-  if (!publicConfigRequest) {
-    publicConfigRequest = request<PublicSupabaseConfig>('/api/manual-liquidity/config').then((config) => {
-      if (!config || typeof config.url !== 'string' || !/^https?:\/\//.test(config.url) || typeof config.anonKey !== 'string' || !config.anonKey) {
-        throw new Error('إعداد Supabase العام غير صالح');
-      }
-      return config;
-    }).catch((error) => {
-      publicConfigRequest = null;
-      throw error;
-    });
-  }
-  return publicConfigRequest;
-}
-
-async function requestPublicDrawings<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const { url, anonKey } = await getPublicSupabaseConfig();
-  const headers: Record<string, string> = { apikey: anonKey, 'content-type': 'application/json' };
-  if (!anonKey.startsWith('sb_publishable_')) headers.Authorization = `Bearer ${anonKey}`;
-  if (init.headers instanceof Headers) init.headers.forEach((value, name) => { headers[name] = value; });
-  else if (Array.isArray(init.headers)) {
-    for (const [name, value] of init.headers) headers[name] = value;
-  } else if (init.headers) Object.assign(headers, init.headers);
-  const response = await fetch(`${url.replace(/\/+$/, '')}/rest/v1/liquidity_manual_drawings${path}`, {
-    cache: 'no-store',
-    ...init,
-    headers
-  });
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
-  if (!response.ok) throw new Error(body?.message ?? body?.error ?? `Supabase HTTP ${response.status}`);
   return body as T;
 }
 
@@ -107,57 +69,49 @@ function validateDrawing(drawing: ManualDrawing) {
   if (new TextEncoder().encode(JSON.stringify(drawing)).length > 16_384) throw new Error('حجم الرسم أكبر من المسموح');
 }
 
-function rowsForChart(symbol: string, timeframe: string) {
-  const query = new URLSearchParams({ select: 'drawing_id,symbol,timeframe,drawing_type,payload,created_at,updated_at', symbol: `eq.${symbol}`, timeframe: `eq.${timeframe}`, order: 'updated_at.asc,drawing_id.asc', limit: '5000' });
-  return `?${query}`;
-}
-
-function drawingFromRow(row: DrawingRow, symbol: string, timeframe: string) {
-  if (!row || row.symbol !== symbol || row.timeframe !== timeframe || row.payload?.id !== row.drawing_id || row.payload?.type !== row.drawing_type || !Array.isArray(row.payload?.anchors)) {
-    throw new Error('سجل رسم غير مكتمل أو لا يطابق الرمز والفريم المطلوبين');
-  }
-  return row.payload;
-}
-
 export function fetchManualCandles(symbol: string, timeframe: string, signal?: AbortSignal, before?: number | null) {
   const query = new URLSearchParams({ symbol, timeframe });
   if (before != null) query.set('before', String(before));
   return request<ManualCandleResponse>(`/api/manual-liquidity/candles?${query}`, { signal });
 }
 
+const drawingQuery = (symbol: string, timeframe: string) => new URLSearchParams({ symbol, timeframe }).toString();
+
+function validateDrawingsResponse(value: unknown, symbol: string, timeframe: string) {
+  if (!value || typeof value !== 'object') throw new Error('استجابة الخادم للرسومات غير صالحة');
+  const response = value as { symbol?: unknown; timeframe?: unknown; drawings?: unknown };
+  if (response.symbol !== symbol || response.timeframe !== timeframe || !Array.isArray(response.drawings)) {
+    throw new Error('سجل رسم غير مكتمل أو لا يطابق الرمز والفريم المطلوبين');
+  }
+  for (const drawing of response.drawings) validateDrawing(drawing as ManualDrawing);
+  return response.drawings as ManualDrawing[];
+}
+
 export async function fetchManualDrawings(symbol: string, timeframe: string, signal?: AbortSignal) {
   const context = normalizeContext(symbol, timeframe);
-  const rows = await requestPublicDrawings<DrawingRow[]>(rowsForChart(context.symbol, timeframe), { signal });
-  if (!Array.isArray(rows)) throw new Error('استجابة Supabase للرسومات غير صالحة');
-  return { ...context, drawings: rows.map((row) => drawingFromRow(row, context.symbol, timeframe)) };
+  const response = await request<unknown>(`/api/manual-liquidity/drawings?${drawingQuery(context.symbol, context.timeframe)}`, { signal });
+  return { ...context, drawings: validateDrawingsResponse(response, context.symbol, context.timeframe) };
 }
 
 export async function saveManualDrawing(symbol: string, timeframe: string, drawing: ManualDrawing) {
   const context = normalizeContext(symbol, timeframe);
   validateDrawing(drawing);
-  const query = new URLSearchParams({ on_conflict: 'symbol,timeframe,drawing_id', select: 'drawing_id,symbol,timeframe,drawing_type,payload,created_at,updated_at' });
-  const row: DrawingRow = {
-    drawing_id: drawing.id,
-    ...context,
-    drawing_type: drawing.type,
-    payload: drawing,
-    created_at: Number.isSafeInteger(drawing.created_at) ? drawing.created_at! : Date.now(),
-    updated_at: Date.now()
-  };
-  const saved = await requestPublicDrawings<DrawingRow[]>(`?${query}`, {
-    method: 'POST',
-    headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
-    body: JSON.stringify(row)
+  const response = await request<{ saved?: unknown; drawing?: unknown }>('/api/manual-liquidity/drawings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...context, ...drawing, drawing_id: drawing.id })
   });
-  if (!Array.isArray(saved) || saved.length !== 1) throw new Error('Supabase لم يؤكد حفظ الرسم');
-  return { saved: true, drawing: drawingFromRow(saved[0], context.symbol, timeframe) };
+  if (response?.saved !== true) throw new Error('الخادم لم يؤكد حفظ الرسم');
+  validateDrawing(response.drawing as ManualDrawing);
+  return { saved: true, drawing: response.drawing as ManualDrawing };
 }
 
 export async function deleteManualDrawing(symbol: string, timeframe: string, drawingId: string) {
   const context = normalizeContext(symbol, timeframe);
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(drawingId)) throw new Error('معرّف الرسم غير صالح');
-  const query = new URLSearchParams({ drawing_id: `eq.${drawingId}`, symbol: `eq.${context.symbol}`, timeframe: `eq.${timeframe}` });
-  await requestPublicDrawings<null>(`?${query}`, { method: 'DELETE' });
+  const query = drawingQuery(context.symbol, context.timeframe);
+  const response = await request<{ ok?: unknown }>(`/api/manual-liquidity/drawings/${encodeURIComponent(drawingId)}?${query}`, { method: 'DELETE' });
+  if (response?.ok !== true) throw new Error('الخادم لم يؤكد حذف الرسم');
   return { ok: true, drawingId };
 }
 

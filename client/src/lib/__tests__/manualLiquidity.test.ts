@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const config = { url: 'https://supabase.test.invalid', anonKey: 'public-anon-key' };
 const drawing = {
   id: 'drawing-1',
   type: 'line' as const,
@@ -10,7 +9,7 @@ const drawing = {
   note: '',
   created_at: 1_700_000_000
 };
-const row = { drawing_id: drawing.id, symbol: 'BTCUSDT', timeframe: '15m', drawing_type: 'line', payload: drawing, created_at: drawing.created_at, updated_at: drawing.created_at };
+const drawingResponse = { symbol: 'BTCUSDT', timeframe: '15m', drawings: [drawing] };
 
 function jsonResponse(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -25,68 +24,71 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('public manual drawing storage', () => {
-  it('reads the runtime public config and lists drawings scoped by symbol and timeframe', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(config))
-      .mockResolvedValueOnce(jsonResponse([row]));
+describe('server-proxied manual drawing storage', () => {
+  it('lists drawings through the Express API scoped by symbol and timeframe', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(drawingResponse));
     vi.stubGlobal('fetch', fetchMock);
     const { fetchManualDrawings } = await loadModule();
 
     await expect(fetchManualDrawings('btcusdt', '15m')).resolves.toEqual({ symbol: 'BTCUSDT', timeframe: '15m', drawings: [drawing] });
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/manual-liquidity/config');
-    const [url, options] = fetchMock.mock.calls[1];
-    expect(String(url)).toContain('symbol=eq.BTCUSDT');
-    expect(String(url)).toContain('timeframe=eq.15m');
-    expect(String(url)).toContain('limit=5000');
-    expect((options as RequestInit).headers).toMatchObject({ apikey: config.anonKey, Authorization: `Bearer ${config.anonKey}` });
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/manual-liquidity/drawings?symbol=BTCUSDT&timeframe=15m');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('uses idempotent scoped upsert and confirms database representation before success', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(config))
-      .mockResolvedValueOnce(jsonResponse([row]));
+  it('saves a drawing through Express and confirms the server representation before success', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ saved: true, drawing }));
     vi.stubGlobal('fetch', fetchMock);
     const { saveManualDrawing } = await loadModule();
 
-    await expect(saveManualDrawing('BTCUSDT', '15m', drawing)).resolves.toMatchObject({ saved: true, drawing });
-    const [url, options] = fetchMock.mock.calls[1];
-    expect(String(url)).toContain('on_conflict=symbol%2Ctimeframe%2Cdrawing_id');
-    expect((options as RequestInit).method).toBe('POST');
-    expect((options as RequestInit).headers).toMatchObject({ Prefer: 'resolution=merge-duplicates,return=representation' });
-    expect(JSON.parse(String((options as RequestInit).body))).toMatchObject({ drawing_id: 'drawing-1', symbol: 'BTCUSDT', timeframe: '15m' });
+    await expect(saveManualDrawing('BTCUSDT', '15m', drawing)).resolves.toEqual({ saved: true, drawing });
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/manual-liquidity/drawings');
+    expect((options as RequestInit).method).toBe('PUT');
+    expect(JSON.parse(String((options as RequestInit).body))).toMatchObject({ drawing_id: drawing.id, symbol: 'BTCUSDT', timeframe: '15m', ...drawing });
   });
 
-  it('deletes a drawing only within the exact symbol and timeframe', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(config))
-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+  it('deletes a drawing through Express only within the exact symbol and timeframe', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ ok: true, drawingId: 'drawing-1' }));
     vi.stubGlobal('fetch', fetchMock);
     const { deleteManualDrawing } = await loadModule();
 
     await expect(deleteManualDrawing('BTCUSDT', '15m', 'drawing-1')).resolves.toEqual({ ok: true, drawingId: 'drawing-1' });
-    const [url, options] = fetchMock.mock.calls[1];
-    expect(String(url)).toContain('drawing_id=eq.drawing-1');
-    expect(String(url)).toContain('symbol=eq.BTCUSDT');
-    expect(String(url)).toContain('timeframe=eq.15m');
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/manual-liquidity/drawings/drawing-1?symbol=BTCUSDT&timeframe=15m');
     expect((options as RequestInit).method).toBe('DELETE');
   });
 
-  it('does not contact Supabase or report success after config, network, or input failure', async () => {
-    const configFailure = vi.fn().mockResolvedValueOnce(jsonResponse({ error: 'missing anon key' }, 503));
-    vi.stubGlobal('fetch', configFailure);
+  it('does not report success after API, network, validation, or malformed response failure', async () => {
+    const apiFailure = vi.fn().mockResolvedValueOnce(jsonResponse({ error: 'database offline' }, 503));
+    vi.stubGlobal('fetch', apiFailure);
     const first = await loadModule();
-    await expect(first.fetchManualDrawings('BTCUSDT', '15m')).rejects.toThrow('missing anon key');
-    expect(configFailure).toHaveBeenCalledTimes(1);
+    await expect(first.fetchManualDrawings('BTCUSDT', '15m')).rejects.toThrow('database offline');
+    expect(apiFailure).toHaveBeenCalledTimes(1);
 
-    const dbFailure = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(config))
-      .mockResolvedValueOnce(jsonResponse({ message: 'database offline' }, 503));
-    vi.stubGlobal('fetch', dbFailure);
+    const networkFailure = vi.fn().mockRejectedValueOnce(new TypeError('network down'));
+    vi.stubGlobal('fetch', networkFailure);
     const second = await loadModule();
-    await expect(second.saveManualDrawing('BTCUSDT', '15m', drawing)).rejects.toThrow('database offline');
-    expect(dbFailure).toHaveBeenCalledTimes(2);
-    await expect(second.fetchManualDrawings('BTC USDT', '15m')).rejects.toThrow('الرمز أو الفريم غير صالحين');
-    expect(dbFailure).toHaveBeenCalledTimes(2);
+    await expect(second.saveManualDrawing('BTCUSDT', '15m', drawing)).rejects.toThrow('network down');
+    expect(networkFailure).toHaveBeenCalledTimes(1);
+
+    const malformed = vi.fn().mockResolvedValueOnce(jsonResponse({ drawings: [] }));
+    vi.stubGlobal('fetch', malformed);
+    const third = await loadModule();
+    await expect(third.fetchManualDrawings('BTCUSDT', '15m')).rejects.toThrow('لا يطابق الرمز');
+    await expect(third.fetchManualDrawings('BTC USDT', '15m')).rejects.toThrow('الرمز أو الفريم غير صالحين');
+    expect(malformed).toHaveBeenCalledTimes(1);
+  });
+
+  it('never sends a request to a database REST endpoint or asks for a runtime public config', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(drawingResponse));
+    vi.stubGlobal('fetch', fetchMock);
+    const { fetchManualDrawings } = await loadModule();
+    await fetchManualDrawings('BTCUSDT', '15m');
+    for (const [url] of fetchMock.mock.calls) {
+      expect(String(url)).toMatch(/^\/api\/manual-liquidity\//);
+      expect(String(url)).not.toContain('/rest/v1');
+      expect(String(url)).not.toContain('/config');
+    }
   });
 });

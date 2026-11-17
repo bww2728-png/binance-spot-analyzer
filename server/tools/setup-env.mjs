@@ -9,6 +9,8 @@
  *                      --secret sb_secret_...
  *
  * أو بلا وسائط فيسأل تفاعلياً (والسطر السري يُكتب بلا صدى على الشاشة).
+ * لا يضبط `SUPABASE_SERVICE_ROLE_CONFIRMED=1` تلقائياً: هذا إقرار بأن ترحيلات
+ * `service_role` فُحصت في القاعدة، ووجوده لا يثبتها.
  * أو من البيئة مباشرة: SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY.
  *
  * السلوك:
@@ -189,7 +191,8 @@ const main = async () => {
     SUPABASE_ANON_KEY: publishable,
     VITE_SUPABASE_PUBLISHABLE_KEY: publishable,
     SUPABASE_SERVICE_ROLE_KEY: secret,
-    SUPABASE_SERVICE_ROLE_CONFIRMED: '1',
+    // لا تفترض أن ترحيلات service_role مطبقة؛ التفعيل قرار صريح بعد فحص القاعدة.
+    SUPABASE_SERVICE_ROLE_CONFIRMED: cur.get('SUPABASE_SERVICE_ROLE_CONFIRMED') || '0',
     ...(cur.get('LIGHT_MODE') ? { LIGHT_MODE: cur.get('LIGHT_MODE') } : {})
   });
 

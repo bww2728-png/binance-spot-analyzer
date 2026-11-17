@@ -18,6 +18,8 @@ import './ManualLiquidityWorkspace.css';
 type SaveState = 'idle' | 'loading' | 'saved' | 'saving' | 'failed' | 'unsaved';
 type HistoryEntry = { before: ManualDrawing[]; after: ManualDrawing[] };
 type Mutation = { operation: 'save' | 'delete'; drawingId: string; drawing: ManualDrawing | null };
+const MUTATION_RETRY_MS = 2_000;
+const MAX_MUTATION_RETRY_MS = 30_000;
 
 const SYMBOL_KEY = 'legacy-manual-liquidity-symbol-v1';
 const TIMEFRAME_KEY = 'legacy-manual-liquidity-timeframe-v1';
@@ -78,16 +80,28 @@ export default function ManualLiquidityWorkspace() {
   const pendingCount = pendingRef.current.size;
   const latestTime = candleData?.candles.at(-1)?.time ?? null;
 
+  const retryDelayRef = useRef(new Map<string, number>());
+  const retryTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const mountedRef = useRef(true);
+  useEffect(() => () => {
+    mountedRef.current = false;
+    for (const timer of retryTimersRef.current.values()) clearTimeout(timer);
+    retryTimersRef.current.clear();
+  }, []);
   const applyMutation = useCallback((currentSymbol: string, currentTimeframe: string, mutation: Mutation) => {
     const key = `${currentSymbol}|${currentTimeframe}|${mutation.drawingId}`;
     const existing = inFlightRef.current.get(key);
     if (existing?.mutation === mutation) return existing.promise;
     const previous = existing?.promise ?? Promise.resolve(true);
+    const retryTimer = retryTimersRef.current.get(key);
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimersRef.current.delete(key);
     const promise = previous.catch(() => false).then(async () => {
       try {
         if (mutation.operation === 'save' && mutation.drawing) await saveManualDrawing(currentSymbol, currentTimeframe, mutation.drawing);
         else await deleteManualDrawing(currentSymbol, currentTimeframe, mutation.drawingId);
         pendingRef.current.delete(key);
+        retryDelayRef.current.delete(key);
         if (scheduledRef.current.get(key)?.mutation === mutation) scheduledRef.current.delete(key);
         await clearPendingManualMutation(currentSymbol, currentTimeframe, mutation.drawingId).catch(() => undefined);
         if (activeContextRef.current.symbol === currentSymbol && activeContextRef.current.timeframe === currentTimeframe && pendingRef.current.size === 0) {
@@ -98,7 +112,9 @@ export default function ManualLiquidityWorkspace() {
       } catch (error) {
         pendingRef.current.set(key, mutation);
         await queueManualMutation({ ...mutation, symbol: currentSymbol, timeframe: currentTimeframe }).catch(() => undefined);
-        if (activeContextRef.current.symbol === currentSymbol && activeContextRef.current.timeframe === currentTimeframe) {
+        const delayMs = Math.min(Math.max(MUTATION_RETRY_MS, retryDelayRef.current.get(key) ?? MUTATION_RETRY_MS), MAX_MUTATION_RETRY_MS);
+        retryDelayRef.current.set(key, Math.min(delayMs * 2, MAX_MUTATION_RETRY_MS));
+        if (mountedRef.current && activeContextRef.current.symbol === currentSymbol && activeContextRef.current.timeframe === currentTimeframe) {
           setSaveState('failed');
           setSaveMessage(`لم يؤكد الخادم الحفظ؛ ستتم إعادة المحاولة: ${errorText(error)}`);
         }
@@ -106,7 +122,18 @@ export default function ManualLiquidityWorkspace() {
       }
     });
     inFlightRef.current.set(key, { mutation, promise });
-    void promise.finally(() => {
+    void promise.then((ok) => {
+      if (!ok || !mountedRef.current || pendingRef.current.get(key) !== mutation) return;
+      const delayMs = retryDelayRef.current.get(key) ?? MUTATION_RETRY_MS;
+      const timer = setTimeout(() => {
+        retryTimersRef.current.delete(key);
+        const pending = pendingRef.current.get(key);
+        if (!pending || !mountedRef.current) return;
+        void applyMutation(currentSymbol, currentTimeframe, pending);
+      }, delayMs);
+      timersRef.current.set(key, timer);
+      retryTimersRef.current.set(key, timer);
+    }).finally(() => {
       if (inFlightRef.current.get(key)?.promise === promise) inFlightRef.current.delete(key);
     });
     return promise;
@@ -134,6 +161,9 @@ export default function ManualLiquidityWorkspace() {
       });
       const existingTimer = timersRef.current.get(key);
       if (existingTimer) clearTimeout(existingTimer);
+      const retryTimer = retryTimersRef.current.get(key);
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimersRef.current.delete(key);
       timersRef.current.set(key, setTimeout(() => {
         timersRef.current.delete(key);
         const scheduled = scheduledRef.current.get(key);

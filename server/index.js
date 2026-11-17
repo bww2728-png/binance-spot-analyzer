@@ -30,7 +30,7 @@ import { evaluateReadiness } from './readiness.mjs';
 import { cpus } from 'node:os';
 import { createRateLimiter } from './net/limiter.mjs';
 import {
-  setRateLimiter, storageConfigured, isUsingServiceRole, publicKeyConfigured, getPublicSupabaseConfig
+  setRateLimiter, storageConfigured, isUsingServiceRole, publicKeyConfigured
 } from './db.js';
 import { buildVerdictRow, builtinBases } from './shariah.mjs';
 import { createWorkerPool } from './services/workerPool.mjs';
@@ -1963,8 +1963,7 @@ const manualLiquidity = createManualLiquidityService({
   }
 });
 app.use('/api/manual-liquidity', createManualLiquidityRouter({
-  getService: () => manualLiquidity,
-  getPublicConfig: getPublicSupabaseConfig
+  getService: () => manualLiquidity
 }));
 
 app.get('/api/liquidity-zones/:id', handle(async (req, res) => {
